@@ -1,0 +1,23 @@
+{
+  "name": "@warehouse/loadtest",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@google-cloud/firestore": "^7.11.0",
+    "@google/genai": "^1.0.0",
+    "@warehouse/protocol": "*",
+    "ws": "^8.18.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@warehouse/armor": "*",
+    "@warehouse/lobby": "*",
+    "@warehouse/site": "*"
+  }
+}

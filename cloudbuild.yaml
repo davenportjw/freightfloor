@@ -1,0 +1,54 @@
+steps:
+  - id: 'build-site'
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'Dockerfile.site'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/warehouse/site:${_TAG}'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/warehouse/site:latest'
+      - '.'
+    waitFor: ['-']
+
+  - id: 'build-lobby'
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'Dockerfile.lobby'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/warehouse/lobby:${_TAG}'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/warehouse/lobby:latest'
+      - '.'
+    waitFor: ['-']
+
+  - id: 'build-loadtest'
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'Dockerfile.loadtest'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/warehouse/loadtest:${_TAG}'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/warehouse/loadtest:latest'
+      - '.'
+    waitFor: ['-']
+
+images:
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/warehouse/site:${_TAG}'
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/warehouse/site:latest'
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/warehouse/lobby:${_TAG}'
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/warehouse/lobby:latest'
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/warehouse/loadtest:${_TAG}'
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/warehouse/loadtest:latest'
+
+substitutions:
+  _TAG: 'latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'

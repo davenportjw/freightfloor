@@ -1,0 +1,14 @@
+{
+  "name": "@warehouse/sprites",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -b",
+    "generate": "tsc -b && node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.68"
+  }
+}

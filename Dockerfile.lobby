@@ -1,0 +1,59 @@
+# Stage 1: Build
+FROM node:24-slim AS builder
+
+WORKDIR /app
+
+COPY package.json package-lock.json* tsconfig.base.json ./
+COPY packages/protocol/package.json packages/protocol/tsconfig.json ./packages/protocol/
+COPY packages/armor/package.json packages/armor/tsconfig.json ./packages/armor/
+COPY packages/sim/package.json packages/sim/tsconfig.json ./packages/sim/
+COPY tools/sprites/package.json tools/sprites/tsconfig.json ./tools/sprites/
+COPY tools/loadtest/package.json ./tools/loadtest/
+COPY tools/smoke/package.json ./tools/smoke/
+COPY apps/client/package.json apps/client/tsconfig.json ./apps/client/
+COPY apps/lobby/package.json apps/lobby/tsconfig.json ./apps/lobby/
+COPY apps/site/package.json ./apps/site/
+
+RUN npm ci --include-workspace-root \
+    -w @warehouse/protocol \
+    -w @warehouse/armor \
+    -w @warehouse/sim \
+    -w @warehouse/sprites \
+    -w @warehouse/client \
+    -w @warehouse/lobby
+
+COPY packages/protocol ./packages/protocol
+COPY packages/armor ./packages/armor
+COPY packages/sim ./packages/sim
+COPY tools/sprites ./tools/sprites
+COPY apps/client ./apps/client
+COPY apps/lobby ./apps/lobby
+
+RUN npm run build -w @warehouse/protocol && \
+    npm run build -w @warehouse/armor && \
+    npm run build -w @warehouse/sim && \
+    npm run build -w @warehouse/sprites && \
+    npm run sprites --if-present && \
+    npm run build -w @warehouse/client && \
+    npm run build -w @warehouse/lobby
+
+# Stage 2: Production Runtime
+FROM node:24-slim AS runner
+
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=8080
+
+COPY --from=builder /app/package.json /app/package-lock.json* ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/packages/protocol/package.json ./packages/protocol/
+COPY --from=builder /app/packages/protocol/dist ./packages/protocol/dist
+COPY --from=builder /app/packages/armor/package.json ./packages/armor/
+COPY --from=builder /app/packages/armor/dist ./packages/armor/dist
+COPY --from=builder /app/apps/client/dist ./apps/client/dist
+COPY --from=builder /app/apps/lobby/package.json ./apps/lobby/
+COPY --from=builder /app/apps/lobby/dist ./apps/lobby/dist
+
+EXPOSE 8080
+
+CMD ["node", "apps/lobby/dist/index.js"]

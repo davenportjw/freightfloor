@@ -1,0 +1,719 @@
+import { GoogleGenAI } from '@google/genai';
+import { assertNoUntrustedText, sanitiseOutputText } from '@warehouse/armor';
+import {
+  CardsDecisionSchema,
+  ContractDecisionSchema,
+  GEMINI_RESPONSE_SCHEMAS,
+  HazardDecisionSchema,
+  TacticsDecisionSchema,
+  type BrainHealthMessage,
+  type DecisionKind,
+  type SiteId,
+} from '@warehouse/protocol';
+import {
+  applyDecision,
+  clearBrainError,
+  markBrainError,
+  type CardOption,
+  type ContractOption,
+  type Decision,
+  type DecisionRequest,
+  type HazardOption,
+  type TacticsOption,
+  type World,
+} from '@warehouse/sim';
+import {
+  AGENT_DAILY_BUDGET_USD,
+  JOURNAL_TTL_MS,
+  type DecisionJournalEntry,
+  type PersistenceStore,
+} from './persistence.js';
+
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
+export const DEFAULT_GEMINI_LOCATION = 'global';
+export const DEFAULT_GCP_PROJECT = 'davenport-boutique';
+export const MAX_CONCURRENT_BRAIN_CALLS = 8;
+export const BRAIN_ERROR_BACKOFF_MS = 3000;
+export const BRAIN_ERROR_BACKOFF_GAME_MIN = 3.0;
+
+export interface BrainHealth {
+  ok: boolean;
+  model: string;
+  calls1m: number;
+  p50Ms: number;
+  p50ms: number;
+  p95Ms: number;
+  errors1m: number;
+  tokensIn1m: number;
+  tokensOut1m: number;
+  armorBlocks1h: number;
+  budgetLeftUsd: number;
+  budgetPaused: boolean;
+}
+
+export interface BrainDecisionBroadcast {
+  type: 'brainDecision';
+  reqId: number;
+  agentId: number;
+  kind: DecisionKind;
+  decision: Record<string, unknown>;
+  note: string;
+  latencyMs: number;
+  tokensIn: number;
+  tokensOut: number;
+  model: string;
+}
+
+const KIND_PRIORITY: Record<DecisionKind, number> = {
+  hazard: 0,
+  contract: 1,
+  cards: 2,
+  tactics: 3,
+};
+
+export interface RawBrainResponse {
+  text: string;
+  tokensIn: number;
+  tokensOut: number;
+  model?: string;
+}
+
+export interface BrainModelClient {
+  generateDecision(params: {
+    kind: DecisionKind;
+    systemInstruction: string;
+    prompt: string;
+    responseSchema: unknown;
+  }): Promise<RawBrainResponse>;
+}
+
+export type GeminiBrainClient = BrainModelClient;
+
+/**
+ * Production Vertex AI Gemini 3.8 Flash client using Application Default Credentials (ADC).
+ * Never reads or checks GEMINI_API_KEY.
+ */
+export class VertexGeminiBrainClient implements BrainModelClient {
+  private readonly ai: GoogleGenAI;
+  public readonly model: string;
+
+  constructor(opts?: { projectId?: string; location?: string; model?: string }) {
+    const project = opts?.projectId ?? process.env.GCP_PROJECT_ID ?? DEFAULT_GCP_PROJECT;
+    const location = opts?.location ?? process.env.GEMINI_LOCATION ?? DEFAULT_GEMINI_LOCATION;
+    this.model = opts?.model ?? process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL;
+    this.ai = new GoogleGenAI({
+      vertexai: true,
+      project,
+      location,
+    });
+  }
+
+  async generateDecision(params: {
+    kind: DecisionKind;
+    systemInstruction: string;
+    prompt: string;
+    responseSchema: unknown;
+  }): Promise<RawBrainResponse> {
+    const res = await this.ai.models.generateContent({
+      model: this.model,
+      contents: params.prompt,
+      config: {
+        systemInstruction: params.systemInstruction,
+        temperature: 0.2,
+        maxOutputTokens: 120,
+        thinkingConfig: { thinkingBudget: 0 },
+        responseMimeType: 'application/json',
+        abortSignal: AbortSignal.timeout(15_000),
+      },
+    });
+
+    const text = res.text ?? '';
+    if (!text) {
+      throw new Error('Empty response text from Gemini 3.8 Flash');
+    }
+
+    const tokensIn = res.usageMetadata?.promptTokenCount ?? 0;
+    const tokensOut = res.usageMetadata?.candidatesTokenCount ?? 0;
+    return {
+      text,
+      tokensIn,
+      tokensOut,
+      model: this.model,
+    };
+  }
+}
+
+export function numericAgentId(agentId: string | number): number {
+  if (typeof agentId === 'number') return agentId;
+  const digits = agentId.replace(/\D+/g, '');
+  return digits ? Number.parseInt(digits, 10) : 0;
+}
+
+/**
+ * Renders a strictly numeric/enum prompt for an agent DecisionRequest.
+ * Never interpolates player display names or any untrusted user text.
+ */
+export function renderDecisionPrompt(
+  world: World,
+  req: DecisionRequest,
+  extraUntrustedStrings: readonly string[] = [],
+): { systemInstruction: string; prompt: string } {
+  const ctx = req.context;
+  const systemInstruction = [
+    `You are the onboard Gemini 3.8 Flash brain for autonomous warehouse vehicle ${ctx.agentId}.`,
+    `Persona archetype: ${ctx.persona}. Vehicle type: ${ctx.vehicleType}.`,
+    `Choose strictly from the provided options and return compact JSON matching the requested format.`,
+    `Keep reason/note under 90 characters, plain ASCII, no URLs or markdown.`,
+  ].join(' ');
+
+  let body = '';
+  if (req.kind === 'contract') {
+    const opts = req.options as ContractOption[];
+    const lines = opts.map(
+      (o) =>
+        `- orderId="${o.orderId}" bay=${o.bay} zone=${o.district} dist=${o.distance} slackMin=${o.slack} val=${o.value} p0=${o.p0 ? 1 : 0} xfer=${o.isTransfer ? 1 : 0} cong=${o.congestion} claimant=${o.claimant ?? 'none'}`,
+    );
+    body = [
+      `Decision: contract`,
+      `Agent: ${ctx.agentId} (${ctx.persona}) at (${ctx.tile.x},${ctx.tile.y}) battery=${Math.round(ctx.battery)}% cap=${ctx.capacity} cargo=${ctx.cargoCount}`,
+      `Candidate orders (MUST pick 1 to ${Math.min(2, Math.max(1, ctx.capacity))} orderId strings from this list):`,
+      ...lines,
+      `Output JSON format: {"orderIds":["${opts[0]?.orderId ?? 1000}"],"reason":"short reason"}`,
+    ].join('\n');
+  } else if (req.kind === 'hazard') {
+    const opts = req.options as HazardOption[];
+    const lines = opts.map(
+      (o) =>
+        `- choice="${o.choice}" detourLen=${o.detourLen ?? 'none'} spillClearsInMin=${o.timeLeft} skidRisk=${o.skidRisk}`,
+    );
+    body = [
+      `Decision: hazard`,
+      `Agent: ${ctx.agentId} (${ctx.persona}) at (${ctx.tile.x},${ctx.tile.y}) battery=${Math.round(ctx.battery)}% cargo=${ctx.cargoCount} slackMin=${ctx.slack ?? 'none'}`,
+      `Spill #${ctx.hazardId ?? 0} ahead at (${ctx.hazardTile?.x ?? 0},${ctx.hazardTile?.y ?? 0}). Allowed choices:`,
+      ...lines,
+      `Output JSON format: {"choice":"reroute"|"wait"|"push","reason":"short reason"}`,
+    ].join('\n');
+  } else if (req.kind === 'tactics') {
+    const opts = req.options as TacticsOption[];
+    const bounds = opts.map((o) => `${o.param}[${o.min}..${o.max},cur=${o.current}]`).join(' ');
+    body = [
+      `Decision: tactics`,
+      `Agent: ${ctx.agentId} (${ctx.persona}) shiftShipped=${ctx.shiftShipped} shiftPts=${Math.round(ctx.shiftPts)} incidents=${ctx.incidents} nearMisses=${ctx.nearMisses} difficulty=${ctx.difficulty}`,
+      `Tune parameters within bounds: ${bounds}`,
+      `Output JSON format: {"speed":1.05,"buffer":2,"respect":0.7,"chargeAt":20,"batch":1,"note":"short note"}`,
+    ].join('\n');
+  } else {
+    const opts = req.options as CardOption[];
+    const lines = opts.map(
+      (o) => `- id="${o.id}" type=${o.cardType} pts=${o.pts} goal=${o.goal} title="${o.title}"`,
+    );
+    body = [
+      `Decision: cards`,
+      `Agent: ${ctx.agentId} (${ctx.persona}) difficulty=${ctx.difficulty}`,
+      `Offered shift cards (keep 1 to 2 valid id strings from this list):`,
+      ...lines,
+      `Output JSON format: {"keep":["${opts[0]?.id ?? 'C1'}"],"reason":"short reason"}`,
+    ].join('\n');
+  }
+
+  // Collect all connected player display names to enforce the untrusted-text isolation invariant
+  const untrusted: string[] = [...extraUntrustedStrings];
+  for (const session of world.players.values()) {
+    if (session.name && session.name.trim().length >= 2 && !/^P\d+$/i.test(session.name.trim())) {
+      untrusted.push(session.name);
+    }
+  }
+  for (const v of world.vehicles) {
+    if (
+      v.human &&
+      v.driver &&
+      v.driver !== 'you' &&
+      v.driver.trim().length >= 2 &&
+      !/^P\d+$/i.test(v.driver.trim())
+    ) {
+      untrusted.push(v.driver);
+    }
+  }
+
+  assertNoUntrustedText(systemInstruction, untrusted);
+  assertNoUntrustedText(body, untrusted);
+
+  return { systemInstruction, prompt: body };
+}
+
+/**
+ * Parses and validates the JSON response from Gemini (or test stub) and maps it to @warehouse/sim Decision.
+ */
+export function parseAndMapDecision(
+  req: DecisionRequest,
+  rawJsonText: string,
+): { simDecision: Decision; wireDecision: Record<string, unknown>; note: string } {
+  const parsed = JSON.parse(rawJsonText) as Record<string, unknown>;
+
+  if (req.kind === 'contract') {
+    // Support both protocol schema ({ orderIds: string[], reason }) and legacy ({ orderId, secondOrderId?, note })
+    let rawIds: unknown[] = [];
+    if (Array.isArray(parsed.orderIds)) {
+      rawIds = parsed.orderIds;
+    } else if (parsed.orderId !== undefined) {
+      rawIds = [
+        parsed.orderId,
+        ...(parsed.secondOrderId !== undefined ? [parsed.secondOrderId] : []),
+      ];
+    }
+    const normalized = {
+      orderIds: rawIds.map((id) => String(id).replace(/^#/, '')),
+      reason: String(parsed.reason ?? parsed.note ?? 'Claimed contract'),
+    };
+    const valid = ContractDecisionSchema.parse(normalized);
+    if (valid.orderIds.length === 0) {
+      throw new Error('Contract decision must select at least 1 orderId');
+    }
+    const note = sanitiseOutputText(valid.reason, 120) || 'Claimed contract';
+    const offeredIds = new Set((req.options as ContractOption[]).map((o) => o.orderId));
+    const firstId = Number.parseInt(valid.orderIds[0], 10);
+    if (!Number.isFinite(firstId)) {
+      throw new Error(`Invalid numeric orderId "${valid.orderIds[0]}"`);
+    }
+    const orderIds: number[] = [firstId];
+    if (valid.orderIds.length > 1 && req.context.capacity >= 2) {
+      const secondId = Number.parseInt(valid.orderIds[1], 10);
+      if (Number.isFinite(secondId) && secondId !== firstId && offeredIds.has(secondId)) {
+        orderIds.push(secondId);
+      }
+    }
+    return {
+      simDecision: { kind: 'contract', orderIds, reason: note },
+      wireDecision: {
+        orderIds: orderIds.map(String),
+        orderId: orderIds[0],
+        ...(orderIds[1] ? { secondOrderId: orderIds[1] } : {}),
+        reason: note,
+        note,
+      },
+      note,
+    };
+  }
+
+  if (req.kind === 'hazard') {
+    const normalized = {
+      choice: parsed.choice ?? parsed.action,
+      reason: String(parsed.reason ?? parsed.note ?? `Hazard: ${String(parsed.choice ?? parsed.action)}`),
+    };
+    const valid = HazardDecisionSchema.parse(normalized);
+    const note = sanitiseOutputText(valid.reason, 120) || `Hazard: ${valid.choice}`;
+    return {
+      simDecision: { kind: 'hazard', choice: valid.choice, reason: note },
+      wireDecision: { choice: valid.choice, action: valid.choice, reason: note, note },
+      note,
+    };
+  }
+
+  if (req.kind === 'tactics') {
+    const normalized = {
+      ...parsed,
+      note: String(parsed.note ?? parsed.reason ?? 'Retuned tactics'),
+    };
+    const valid = TacticsDecisionSchema.parse(normalized);
+    const note = sanitiseOutputText(valid.note, 120) || 'Retuned tactics';
+    return {
+      simDecision: {
+        kind: 'tactics',
+        speed: valid.speed,
+        buffer: valid.buffer,
+        respect: valid.respect,
+        chargeAt: valid.chargeAt,
+        batch: valid.batch,
+        note,
+        reason: note,
+      },
+      wireDecision: {
+        speed: valid.speed,
+        buffer: valid.buffer,
+        respect: valid.respect,
+        chargeAt: valid.chargeAt,
+        batch: valid.batch,
+        note,
+      },
+      note,
+    };
+  }
+
+  // cards
+  const rawKeep = Array.isArray(parsed.keep)
+    ? parsed.keep
+    : Array.isArray(parsed.keepIds)
+      ? parsed.keepIds
+      : [];
+  const normalized = {
+    keep: rawKeep.slice(0, 2).map(String),
+    reason: String(parsed.reason ?? parsed.note ?? 'Selected shift cards'),
+  };
+  const valid = CardsDecisionSchema.parse(normalized);
+  const note = sanitiseOutputText(valid.reason ?? 'Selected shift cards', 120) || 'Selected shift cards';
+  return {
+    simDecision: { kind: 'cards', keep: valid.keep, reason: note },
+    wireDecision: { keep: valid.keep, keepIds: valid.keep, reason: note, note },
+    note,
+  };
+}
+
+interface CallSample {
+  atMs: number;
+  latencyMs: number;
+  tokensIn: number;
+  tokensOut: number;
+}
+
+interface ErrorSample {
+  atMs: number;
+  message: string;
+}
+
+interface ErrorBackoffState {
+  atMs: number;
+  gameMin: number;
+}
+
+export interface AgentBrainSchedulerOptions {
+  siteId: SiteId;
+  client?: BrainModelClient;
+  persistence: PersistenceStore;
+  modelName?: string;
+  maxConcurrent?: number;
+  retryDelayMs?: number;
+  getArmorBlocks1h?: (nowMs: number) => number;
+  onDecisionBroadcast?: (msg: BrainDecisionBroadcast) => void;
+  onHealthBroadcast?: (health: BrainHealthMessage) => void;
+}
+
+export class AgentBrainScheduler {
+  private readonly siteId: SiteId;
+  private readonly client: BrainModelClient;
+  private readonly persistence: PersistenceStore;
+  public readonly modelName: string;
+  private readonly maxConcurrent: number;
+  private readonly retryDelayMs: number;
+  private readonly getArmorBlocks1h?: (nowMs: number) => number;
+  private readonly onDecisionBroadcast?: (msg: BrainDecisionBroadcast) => void;
+  private readonly onHealthBroadcast?: (health: BrainHealthMessage) => void;
+
+  private readonly inFlightReqIds = new Set<string>();
+  private readonly callSamples: CallSample[] = [];
+  private readonly errorSamples: ErrorSample[] = [];
+  private readonly agentErrorBackoff = new Map<string, ErrorBackoffState>();
+  private budgetPaused = false;
+  private lastBudgetLeftUsd = AGENT_DAILY_BUDGET_USD;
+  private reqCounter = 0;
+
+  constructor(opts: AgentBrainSchedulerOptions) {
+    this.siteId = opts.siteId;
+    this.modelName = opts.modelName ?? process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL;
+    this.client = opts.client ?? new VertexGeminiBrainClient({ model: this.modelName });
+    this.persistence = opts.persistence;
+    this.maxConcurrent = opts.maxConcurrent ?? MAX_CONCURRENT_BRAIN_CALLS;
+    this.retryDelayMs = opts.retryDelayMs ?? 120;
+    this.getArmorBlocks1h = opts.getArmorBlocks1h;
+    this.onDecisionBroadcast = opts.onDecisionBroadcast;
+    this.onHealthBroadcast = opts.onHealthBroadcast;
+  }
+
+  public getInFlightCount(): number {
+    return this.inFlightReqIds.size;
+  }
+
+  private pruneSamples(nowMs: number): void {
+    const cutoff = nowMs - 60_000;
+    while (this.callSamples.length > 0 && this.callSamples[0].atMs < cutoff) {
+      this.callSamples.shift();
+    }
+    while (this.errorSamples.length > 0 && this.errorSamples[0].atMs < cutoff) {
+      this.errorSamples.shift();
+    }
+  }
+
+  public getBrainHealth(nowMs: number = Date.now()): BrainHealth {
+    this.pruneSamples(nowMs);
+    const latencies = this.callSamples.map((s) => s.latencyMs).sort((a, b) => a - b);
+    const p50Ms =
+      latencies.length > 0 ? Math.round(latencies[Math.floor((latencies.length - 1) * 0.5)]) : 0;
+    const p95Ms =
+      latencies.length > 0 ? Math.round(latencies[Math.floor((latencies.length - 1) * 0.95)]) : 0;
+    const tokensIn1m = this.callSamples.reduce((acc, s) => acc + s.tokensIn, 0);
+    const tokensOut1m = this.callSamples.reduce((acc, s) => acc + s.tokensOut, 0);
+    const errors1m = this.errorSamples.length;
+
+    return {
+      ok: !this.budgetPaused && errors1m === 0,
+      model: this.modelName,
+      calls1m: this.callSamples.length,
+      p50Ms,
+      p50ms: p50Ms,
+      p95Ms,
+      errors1m,
+      tokensIn1m,
+      tokensOut1m,
+      armorBlocks1h: this.getArmorBlocks1h ? this.getArmorBlocks1h(nowMs) : 0,
+      budgetLeftUsd: this.lastBudgetLeftUsd,
+      budgetPaused: this.budgetPaused,
+    };
+  }
+
+  public getBrainHealthMessage(
+    nowMs: number = Date.now(),
+    armorBlocks1hOverride?: number,
+  ): BrainHealthMessage {
+    const h = this.getBrainHealth(nowMs);
+    return {
+      type: 'brainHealth',
+      ok: h.ok,
+      model: h.model,
+      errors1m: h.errors1m,
+      p50ms: h.p50ms,
+      budgetLeftUsd: h.budgetLeftUsd,
+      armorBlocks1h: armorBlocks1hOverride ?? h.armorBlocks1h,
+    };
+  }
+
+  /**
+   * Clears expired agent brainError holds after the 3s backoff window so the agent can retry on the next cycle.
+   */
+  public recoverErroredAgents(world: World, nowMs: number = Date.now()): void {
+    for (const v of world.vehicles) {
+      if (!v.brainError) {
+        this.agentErrorBackoff.delete(v.id);
+        continue;
+      }
+      const stamp = this.agentErrorBackoff.get(v.id);
+      if (!stamp) {
+        this.agentErrorBackoff.set(v.id, { atMs: nowMs, gameMin: world.t });
+        continue;
+      }
+      const wallElapsed = nowMs - stamp.atMs;
+      const gameElapsed = world.t - stamp.gameMin;
+      if (wallElapsed >= BRAIN_ERROR_BACKOFF_MS || gameElapsed >= BRAIN_ERROR_BACKOFF_GAME_MIN) {
+        this.agentErrorBackoff.delete(v.id);
+        clearBrainError(world, v.id);
+      }
+    }
+  }
+
+  /**
+   * Drains pending decisions from `world.pendingDecisions` in priority order:
+   * `hazard` > `contract` > `cards` > `tactics`, up to `maxConcurrent` (8) in-flight requests.
+   * Zero Gemini calls when `world.phase !== 'running'`.
+   */
+  public async drainQueue(
+    world: World,
+    nowMs: number = Date.now(),
+    extraUntrustedStrings: readonly string[] = [],
+  ): Promise<void> {
+    if (world.phase !== 'running') {
+      return;
+    }
+
+    this.recoverErroredAgents(world, nowMs);
+
+    // Drop expired requests whose deadline < world.t
+    for (let i = world.pendingDecisions.length - 1; i >= 0; i--) {
+      const req = world.pendingDecisions[i];
+      if (req.deadline < world.t && !this.inFlightReqIds.has(req.id)) {
+        world.pendingDecisions.splice(i, 1);
+      }
+    }
+
+    // Sort available (not yet in-flight) requests by priority (hazard > contract > cards > tactics), then tIssued
+    const candidates = world.pendingDecisions
+      .filter((r) => !this.inFlightReqIds.has(r.id))
+      .sort((a, b) => {
+        const pa = KIND_PRIORITY[a.kind] ?? 99;
+        const pb = KIND_PRIORITY[b.kind] ?? 99;
+        if (pa !== pb) return pa - pb;
+        return a.tIssued - b.tIssued;
+      });
+
+    const dispatched: Promise<void>[] = [];
+    for (const req of candidates) {
+      if (this.inFlightReqIds.size >= this.maxConcurrent) {
+        break;
+      }
+      this.inFlightReqIds.add(req.id);
+      const task = this.executeRequest(world, req, nowMs, extraUntrustedStrings).finally(() => {
+        this.inFlightReqIds.delete(req.id);
+      });
+      dispatched.push(task);
+    }
+
+    if (dispatched.length > 0) {
+      await Promise.all(dispatched);
+    }
+  }
+
+  private async executeRequest(
+    world: World,
+    req: DecisionRequest,
+    nowMs: number,
+    extraUntrustedStrings: readonly string[],
+  ): Promise<void> {
+    if (world.phase !== 'running') {
+      return;
+    }
+
+    // Check daily $25.00 agent budget ledger BEFORE calling Gemini
+    const budget = await this.persistence.checkBudget('agent', nowMs);
+    this.budgetPaused = !budget.allowed;
+    this.lastBudgetLeftUsd = Math.max(0, Number((budget.capUsd - budget.spentUsd).toFixed(4)));
+    if (!budget.allowed) {
+      const errMsg = `Daily agent budget exhausted ($${budget.spentUsd.toFixed(2)}/$${budget.capUsd.toFixed(2)})`;
+      await this.recordBrainFailure(world, req, errMsg, 0, nowMs);
+      return;
+    }
+
+    const { systemInstruction, prompt } = renderDecisionPrompt(world, req, extraUntrustedStrings);
+    const responseSchema = GEMINI_RESPONSE_SCHEMAS[req.kind];
+
+    const startMs = Date.now();
+    let lastError: Error | null = null;
+
+    // 1 initial attempt + 1 retry with jittered backoff (2 total attempts)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt > 0 && this.retryDelayMs > 0) {
+        const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(this.retryDelayMs / 2)));
+        await new Promise((r) => setTimeout(r, this.retryDelayMs + jitter));
+      }
+
+      try {
+        const raw = await this.client.generateDecision({
+          kind: req.kind,
+          systemInstruction,
+          prompt,
+          responseSchema,
+        });
+        const latencyMs = Math.max(1, Date.now() - startMs);
+        const mapped = parseAndMapDecision(req, raw.text);
+
+        // Record token usage in budget ledger
+        const updatedBudget = await this.persistence.recordUsage(
+          'agent',
+          raw.tokensIn,
+          raw.tokensOut,
+          undefined,
+          nowMs,
+        );
+        this.lastBudgetLeftUsd = Math.max(
+          0,
+          Number((updatedBudget.agentCapUsd - updatedBudget.agentSpentUsd).toFixed(4)),
+        );
+        this.budgetPaused = updatedBudget.agentSpentUsd >= updatedBudget.agentCapUsd;
+
+        // Apply decision to simulation
+        const applied = applyDecision(world, req.id, mapped.simDecision, {
+          model: raw.model ?? this.modelName,
+          latencyMs,
+          inputTokens: raw.tokensIn,
+          outputTokens: raw.tokensOut,
+        });
+
+        if (!applied.ok) {
+          if (applied.error === 'stale') {
+            // Order/spill changed while request was in flight; not a brain error
+            return;
+          }
+          throw new Error(applied.detail || `Illegal ${req.kind} decision`);
+        }
+
+        this.callSamples.push({
+          atMs: nowMs,
+          latencyMs,
+          tokensIn: raw.tokensIn,
+          tokensOut: raw.tokensOut,
+        });
+
+        const numericReqId =
+          Number.parseInt(req.id.replace(/\D+/g, ''), 10) || ++this.reqCounter;
+        const agentNum = numericAgentId(req.agentId);
+
+        const journalEntry: DecisionJournalEntry = {
+          id: `${this.siteId}-${req.id}-${nowMs}`,
+          siteId: this.siteId,
+          reqId: numericReqId,
+          agentId: agentNum,
+          agentName: req.agentId,
+          kind: req.kind,
+          promptSummary: prompt.slice(0, 240),
+          decision: mapped.wireDecision,
+          note: mapped.note,
+          model: raw.model ?? this.modelName,
+          latencyMs,
+          tokensIn: raw.tokensIn,
+          tokensOut: raw.tokensOut,
+          createdAt: nowMs,
+          expireAt: nowMs + JOURNAL_TTL_MS,
+        };
+        await this.persistence.appendDecisionJournal(this.siteId, journalEntry);
+
+        if (this.onDecisionBroadcast) {
+          this.onDecisionBroadcast({
+            type: 'brainDecision',
+            reqId: numericReqId,
+            agentId: agentNum,
+            kind: req.kind,
+            decision: mapped.wireDecision,
+            note: mapped.note,
+            latencyMs,
+            tokensIn: raw.tokensIn,
+            tokensOut: raw.tokensOut,
+            model: raw.model ?? this.modelName,
+          });
+        }
+        return;
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+      }
+    }
+
+    // Strict No-Mock Policy: never synthesize a rule-based fallback decision.
+    const latencyMs = Math.max(1, Date.now() - startMs);
+    const errorMsg = lastError ? lastError.message : 'Gemini decision failed';
+    await this.recordBrainFailure(world, req, errorMsg, latencyMs, nowMs);
+  }
+
+  private async recordBrainFailure(
+    world: World,
+    req: DecisionRequest,
+    errorMsg: string,
+    latencyMs: number,
+    nowMs: number,
+  ): Promise<void> {
+    this.errorSamples.push({ atMs: nowMs, message: errorMsg });
+    this.agentErrorBackoff.set(req.agentId, { atMs: nowMs, gameMin: world.t });
+    markBrainError(world, req.agentId, req.id, errorMsg);
+
+    const numericReqId =
+      Number.parseInt(req.id.replace(/\D+/g, ''), 10) || ++this.reqCounter;
+    const agentNum = numericAgentId(req.agentId);
+
+    await this.persistence.appendDecisionJournal(this.siteId, {
+      id: `${this.siteId}-${req.id}-err-${nowMs}`,
+      siteId: this.siteId,
+      reqId: numericReqId,
+      agentId: agentNum,
+      agentName: req.agentId,
+      kind: req.kind,
+      promptSummary: `ERROR: ${errorMsg}`,
+      decision: null,
+      note: `Brain error: ${errorMsg}`.slice(0, 120),
+      model: this.modelName,
+      latencyMs,
+      tokensIn: 0,
+      tokensOut: 0,
+      error: errorMsg,
+      createdAt: nowMs,
+      expireAt: nowMs + JOURNAL_TTL_MS,
+    });
+
+    if (this.onHealthBroadcast) {
+      this.onHealthBroadcast(this.getBrainHealthMessage(nowMs));
+    }
+  }
+}

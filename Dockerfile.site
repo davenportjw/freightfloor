@@ -1,0 +1,53 @@
+# Stage 1: Build
+FROM node:24-slim AS builder
+
+WORKDIR /app
+
+COPY package.json package-lock.json* tsconfig.base.json ./
+COPY packages/protocol/package.json packages/protocol/tsconfig.json ./packages/protocol/
+COPY packages/armor/package.json packages/armor/tsconfig.json ./packages/armor/
+COPY packages/sim/package.json packages/sim/tsconfig.json ./packages/sim/
+COPY apps/client/package.json ./apps/client/
+COPY apps/lobby/package.json ./apps/lobby/
+COPY apps/site/package.json apps/site/tsconfig.json ./apps/site/
+COPY tools/loadtest/package.json ./tools/loadtest/
+COPY tools/smoke/package.json ./tools/smoke/
+COPY tools/sprites/package.json ./tools/sprites/
+
+RUN npm ci --include-workspace-root \
+    -w @warehouse/protocol \
+    -w @warehouse/armor \
+    -w @warehouse/sim \
+    -w @warehouse/site
+
+COPY packages/protocol ./packages/protocol
+COPY packages/armor ./packages/armor
+COPY packages/sim ./packages/sim
+COPY apps/site ./apps/site
+
+RUN npm run build -w @warehouse/protocol && \
+    npm run build -w @warehouse/armor && \
+    npm run build -w @warehouse/sim && \
+    npm run build -w @warehouse/site
+
+# Stage 2: Production Runtime
+FROM node:24-slim AS runner
+
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=8080
+
+COPY --from=builder /app/package.json /app/package-lock.json* ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/packages/protocol/package.json ./packages/protocol/
+COPY --from=builder /app/packages/protocol/dist ./packages/protocol/dist
+COPY --from=builder /app/packages/armor/package.json ./packages/armor/
+COPY --from=builder /app/packages/armor/dist ./packages/armor/dist
+COPY --from=builder /app/packages/sim/package.json ./packages/sim/
+COPY --from=builder /app/packages/sim/dist ./packages/sim/dist
+COPY --from=builder /app/apps/site/package.json ./apps/site/
+COPY --from=builder /app/apps/site/dist ./apps/site/dist
+
+EXPOSE 8080
+
+CMD ["node", "apps/site/dist/index.js"]

@@ -1,0 +1,33 @@
+{
+  "name": "warehouse",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "tools/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "vitest run",
+    "test:sim": "npm test -w @warehouse/sim",
+    "test:protocol": "npm test -w @warehouse/protocol",
+    "test:armor": "npm test -w @warehouse/armor",
+    "test:site": "npm test -w @warehouse/site",
+    "test:lobby": "npm test -w @warehouse/lobby",
+    "sprites": "npm run generate -w @warehouse/sprites"
+  },
+  "dependencies": {
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/ws": "^8.5.14",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.6"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

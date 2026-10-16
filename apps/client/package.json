@@ -1,0 +1,23 @@
+{
+  "name": "@warehouse/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@warehouse/protocol": "*",
+    "@warehouse/sim": "*",
+    "pixi.js": "^8.8.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.7",
+    "tailwindcss": "^4.0.7",
+    "vite": "^6.1.1"
+  }
+}
