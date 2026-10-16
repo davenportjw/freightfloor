@@ -10,12 +10,12 @@ import {
 import { computeSteeringControls } from './steering.js';
 import { extractOrdersFromWire } from './bot.js';
 
-export const PILOT_GEMINI_MODEL = 'gemini-3.8-flash';
-export const DEFAULT_PILOT_BUDGET_USD = 3.0;
+export const PILOT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
+export const DEFAULT_PILOT_BUDGET_USD = 1.5;
 
-// Gemini 3.8 Flash approximate token pricing for budget tracking ($0.15 / 1M in, $0.60 / 1M out)
-const COST_PER_INPUT_TOKEN_USD = 0.15 / 1_000_000;
-const COST_PER_OUTPUT_TOKEN_USD = 0.6 / 1_000_000;
+// Gemini 3.5 Flash-Lite approximate token pricing for budget tracking ($0.075 / 1M in, $0.30 / 1M out)
+const COST_PER_INPUT_TOKEN_USD = 0.075 / 1_000_000;
+const COST_PER_OUTPUT_TOKEN_USD = 0.3 / 1_000_000;
 
 export const PilotPlanSchema = z.discriminatedUnion('action', [
   z.object({
@@ -156,7 +156,7 @@ export class VertexPilotModelClient implements PilotModelClient {
 
         const text = response.text ?? '';
         if (!text) {
-          throw new Error('Empty response from Gemini 3.8 Flash pilot planner');
+          throw new Error(`Empty response from ${this.model} pilot planner`);
         }
         const tokensIn = response.usageMetadata?.promptTokenCount ?? 120;
         const tokensOut = response.usageMetadata?.candidatesTokenCount ?? 40;

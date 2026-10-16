@@ -27,6 +27,11 @@ import {
   NlOrderPipeline,
   renderDecisionPrompt,
   parseAndMapDecision,
+  ALLOWED_GEMINI_MODELS,
+  DEFAULT_GEMINI_MODEL,
+  AGENT_DAILY_BUDGET_USD,
+  NL_COMMAND_DAILY_BUDGET_USD,
+  estimateGeminiFlashCostUsd,
   DEFAULT_TICKET_SECRET,
   MAX_DRIVERS,
   MAX_SOCKETS,
@@ -912,8 +917,8 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     scheduler.recoverErroredAgents(world, t0 + 3_500);
     expect(fl01.brainError).toBeNull();
 
-    // Daily $25.00 budget cap test: exhaust agent budget and verify no Gemini call is made
-    await persistence.recordUsage('agent', 100_000_000, 50_000_000, 30.0, t0 + 4_000);
+    // Daily $12.50 budget cap test: exhaust agent budget and verify no Gemini call is made
+    await persistence.recordUsage('agent', 100_000_000, 50_000_000, 15.0, t0 + 4_000);
     const fl02 = world.vehicles.find((v) => v.id === 'FL-02')!;
     emitTacticsRequest(world, fl02);
     const beforeAttempts = attempts;
@@ -922,7 +927,7 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     expect(fl02.brainError).toContain('Daily agent budget exhausted');
   });
 
-  it('enforces all 7 layers of NlOrderPipeline: fail-closed armor_unavailable, 3-strike 15m mute across clientId & IP, and $3.00 daily budget cap', async () => {
+  it('enforces all 7 layers of NlOrderPipeline: fail-closed armor_unavailable, 3-strike 15m mute across clientId & IP, and $1.50 daily budget cap', async () => {
     const world = createWorld({ siteId: 'den-1', seed: 99, agents: 14 });
     const persistence = new InMemoryPersistenceStore();
     const governor = new FacilityGovernor();
@@ -1039,8 +1044,8 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     expect(cleanRes.executed).toBe(true);
     expect(cleanRes.echo.executed).toBe(true);
 
-    // 4. Exhaust $3.00 daily nlCommand budget -> returns budget_exhausted
-    await persistence.recordUsage('nlCommand', 10_000_000, 5_000_000, 3.5, t0 + 3_000);
+    // 4. Exhaust $1.50 daily nlCommand budget -> returns budget_exhausted
+    await persistence.recordUsage('nlCommand', 10_000_000, 5_000_000, 2.0, t0 + 3_000);
     const budgetRes = await activePipeline.executeNlCommand({
       world,
       clientId: 'clean-manager-2',
@@ -1050,6 +1055,31 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     });
     expect(budgetRes.executed).toBe(false);
     expect(budgetRes.code).toBe('budget_exhausted');
+  });
+
+  it('configures Gemini 3.5 Flash-Lite defaults, Flash-Lite pricing & budget caps, and filters impossible hazard reroutes', () => {
+    expect(DEFAULT_GEMINI_MODEL).toBe('gemini-3.5-flash-lite');
+    expect(ALLOWED_GEMINI_MODELS).toEqual([
+      'gemini-3.8-flash',
+      'gemini-3.5-flash-lite',
+      'gemini-4-argon',
+    ]);
+    expect(AGENT_DAILY_BUDGET_USD).toBe(12.5);
+    expect(NL_COMMAND_DAILY_BUDGET_USD).toBe(1.5);
+    expect(estimateGeminiFlashCostUsd(1_000_000, 1_000_000)).toBeCloseTo(0.375, 5);
+
+    const world = createWorld({ siteId: 'den-1', seed: 101, agents: 4 });
+    const fl01 = world.vehicles.find((v) => v.id === 'FL-01')!;
+    const spill = spawnSpill(world, 10, 10)!;
+    const hazardReq = emitHazardRequestIfNeeded(world, fl01, spill)!;
+    hazardReq.options = [
+      { choice: 'reroute', detourLen: null },
+      { choice: 'wait', waitSec: 12 },
+      { choice: 'clean', bonusPts: 5 },
+    ];
+    const rendered = renderDecisionPrompt(world, hazardReq);
+    expect(rendered.prompt).not.toContain('choice="reroute"');
+    expect(rendered.prompt).toContain('Output JSON format: {"choice":"wait"|"clean"');
   });
 
   it('persists world snapshot and closes sockets with 4001 on gracefulShutdown (SIGTERM)', async () => {

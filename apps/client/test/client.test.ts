@@ -108,7 +108,8 @@ describe('@warehouse/client (M4)', () => {
     expect(v2.py).toBeCloseTo(24.75, 5);
     expect(v2.battery).toBe(72);
     expect(v2.brainError).toBe('Quota limit reached');
-    expect(v2.lastDecision?.reason).toBe('Holding position safely');
+    // A bare lastReason must NOT fabricate a decision (no invented model/latency).
+    expect(v2.lastDecision ?? null).toBeNull();
   });
 
   it('reconciles client-predicted vehicle against server ack and replays unacked inputs', () => {

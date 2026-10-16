@@ -538,6 +538,20 @@ export interface DayHistoryEntry {
   tuned: Tactics;
 }
 
+/** Alias used by the wire protocol (`stats.history`). */
+export type DayRecord = DayHistoryEntry;
+
+/** One Strategy Board row as returned by `board(world)` (trailing 60 game-minutes). */
+export interface BoardRow {
+  strat: StrategyName;
+  vehicles: number;
+  count: number;
+  perHr: number;
+  onTimePct: number | null;
+  incidents: number;
+  kwhPerOrder: number | null;
+}
+
 export interface PlayerSession {
   clientId: string;
   name: string;

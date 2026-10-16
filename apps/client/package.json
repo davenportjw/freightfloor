@@ -12,7 +12,6 @@
   "dependencies": {
     "@warehouse/protocol": "*",
     "@warehouse/sim": "*",
-    "pixi.js": "^8.8.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {

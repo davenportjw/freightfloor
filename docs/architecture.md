@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Warehouse game is an authoritative, always-running, multiplayer distribution network built on Google Cloud Run (`davenport-boutique`), Firestore, Pub/Sub, and Vertex AI (`gemini-3.8-flash`).
+The Warehouse game is an authoritative, always-running, multiplayer distribution network built on Google Cloud Run (`davenport-boutique`), Firestore, Pub/Sub, and Vertex AI (`gemini-3.5-flash-lite`).
 
 Rather than placing 128 forklifts onto a single gridlocked warehouse floor, the network shards players across **four regional warehouse sites** that trade freight pallets with one another:
 - **DEN-1** (`site-den-1`): Home site, runs 24/7 (`min=1`, `IDLE_POLICY=run`, 20 default AI agents).
@@ -30,7 +30,7 @@ flowchart LR
   end
   FS[("Firestore: directory, snapshots, hall, journal, players, budget ledger")]
   PS{{"Pub/Sub: site-transfers"}}
-  GEM["Vertex AI gemini-3.8-flash (global)"]
+  GEM["Vertex AI gemini-3.5-flash-lite (global)"]
   UI -- "HTTPS" --> Lobby
   UI -- "WebSocket with ticket" --> S1
   UI -.-> S2
@@ -58,9 +58,14 @@ sequenceDiagram
   L-->>C: {siteId, wsUrl, ticket (HMAC, 60 s), expiresAt}
   C->>S: WS hello {ticket}
   S->>S: verify ticket, attach player, end break if needed
-  S-->>C: welcome {you, snapshot}
-  S->>F: heartbeat {drivers, spectators, state} every 5 s
+  S-->>C: welcome {you, snapshot (own hand only), limits}
+  S->>F: heartbeat {drivers, spectators, state, maxDrivers} every 5 s
 ```
+
+### Delta fan-out
+
+- **Light deltas** (9 of every 10 background ticks) are one shared JSON payload broadcast to every socket.
+- **Full deltas** (1 Hz) share one serialized head plus shared `stats` (including the Strategy Board, recomputed at most once per second). The site then splices per-connection fields into each frame: the recipient's own card hand only; `seriesAppend` / `history` / `hall` sent incrementally against what that socket already has; and the sparse `heat` layer every 2 s, but only to sockets that sent `{type:'layers', traffic:true}`. Inspector detail (`tactics`, `path`, `decision`, …) rides on full deltas only. See `docs/protocol.md` §3.2.
 
 ### Placement Order
 When a player requests `POST /api/join { name, clientId, prefer? }`:
@@ -123,4 +128,4 @@ All persistent state is stored in Firestore Native (`us-central1`):
 | `sites/{siteId}/hall/{entryId}` | Site-specific Hall of Fame shift records and top scores. |
 | `journal/{entryId}` | Decision and prompt-armor audit journal (`model`, `kind`, `latencyMs`, `tokens`, `reason`, or armor verdict). Configured with a **7-day Firestore TTL policy** on the `expireAt` field. |
 | `players/{clientId}` | Cross-site player profile: `{ clientId, name, lifetimePoints, deliveries, transfersCompleted, strikes, mutedUntil, updatedAt }`. Shift points remain on the shard; lifetime stats follow `clientId` across site transfers. |
-| `budget/{yyyy-mm-dd}` | Global daily Vertex AI spend ledger shared across all sites (`max $25.00/day` total, with a dedicated `$3.00/day` sub-slice for `nlCommand` typed orders). Sites reserve budget in 1-minute transactional blocks based on measured token prices. |
+| `budget/{yyyy-mm-dd}` | Global daily Vertex AI spend ledger shared across all sites (`max $12.50/day` agent cap, with a dedicated `$1.50/day` cap for `nlCommand` typed orders). Sites reserve budget in 1-minute transactional blocks based on measured token prices. |

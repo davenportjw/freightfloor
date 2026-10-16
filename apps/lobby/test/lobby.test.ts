@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { verifyTicket } from '@warehouse/protocol';
+import { SiteStatusSchema, verifyTicket } from '@warehouse/protocol';
 import {
   buildLobbyServer,
   CSP_HEADER,
   InMemoryLobbyStore,
+  MAX_DRIVERS_PER_SITE,
   type StoredSiteDoc,
 } from '../src/index.js';
 
@@ -298,6 +299,33 @@ describe('@warehouse/lobby — M6 placement, ticket signing, and network directo
       'Grace Hopper',
       'Ada Lovelace',
     ]);
+
+    await app.close();
+  });
+
+  it('7. /api/network reports maxDrivers from the site heartbeat, falling back to the lobby cap', async () => {
+    const store = new InMemoryLobbyStore([
+      makeSite('den-1', { drivers: 2, maxDrivers: 24 }),
+      makeSite('slc-2', { drivers: 1 }),
+    ]);
+    const app = await buildLobbyServer({
+      store,
+      ticketSecret: TEST_SECRET,
+      now: () => NOW,
+    });
+
+    const res = await app.inject({ method: 'GET', url: '/api/network' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    const byId = new Map<string, Record<string, unknown>>(
+      body.sites.map((s: Record<string, unknown>) => [s.id as string, s]),
+    );
+    expect(byId.get('den-1')?.maxDrivers).toBe(24);
+    expect(byId.get('slc-2')?.maxDrivers).toBe(MAX_DRIVERS_PER_SITE);
+    expect(byId.get('abq-4')?.maxDrivers).toBe(MAX_DRIVERS_PER_SITE);
+    for (const s of body.sites) {
+      expect(SiteStatusSchema.safeParse(s).success).toBe(true);
+    }
 
     await app.close();
   });

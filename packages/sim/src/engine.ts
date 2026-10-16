@@ -4,6 +4,7 @@ import {
   BACKLOG_CAP,
   BASE_AI,
   BASE_FLEET,
+  BoardRow,
   Card,
   CardHand,
   CardModifiers,
@@ -909,10 +910,8 @@ export function takeWheel(
     `${name === 'you' ? 'You' : name} took the wheel of ${v.id}. Its ${v.orders.length} order(s) are now yours.`,
     { vid: v.id, clientId },
   );
+  // Hands are keyed by clientId only (never by display name, which is not unique).
   dealCards(w, clientId);
-  if (name !== clientId) {
-    w.cards[name] = w.cards[clientId];
-  }
   return null;
 }
 
@@ -3336,10 +3335,10 @@ export function guide(w: World, v: Vehicle | null | undefined) {
   return { kind: 'wait' as const, text: 'No open orders. Wait for the next one.' };
 }
 
-export function board(w: World) {
+export function board(w: World): BoardRow[] {
   const since = w.t - 60;
   const span = Math.max(1, Math.min(60, w.t));
-  return STRAT_ORDER.map((s) => {
+  return STRAT_ORDER.map((s): BoardRow => {
     const ds = w.deliveries.filter((d) => d.t > since && d.strat === s);
     const vehicles =
       s === 'Human'

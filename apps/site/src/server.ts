@@ -7,12 +7,21 @@ import {
   signTicket,
   verifyTicket,
   quantiseCoord,
+  MAX_PATH_WAYPOINTS,
+  HEAT_MIN_VALUE,
+  HEAT_INTERVAL_MS,
+  BOARD_INTERVAL_MS,
   type SiteId,
   type ServerMessage,
   type DeltaMessage,
+  type DeltaStats,
+  type HeatLayer,
   type PresenceMessage,
   type QuantisedVehicleDelta,
+  type SiteLimits,
+  type VehicleDecision,
   type Transfer,
+  type WelcomeMessage,
 } from '@warehouse/protocol';
 import {
   ArmorGuard,
@@ -37,16 +46,30 @@ import {
   guide,
   interactAt,
   postOrder,
+  board,
+  BASE_FLEET,
+  FLEET_CAP,
+  MAX_TIER,
+  TIER_STEP,
+  type BoardRow,
+  type CardHand,
+  type Vehicle,
   type World,
+  type WorldSnapshotV5,
   type SimEvent,
 } from '@warehouse/sim';
 import {
   InMemoryPersistenceStore,
   type PersistenceStore,
 } from './persistence.js';
-import { FacilityGovernor } from './governance.js';
+import {
+  FacilityGovernor,
+  MAX_AUTONOMOUS_AGENTS,
+  MIN_AUTONOMOUS_AGENTS,
+} from './governance.js';
 import {
   AgentBrainScheduler,
+  DEFAULT_GEMINI_MODEL,
   VertexGeminiBrainClient,
   type GeminiBrainClient,
 } from './brain.js';
@@ -70,6 +93,99 @@ export const DEFAULT_TICKET_SECRET =
   process.env.TICKET_HMAC_SECRET ||
   'dev-local-warehouse-hmac-secret-key-2026';
 
+/** Real server + sim limits advertised in `welcome.limits`. */
+export const SITE_LIMITS: SiteLimits = {
+  maxDrivers: MAX_DRIVERS,
+  maxDriversPerClient: MAX_DRIVERS_PER_CLIENT,
+  fleetCap: FLEET_CAP,
+  maxTier: MAX_TIER,
+  baseFleet: BASE_FLEET,
+  tierStep: TIER_STEP,
+  minAutonomousAgents: MIN_AUTONOMOUS_AGENTS,
+  maxAutonomousAgents: MAX_AUTONOMOUS_AGENTS,
+};
+
+/**
+ * Snapshot safe to hand to a given connection: human players' card hands are
+ * stripped except the recipient's own (agent hands, flagged `ai`, stay public).
+ */
+export function snapshotForRecipient(
+  world: World,
+  recipientClientId: string | null,
+): WorldSnapshotV5 {
+  const snap = serialize(world);
+  const cards: Record<string, CardHand> = {};
+  for (const [key, hand] of Object.entries(snap.cards)) {
+    if (hand.ai || (recipientClientId !== null && key === recipientClientId)) {
+      cards[key] = hand;
+    }
+  }
+  snap.cards = cards;
+  return snap;
+}
+
+/** Sparse heat cells `[index, value]` (value rounded to 0.1, tiles < HEAT_MIN_VALUE omitted). */
+export function sparseHeat(world: World): HeatLayer {
+  const cells: [number, number][] = [];
+  const heat = world.heat;
+  for (let i = 0; i < heat.length; i++) {
+    const v = heat[i];
+    if (v >= HEAT_MIN_VALUE) {
+      cells.push([i, Math.round(v * 10) / 10]);
+    }
+  }
+  return { w: world.map.w, h: world.map.h, cells };
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/** Inspector-only vehicle detail carried on FULL deltas. */
+export type VehicleDetail = Pick<
+  QuantisedVehicleDelta,
+  'incidents' | 'nearMisses' | 'tactics' | 'path' | 'extra' | 'decision'
+>;
+
+export function vehicleDetail(v: Vehicle): VehicleDetail {
+  const path: number[] = [];
+  const n = Math.min(MAX_PATH_WAYPOINTS, v.path.length);
+  for (let i = 0; i < n; i++) {
+    path.push(Math.round(v.path[i].x), Math.round(v.path[i].y));
+  }
+  const t = v.tactics;
+  const out: VehicleDetail = {
+    incidents: v.incidents,
+    nearMisses: v.nearMisses,
+    tactics: {
+      speed: round2(t.speed),
+      respect: round2(t.respect),
+      buffer: round2(t.buffer),
+      chargeAt: round2(t.chargeAt),
+      batch: round2(t.batch),
+      flatPath: t.flatPath,
+      preemptForP0: t.preemptForP0,
+      poach: t.poach,
+      ...(t.note ? { note: t.note } : {}),
+    },
+    path,
+    extra: Boolean(v.extra),
+  };
+  const d = v.lastDecision;
+  // Only real, applied brain calls populate lastDecision; never synthesise one.
+  if (d && d.model && Number.isFinite(d.latencyMs)) {
+    const decision: VehicleDecision = {
+      kind: d.kind,
+      model: d.model,
+      latencyMs: Math.round(d.latencyMs),
+      reason: d.reason,
+      t: d.t,
+    };
+    out.decision = decision;
+  }
+  return out;
+}
+
 export interface ConnectedClient {
   socket: WebSocket;
   authenticated: boolean;
@@ -84,6 +200,16 @@ export interface ConnectedClient {
   lastInputAtMs: number;
   lastInputSeq: number;
   authTimer?: ReturnType<typeof setTimeout>;
+  /** Subscribed to the sparse heat (traffic) layer via `{type:'layers'}`. */
+  trafficLayer?: boolean;
+  /** Wall-clock ms the last heat layer was sent to this connection. */
+  lastHeatSentAtMs?: number;
+  /** `t` of the newest value sample this connection already has. */
+  seriesSentT?: number | null;
+  /** Signature of `world.history` last sent to this connection. */
+  historySentKey?: string;
+  /** Signature of `world.hallOfFame` last sent to this connection. */
+  hallSentKey?: string;
 }
 
 export interface SiteServerOptions {
@@ -120,7 +246,7 @@ export interface SiteServerInstance {
   brainScheduler: AgentBrainScheduler;
   nlPipeline: NlOrderPipeline;
   clients: Set<ConnectedClient>;
-  stepTick: (nowMs?: number) => Promise<void>;
+  stepTick: (nowMs?: number, background?: boolean) => Promise<void>;
   checkFactoryBreakPhase: (nowMs?: number) => Promise<void>;
   flushSnapshot: (nowMs?: number) => Promise<void>;
   flushHeartbeat: (nowMs?: number) => Promise<void>;
@@ -214,7 +340,7 @@ export async function createSiteServer(
     new VertexNlOrderParser({
       projectId: gcpProjectId,
       location: vertexLocation,
-      model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+      model: process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
     });
 
   const nlPipeline =
@@ -232,7 +358,7 @@ export async function createSiteServer(
     new VertexGeminiBrainClient({
       projectId: gcpProjectId,
       location: vertexLocation,
-      model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+      model: process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
     });
 
   const brainScheduler =
@@ -326,10 +452,14 @@ export async function createSiteServer(
     };
   }
 
+  /**
+   * Builds the delta shared by every connection. Per-connection extras (own hand,
+   * seriesAppend, history, hall, heat) are spliced in by `broadcastDelta`.
+   */
   function buildDeltaMessage(
     events: SimEvent[],
     includeFullState: boolean = true,
-    includeHands: boolean = true,
+    nowMs: number = Date.now(),
   ): DeltaMessage {
     const pendingByAgent = new Set(
       world.pendingDecisions.map((r) => r.agentId),
@@ -429,6 +559,7 @@ export async function createSiteServer(
               inRange: g.inRange,
             }
           : null,
+        ...vehicleDetail(v),
       };
     });
 
@@ -451,18 +582,141 @@ export async function createSiteServer(
       bays: world.bays,
       markers: world.markers,
       events,
+      votes: world.difficultyVotes,
+      difficulty: world.difficulty,
+      tier: world.tier,
       stats: {
         totals: world.totals,
         day: world.day,
         shift: world.shift,
         shiftTime: world.shiftTime,
         rushUntil: world.rushUntil,
+        board: currentBoard(nowMs),
       },
-      votes: world.difficultyVotes,
-      ...(includeHands ? { hands: world.cards } : {}),
-      difficulty: world.difficulty,
-      tier: world.tier,
     };
+  }
+
+  // ---- Strategy Board cache (recomputed at most once per BOARD_INTERVAL_MS) ----
+  let boardCache: BoardRow[] | null = null;
+  let boardComputedAtMs = Number.NEGATIVE_INFINITY;
+  function currentBoard(nowMs: number): BoardRow[] {
+    if (!boardCache || nowMs - boardComputedAtMs >= BOARD_INTERVAL_MS || nowMs < boardComputedAtMs) {
+      boardCache = board(world);
+      boardComputedAtMs = nowMs;
+    }
+    return boardCache;
+  }
+
+  const HISTORY_WIRE_CAP = 60; // matches serialize(world).history
+
+  function historyKey(): string {
+    const h = world.history;
+    return `${h.length}:${h.length ? h[h.length - 1].day : ''}`;
+  }
+
+  function hallKey(): string {
+    return JSON.stringify(world.hallOfFame);
+  }
+
+  function latestSampleT(): number | null {
+    const s = world.valueSeries;
+    return s.length ? s[s.length - 1].t : null;
+  }
+
+  /** Marks everything carried by a welcome snapshot as already delivered to `conn`. */
+  function resetIncrementalTrackers(conn: ConnectedClient): void {
+    conn.seriesSentT = latestSampleT();
+    conn.historySentKey = historyKey();
+    conn.hallSentKey = hallKey();
+    conn.lastHeatSentAtMs = undefined;
+  }
+
+  function buildWelcome(conn: ConnectedClient): WelcomeMessage {
+    resetIncrementalTrackers(conn);
+    return {
+      type: 'welcome',
+      you: {
+        clientId: conn.clientId,
+        playerId: conn.playerId,
+        name: conn.name,
+        vid: conn.vid,
+        siteId,
+        isBot: conn.isBot,
+      },
+      snapshot: snapshotForRecipient(world, conn.clientId),
+      limits: { ...SITE_LIMITS },
+    };
+  }
+
+  /**
+   * Light deltas: one shared payload. Full deltas: shared JSON head + shared stats,
+   * with per-connection fields appended inside `stats` and a recipient-only `hands`.
+   */
+  function broadcastDelta(
+    events: SimEvent[],
+    includeFullState: boolean,
+    nowMs: number,
+  ): void {
+    const msg = buildDeltaMessage(events, includeFullState, nowMs);
+    if (!includeFullState) {
+      broadcast(msg);
+      return;
+    }
+
+    const { stats, ...rest } = msg;
+    const head = JSON.stringify(rest).slice(0, -1); // drop trailing '}'
+    const statsCore = JSON.stringify(stats as DeltaStats).slice(1, -1); // inner of {...}
+
+    const hKey = historyKey();
+    let historyJson: string | null = null;
+    const hlKey = hallKey();
+    let heatJson: string | null = null;
+    const seriesJsonBySentT = new Map<number | null, string>();
+
+    for (const c of clients) {
+      if (!c.authenticated || c.socket.readyState !== WebSocket.OPEN) continue;
+      let extras = '';
+
+      // seriesAppend: samples newer than the newest one this connection holds.
+      const sentT = c.seriesSentT ?? null;
+      const newestT = latestSampleT();
+      if (newestT !== null && (sentT === null || newestT > sentT)) {
+        let json = seriesJsonBySentT.get(sentT);
+        if (json === undefined) {
+          const fresh = world.valueSeries.filter((s) => sentT === null || s.t > sentT);
+          json = JSON.stringify(fresh);
+          seriesJsonBySentT.set(sentT, json);
+        }
+        extras += `,"seriesAppend":${json}`;
+        c.seriesSentT = newestT;
+      }
+
+      if (c.historySentKey !== hKey) {
+        historyJson ??= JSON.stringify(world.history.slice(-HISTORY_WIRE_CAP));
+        extras += `,"history":${historyJson}`;
+        c.historySentKey = hKey;
+      }
+
+      if (c.hallSentKey !== hlKey) {
+        extras += `,"hall":${hlKey}`;
+        c.hallSentKey = hlKey;
+      }
+
+      if (
+        c.trafficLayer &&
+        (c.lastHeatSentAtMs === undefined || nowMs - c.lastHeatSentAtMs >= HEAT_INTERVAL_MS)
+      ) {
+        heatJson ??= JSON.stringify(sparseHeat(world));
+        extras += `,"heat":${heatJson}`;
+        c.lastHeatSentAtMs = nowMs;
+      }
+
+      // Recipient's own hand only (hands are keyed by clientId in the sim).
+      const own = c.clientId ? world.cards[c.clientId] : undefined;
+      const handsJson = own ? `{${JSON.stringify(c.clientId)}:${JSON.stringify(own)}}` : '{}';
+
+      c.socket.send(`${head},"stats":{${statsCore}${extras}},"hands":${handsJson}}`);
+    }
   }
 
   function difficultyNumber(diff: World['difficulty']): number {
@@ -677,8 +931,7 @@ export async function createSiteServer(
     if (connectedCount > 0) {
       if (background) bgTickCount++;
       const includeFullState = !background || bgTickCount % 10 === 0;
-      const includeHands = !background || connectedCount <= 8 || bgTickCount % 50 === 0;
-      broadcast(buildDeltaMessage(eventsToBroadcast, includeFullState, includeHands));
+      broadcastDelta(eventsToBroadcast, includeFullState, nowMs);
     }
 
     const runAsyncWork = async () => {
@@ -811,18 +1064,8 @@ export async function createSiteServer(
       conn.playerId = `P${++world.nextPlayerSeq}`;
     }
 
-    sendTo(conn.socket, {
-      type: 'welcome',
-      you: {
-        clientId: conn.clientId,
-        playerId: conn.playerId,
-        name: conn.name,
-        vid: conn.vid,
-        siteId,
-        isBot: conn.isBot,
-      },
-      snapshot: serialize(world),
-    });
+    conn.trafficLayer = false;
+    sendTo(conn.socket, buildWelcome(conn));
 
     sendTo(conn.socket, {
       type: 'phase',
@@ -895,18 +1138,7 @@ export async function createSiteServer(
       if (!conn.authenticated) {
         authenticateConnection(conn, msg.ticket, false, nowMs);
       } else {
-        sendTo(conn.socket, {
-          type: 'welcome',
-          you: {
-            clientId: conn.clientId,
-            playerId: conn.playerId,
-            name: conn.name,
-            vid: conn.vid,
-            siteId,
-            isBot: conn.isBot,
-          },
-          snapshot: serialize(world),
-        });
+        sendTo(conn.socket, buildWelcome(conn));
       }
       return;
     }
@@ -947,6 +1179,12 @@ export async function createSiteServer(
           angle: v ? Math.round(v.angle * 1000) / 1000 : undefined,
           speedNow: v ? Math.round(v.speedNow * 100) / 100 : undefined,
         });
+        break;
+      }
+
+      case 'layers': {
+        conn.trafficLayer = msg.traffic;
+        if (msg.traffic) conn.lastHeatSentAtMs = undefined;
         break;
       }
 
@@ -1226,7 +1464,7 @@ export async function createSiteServer(
     return {
       ok: true,
       siteId,
-      snapshot: serialize(world),
+      snapshot: snapshotForRecipient(world, null),
       presence: buildPresenceMessage().players,
       brainHealth: brainScheduler.getBrainHealthMessage(
         nowMs,
@@ -1245,7 +1483,7 @@ export async function createSiteServer(
       phase: world.phase,
       drivers,
       spectators: Math.max(0, totalAuth - drivers),
-      snapshot: serialize(world),
+      snapshot: snapshotForRecipient(world, null),
       brainHealth: brainScheduler.getBrainHealthMessage(
         nowMs,
         nlPipeline.getArmorBlocks1h(nowMs),

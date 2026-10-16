@@ -14,7 +14,7 @@ npm run build
 # Run fast offline unit tests (sim, protocol, armor, site, lobby)
 npm test
 
-# Run live Vertex AI Gemini 3.8 Flash brain verification
+# Run live Vertex AI Gemini 3.5 Flash-Lite brain verification
 RUN_LIVE=1 npm run test:live -w @warehouse/site
 
 # Run live Model Armor + Gemini red-team verification against corpus.jsonl
@@ -57,11 +57,19 @@ After deploying, verify the live stack before marking any deployment complete:
 LOBBY_URL=$(terraform -chdir=infra output -raw lobby_url)
 curl -fsS "${LOBBY_URL}/healthz"
 
-# 2. Run live end-to-end game smoke probe (join, WS snapshot, drive 10s, verify gemini-3.8-flash decisions, verify cross-site transfer, cleanup smoke-* docs)
+# 2. Run live end-to-end game smoke probe (join, WS snapshot, drive 10s, verify gemini-3.5-flash-lite decisions, verify cross-site transfer, cleanup smoke-* docs)
 node tools/smoke/live.mjs "${LOBBY_URL}"
 
 # 3. Run live prompt-armor smoke probe (send 5 injection vectors, verify armor_blocked / clamping and journal entries)
 node tools/smoke/armor.mjs "${LOBBY_URL}"
+
+# 4. Run the live UI smoke (headless system Chrome via playwright-core; no browser download).
+#    Checks clock format, every panel folds + persists across reload, drawer tabs, driving
+#    updates the inspector, card hand, live Strategy Board / Value chart updates within 60 s,
+#    no console errors. Screenshots (1600x1000, 1280x760) go to tools/smoke/out/ (git-ignored).
+#    Teardown: closes the browser/WS and deletes smoke-* player docs (SMOKE_SKIP_FIRESTORE=1 to skip).
+#    Override the Chrome binary with CHROME_PATH=...
+node tools/smoke/ui.mjs "${LOBBY_URL}"
 ```
 
 ---
@@ -87,9 +95,9 @@ The Cloud Run Job `loadtest-128-stg` runs as service account `warehouse-loadtest
 | Bot Type | Count | Naming Prefix | Behavior |
 |---|---|---|---|
 | **Protocol Bots** | **112** | `loadtest-001` .. `loadtest-112` | Reads the guide ring target from its own `delta` stream, steers toward it at 10 Hz (`input`), and sends `interact` when `inRange` is true. Exercises WebSocket fan-out, bandwidth quantization, and 10 Hz tick stability across all 4 shards. |
-| **Gemini Pilot Agents** | **16** | `pilot-01` .. `pilot-16` | Powered by **Gemini 3.8 Flash** (`gemini-3.8-flash`). Observes only its own player HUD state, nearby vehicles, open contracts, dealt cards, and event log from `welcome`/`delta`. Every 3–5 s, selects a high-level action (`driveTo(x,y)`, `pickUp`, `drop`, `keepCards`, `typeOrder(text)`, `vote(level)`), carried out by a local 10 Hz steering loop. |
+| **Gemini Pilot Agents** | **16** | `pilot-01` .. `pilot-16` | Powered by **Gemini 3.5 Flash-Lite** (`gemini-3.5-flash-lite`). Observes only its own player HUD state, nearby vehicles, open contracts, dealt cards, and event log from `welcome`/`delta`. Every 3–5 s, selects a high-level action (`driveTo(x,y)`, `pickUp`, `drop`, `keepCards`, `typeOrder(text)`, `vote(level)`), carried out by a local 10 Hz steering loop. |
 
-- **Isolated Pilot Budget**: Pilots track spend against `PILOT_BUDGET_USD` (default **$3.00 per run**), separate from the sites' $25/day Firestore brain ledger. If a pilot's Gemini call fails, the pilot holds position and logs the error—it never falls back to scripted play.
+- **Isolated Pilot Budget**: Pilots track spend against `PILOT_BUDGET_USD` (default **$1.50 per run**), separate from the sites' $12.50/day Firestore brain ledger. If a pilot's Gemini call fails, the pilot holds position and logs the error—it never falls back to scripted play.
 - **Executing the Load Test**:
   ```bash
   gcloud run jobs execute loadtest-128-stg --region=us-central1 --project=davenport-boutique --wait
@@ -124,9 +132,9 @@ In accordance with the resource lifecycle policy, every staging load test or smo
 
 | Resource | Guardrail / Cap | Enforcement Mechanism |
 |---|---|---|
-| **Site AI Brains (`gemini-3.8-flash`)** | **$25.00 / UTC day** global cap across all sites | Firestore transactional ledger (`budget/{yyyy-mm-dd}`). When exhausted, agents hold with `"daily brain budget reached"`. |
-| **Typed Orders (`nlCommand`)** | **$3.00 / UTC day** sub-slice of the $25 ledger | Dedicated counter on `budget/{yyyy-mm-dd}` + 6/min per player rate limit + 3-strike 15-min mute. |
-| **Loadtest Gemini Pilots** | **$3.00 / job run** (`PILOT_BUDGET_USD=3`) | In-process token counter inside `tools/loadtest`; pilots hold when cap is reached. |
+| **Site AI Brains (`gemini-3.5-flash-lite`)** | **$12.50 / UTC day** global cap across all sites | Firestore transactional ledger (`budget/{yyyy-mm-dd}`). When exhausted, agents hold with `"daily brain budget reached"`. |
+| **Typed Orders (`nlCommand`)** | **$1.50 / UTC day** cap on the daily ledger | Dedicated counter on `budget/{yyyy-mm-dd}` + 6/min per player rate limit + 3-strike 15-min mute. |
+| **Loadtest Gemini Pilots** | **$1.50 / job run** (`PILOT_BUDGET_USD=1.5`) | In-process token counter inside `tools/loadtest`; pilots hold when cap is reached. |
 | **Overflow Shards (`slc-2`, `phx-3`, `abq-4`)** | `min_instance_count = 0`, `IDLE_POLICY = break`, 12 agents | Automatically enter factory break after 2 minutes with 0 players, freezing the clock and stopping all Gemini calls so Cloud Run scales to zero. |
 | **Artifact Registry (`warehouse`)** | Keep last **5 image versions** | Enforced via Terraform `cleanup_policies` (`keep-recent-5`). |
 | **Firestore `journal` Collection** | **7-day TTL** | Enforced via Terraform `google_firestore_field.journal_ttl` on `expireAt`. |

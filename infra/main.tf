@@ -209,7 +209,7 @@ resource "google_cloud_run_v2_service" "site" {
       }
       env {
         name  = "GEMINI_MODEL"
-        value = "gemini-3.8-flash"
+        value = "gemini-3.5-flash-lite"
       }
       env {
         name  = "GEMINI_LOCATION"
@@ -459,11 +459,11 @@ resource "google_cloud_run_v2_job" "loadtest_128" {
         }
         env {
           name  = "PILOT_BUDGET_USD"
-          value = "3"
+          value = "1.5"
         }
         env {
           name  = "GEMINI_MODEL"
-          value = "gemini-3.8-flash"
+          value = "gemini-3.5-flash-lite"
         }
         env {
           name  = "GEMINI_LOCATION"

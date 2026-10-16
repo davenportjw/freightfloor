@@ -67,3 +67,50 @@ Because the game runs on a public URL without login, all strategy board actions 
 - **Outbound (`→ network`)**: Orders tagged with `dest: { siteId }` must be delivered to one of the two east **transfer bays**. Dropping the pallet emits a `TransferOut` event and publishes a `Transfer` payload to Pub/Sub (`site-transfers`).
 - **Inbound (West Docks)**: The destination site receives the Pub/Sub push at `/internal/transfer` and invokes `receiveTransfer(world, transfer)` (idempotent by `transfer.id`), placing an inbound pallet at a west dock with a **+5 stow bonus**.
 - **Player Site Switching**: Players can open the **Network** panel in the left HUD to inspect live driver counts, facility tiers, phases, and shipped totals across `DEN-1`, `SLC-2`, `PHX-3`, and `ABQ-4`. Clicking **Transfer** (`transferSite`) releases their current vehicle and reconnects them to the target shard via the lobby while preserving their `clientId` profile and lifetime score.
+
+---
+
+## 6. Client UI & Controls
+
+The client is a full-bleed isometric (2.5D) floor with frosted HUD panels floating over it, matching [`docs/design/mock-v4.html`](design/mock-v4.html). Everything shown comes from the live site server. When nothing has arrived yet, or a call fails, the HUD shows `—` or the real error; it never shows placeholder numbers.
+
+### Panels (all collapsible)
+
+| Panel | Zone | Default | Collapsed pill shows |
+|---|---|---|---|
+| KPI bar: clock, shift/phase, Shipped/On-time/Incidents/Backlog/Lost, site, brain health, connection | top-left | open | clock |
+| Strategy Board: `/hr`, On-time, ⚠ incidents, kWh/order; click a row to highlight that team | left | open | leading team `/hr` |
+| Leaderboard: rank, shift countdown, top 5 + your row, difficulty vote, hall of fame | right | open | your rank |
+| Value Created chart: 4h/8h/24h windows, Human drivers / Agent avg / Best agent | right | collapsed | latest values |
+| Network: live sites from `/api/network`, Switch | right | collapsed | site count |
+| Inspector | bottom-left | shown only while a vehicle is selected (✕ closes) | — |
+| History drawer: Leaderboard · Value · Days · Events · Brain log | right edge | closed | — |
+
+- Clicking a panel header folds it to a pill. The choice is saved in `localStorage` (`warehouse.panel.<id>`), so it survives a reload.
+- Below 1366 px wide, panels that are open by default start folded, unless you have explicitly chosen a state for them.
+- The "How to win" help opens automatically on the first visit only.
+
+### Hotkeys
+
+Hotkeys never fire while you are typing in a text box. Driving keys are only captured while you are driving.
+
+| Key | Action |
+|---|---|
+| W A S D / arrows | Drive (only while driving; key auto-repeat is ignored and keys are released when the window loses focus) |
+| E | Pick up / drop / charge (only while driving) |
+| T | Take the wheel of the selected vehicle |
+| Esc | Hand back if driving, else close help, else exit cone mode, else deselect, else close drawer |
+| Tab | Hide / show all panels (clean floor view) |
+| H | Open / close the history drawer |
+| B | Fold / unfold the Strategy Board |
+| 1 / 2 / 3 | Toggle the Routes / Traffic / Labels layers (Traffic subscribes to the server heat layer) |
+| C | Toggle cone mode (click the floor to place a cone) |
+| ? | Show help |
+
+The command bar's buttons:
+- **🚜 Drive**: takes the selected AI vehicle, otherwise the best idle agent with more than 35% battery that is not stunned.
+- **⚡ Rush**: posts a 12-order wave.
+- **★ P0**: posts 1 urgent order.
+- **🚧 Cones**: toggles cone mode.
+
+Typed orders go through Model Armor and the same limiter as the buttons.

@@ -211,7 +211,7 @@ describe('@warehouse/smoke end-to-end verification (in-process Lobby + 2 Sites)'
     expect(liveReport.welcomeReceived).toBe(true);
     expect(liveReport.acksReceived).toBeGreaterThan(0);
     expect(liveReport.deltasReceived).toBeGreaterThan(0);
-    expect(liveReport.brainModel).toBe('gemini-3.8-flash');
+    expect(liveReport.brainModel).toBe('gemini-3.5-flash-lite');
     expect(liveReport.transferVerified).toBe(true);
 
     const armorReport = await runArmorSmoke({

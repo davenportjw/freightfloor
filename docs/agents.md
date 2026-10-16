@@ -2,7 +2,7 @@
 
 ## Overview
 
-Every AI vehicle in the Warehouse distribution network is controlled by an asynchronous **Gemini 3.8 Flash** brain (`gemini-3.8-flash`) hosted on Vertex AI (`location: 'global'`, `project: 'davenport-boutique'`), authenticated via Google Cloud Application Default Credentials (ADC).
+Every AI vehicle in the Warehouse distribution network is controlled by an asynchronous **Gemini 3.5 Flash-Lite** brain (`gemini-3.5-flash-lite`) hosted on Vertex AI (`location: 'global'`, `project: 'davenport-boutique'`), authenticated via Google Cloud Application Default Credentials (ADC). Allowed models exported in `ALLOWED_GEMINI_MODELS` are `'gemini-3.8-flash'`, `'gemini-3.5-flash-lite'`, and `'gemini-4-argon'`.
 
 - **10 Hz Non-Blocking Execution**: The 10 Hz deterministic simulation loop (`packages/sim`) never blocks on network I/O. Instead, `packages/sim` emits `DecisionRequest` events ahead of time, and deterministic pathfinding (`A*`, reservation tables, steering) drives the vehicle between decisions.
 - **Asynchronous Validation (`applyDecision`)**: When the Vertex AI response arrives, the site server passes it into `applyDecision(world, reqId, decision, meta)`. The simulation validates that the request has not expired (`deadline`) and that the chosen option is still legal in the current world state.
@@ -22,7 +22,7 @@ const ai = new GoogleGenAI({
 });
 
 const res = await ai.models.generateContent({
-  model: env.GEMINI_MODEL, // 'gemini-3.8-flash'
+  model: env.GEMINI_MODEL, // 'gemini-3.5-flash-lite'
   contents: [{ role: 'user', parts: [{ text: renderRequest(req) }] }],
   config: {
     cachedContent: personaCache[req.persona],
@@ -43,7 +43,7 @@ const res = await ai.models.generateContent({
 | Decision Kind | Emitted When | Options Computed by Sim | Validated JSON Reply Schema |
 |---|---|---|---|
 | `contract` | Agent is ~6 tiles from its current drop-off, or idle without a task | Top 6 open orders with distance, slack time, point value, district, current claimant count, aisle congestion, and cross-site `transfer` flag | `{ orderIds: string[], reason: string }` |
-| `hazard` | A floor spill or obstacle is within 3 tiles of the agent's planned path | `reroute`, `wait`, or `push`, each annotated with detour tile length, remaining spill duration, and skid risk | `{ choice: 'reroute' \| 'wait' \| 'push', reason: string }` |
+| `hazard` | A floor spill or obstacle is within 3 tiles of the agent's planned path | `reroute` (omitted when `detourLen === null`), `wait`, or `clean`, each annotated with detour tile length, remaining spill duration, and cleanup bonus | `{ choice: 'reroute' \| 'wait' \| 'clean', reason: string }` |
 | `tactics` | Every game-hour and at shift change | Agent's own delivery metrics, shift standings, battery level, and current tactical parameters | Bounded `{ speed: number, buffer: number, respect: number, chargeAt: number, batch: number, note: string }` |
 | `cards` | At each shift deal | Three dealt skill cards with their modifiers and trade-offs | `{ keep: string[], reason?: string }` |
 
@@ -76,12 +76,12 @@ Each site server manages an asynchronous brain request queue with:
 
 ---
 
-## 5. Global $25/Day Firestore Budget Ledger
+## 5. Global $12.50/Day Firestore Budget Ledger
 
 To enforce a strict cost ceiling across all running shards:
-- **Shared Daily Cap**: All sites share a single global budget of **$25.00/day** tracked in Firestore at `budget/{yyyy-mm-dd}`.
-- **Dedicated Typed-Order Slice**: Natural-language player commands (`nlCommand`) draw from an isolated **$3.00/day sub-slice** (`typedOrdersSpentUsd <= 3.00`) of the global ledger so that an attacker spamming `nlCommand` can never starve the warehouse AI agents' `$22.00/day` operational brain budget.
-- **1-Minute Transactional Reservations**: Each active site reserves spend in 1-minute blocks via a Firestore transaction on `budget/{yyyy-mm-dd}`, reconciling actual spend from measured `usageMetadata` token counts × Gemini 3.8 Flash token pricing.
+- **Shared Daily Cap**: All sites share a single global agent brain budget of **$12.50/day** (`AGENT_DAILY_BUDGET_USD = 12.5`) tracked in Firestore at `budget/{yyyy-mm-dd}`.
+- **Dedicated Typed-Order Slice**: Natural-language player commands (`nlCommand`) draw from an isolated **$1.50/day** cap (`NL_COMMAND_DAILY_BUDGET_USD = 1.5`) on the global ledger so that an attacker spamming `nlCommand` can never starve the warehouse AI agents' operational brain budget.
+- **1-Minute Transactional Reservations**: Each active site reserves spend in 1-minute blocks via a Firestore transaction on `budget/{yyyy-mm-dd}`, reconciling actual spend from measured `usageMetadata` token counts × Gemini 3.5 Flash-Lite token pricing (`$0.075 / 1M` input tokens, `$0.30 / 1M` output tokens).
 - **Overflow Site Scaling**:
   - `den-1` runs 20 agents (`IDLE_POLICY=run`).
   - Overflow sites (`slc-2`, `phx-3`, `abq-4`) run 12 agents and enter `break` when empty, dropping their Gemini token burn to zero.

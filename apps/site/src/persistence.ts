@@ -13,8 +13,8 @@ import type { BrainHealth } from './brain.js';
 export type SitePhase = Phase;
 export type WorldSnapshot = WorldSnapshotV5;
 
-export const AGENT_DAILY_BUDGET_USD = 25.0;
-export const NL_COMMAND_DAILY_BUDGET_USD = 3.0;
+export const AGENT_DAILY_BUDGET_USD = 12.5;
+export const NL_COMMAND_DAILY_BUDGET_USD = 1.5;
 export const SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 export const JOURNAL_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -117,12 +117,12 @@ export function formatUtcDateKey(nowMs: number = Date.now()): string {
 }
 
 /**
- * Estimates Gemini 3.8 Flash cost in USD from input/output token counts.
- * Uses $0.15 / 1M input tokens and $0.60 / 1M output tokens with a minimum floor of $0.00001 per call.
+ * Estimates Gemini 3.5 Flash-Lite cost in USD from input/output token counts.
+ * Uses $0.075 / 1M input tokens and $0.30 / 1M output tokens with a minimum floor of $0.000005 per call.
  */
 export function estimateGeminiFlashCostUsd(tokensIn: number, tokensOut: number): number {
-  const raw = (Math.max(0, tokensIn) * 0.15 + Math.max(0, tokensOut) * 0.6) / 1_000_000;
-  return Math.max(0.00001, raw);
+  const raw = (Math.max(0, tokensIn) * 0.075 + Math.max(0, tokensOut) * 0.3) / 1_000_000;
+  return Math.max(0.000005, raw);
 }
 
 export interface PersistenceStore {
@@ -557,6 +557,8 @@ export class CloudPersistenceStore implements PersistenceStore {
             updatedAt: nowMs,
           };
 
+      current.agentCapUsd = AGENT_DAILY_BUDGET_USD;
+      current.nlCommandCapUsd = NL_COMMAND_DAILY_BUDGET_USD;
       if (category === 'agent') {
         current.agentSpentUsd = Number((current.agentSpentUsd + deltaUsd).toFixed(6));
         current.agentTokensIn += Math.max(0, tokensIn);
@@ -581,7 +583,12 @@ export class CloudPersistenceStore implements PersistenceStore {
     if (!snap.exists) {
       return this.fallback.getBudget(nowMs);
     }
-    return snap.data() as BudgetDayDoc;
+    const data = snap.data() as BudgetDayDoc;
+    return {
+      ...data,
+      agentCapUsd: AGENT_DAILY_BUDGET_USD,
+      nlCommandCapUsd: NL_COMMAND_DAILY_BUDGET_USD,
+    };
   }
 
   async setBudgetForTesting(

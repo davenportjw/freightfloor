@@ -1,17 +1,29 @@
-import * as PIXI from 'pixi.js';
+/**
+ * Canvas2D isometric warehouse renderer, ported from the mock's `<script id="render">`
+ * block (2:1 iso, TW=64/TH=32, extruded shaded boxes). It only draws real world state;
+ * camera, picking and remote-vehicle interpolation live here, pure math lives in ./render/.
+ */
 import {
   floorKind,
-  guide,
-  HUMAN,
+  guide as simGuide,
   isHighway,
-  KINDS,
   laneDir,
-  STRATEGIES,
+  REACH,
+  stratOf,
   type Order,
   type Vehicle,
   type World,
   type WorldMap,
 } from '@warehouse/sim';
+import { centreOn, fitCamera, unproject, zoomAt, TH, TW, type Camera } from './render/iso.js';
+import { pickNearest, PoseTracker, type Pose } from './render/motion.js';
+import { Painter } from './render/painter.js';
+import { BG, drawRack, drawStruct, KFLOOR, KOUT, NET_COLOR, teamColor } from './render/scenery.js';
+import { drawVehicle } from './render/vehicles.js';
+
+// ---------------------------------------------------------------------------
+// Legacy sprite-atlas helpers (no longer used for drawing; kept for existing tests/tools)
+// ---------------------------------------------------------------------------
 
 export interface AtlasFrameRect {
   x: number;
@@ -29,21 +41,6 @@ export interface AtlasManifest {
   sprites: Record<string, AtlasFrameRect>;
   frames: Record<string, { frame: AtlasFrameRect }>;
 }
-
-export interface RenderVehicleOverlay {
-  brainThinking?: boolean;
-  brainError?: string | null;
-  isBot?: boolean;
-}
-
-export interface WarehouseRendererOptions {
-  canvas: HTMLCanvasElement;
-  onSelectVehicle?: (vid: string) => void;
-  onClickTile?: (tileX: number, tileY: number) => void;
-}
-
-const TILE_PX = 36; // Display pixels per tile at zoom = 1.0
-const CHUNK_TILES = 16; // 16x16 tiles per cached floor chunk
 
 export function headingToIndex16(angleRad: number): number {
   const twoPi = Math.PI * 2;
@@ -83,684 +80,718 @@ export function resolveVehicleSpriteKey(
   return `vehicle_${canonicalType}_${tint}_${loadState}_h${h}`;
 }
 
+// ---------------------------------------------------------------------------
+// Public renderer API (see contracts.md)
+// ---------------------------------------------------------------------------
+
+export interface RenderVehicleOverlay {
+  brainThinking?: boolean;
+  brainError?: string | null;
+  isBot?: boolean;
+}
+
+export interface RenderLayers {
+  routes: boolean;
+  traffic: boolean;
+  labels: boolean;
+}
+
+/** Driven-vehicle guidance target (same shape the sim's guide() returns / the delta carries). */
+export interface GuideInfo {
+  kind: string;
+  x?: number | null;
+  y?: number | null;
+  text?: string;
+  inRange?: boolean;
+  order?: { id: number; bay: string } | null;
+}
+
+export interface RenderOptions {
+  layers: RenderLayers;
+  highlightStrategy: string | null;
+  selectedVid: string | null;
+  myVid: string | null;
+  coneMode: boolean;
+  overlays: Map<string, RenderVehicleOverlay>;
+  /**
+   * Optional (additive to the contract): guidance for myVid from the server delta. When
+   * undefined the renderer computes it locally with the sim's guide(), as the mock does.
+   */
+  guide?: GuideInfo | null;
+}
+
+export interface WarehouseRendererInit {
+  canvas: HTMLCanvasElement;
+  onSelectVehicle: (vid: string | null) => void;
+  onClickTile: (x: number, y: number) => void;
+}
+
+interface SceneItem {
+  d: number;
+  fn: () => void;
+}
+
+const DRAG_THRESHOLD = 4;
+const PICK_RADIUS = 1.1;
+
 export class WarehouseRenderer {
   private readonly canvas: HTMLCanvasElement;
-  private readonly onSelectVehicle?: (vid: string) => void;
-  private readonly onClickTile?: (tileX: number, tileY: number) => void;
+  private readonly ctx: CanvasRenderingContext2D;
+  private readonly onSelectVehicle: (vid: string | null) => void;
+  private readonly onClickTile: (x: number, y: number) => void;
+  private readonly cam: Camera = { x: 0, y: 0, zoom: 1 };
+  private readonly painter: Painter;
+  private readonly tracker = new PoseTracker();
+  private poses = new Map<string, Pose>();
 
-  private pixiApp: PIXI.Application | null = null;
-  private rootContainer: PIXI.Container | null = null;
-  private ctx2d: CanvasRenderingContext2D | null = null;
+  private VW = 0;
+  private VH = 0;
+  private dpr = 1;
+  private mapKey = '';
+  private needsFit = true;
+  private lastMap: WorldMap | null = null;
+  private followId: string | null = null;
+  private coneMode = false;
+  private cursor = '';
+  private drag: { id: number; x: number; y: number; cx: number; cy: number; moved: boolean } | null = null;
+  private reducedMotion = false;
+  private nowMs = 0;
+  private readonly cleanup: Array<() => void> = [];
 
-  private atlasImage: HTMLImageElement | null = null;
-  private atlasManifest: AtlasManifest | null = null;
-  private pixiTextures = new Map<string, PIXI.Texture>();
-
-  // Offscreen 16x16 tile floor chunk cache, rebuilt only when map.tier changes
-  private cachedFloorTier = -1;
-  private floorChunks = new Map<string, HTMLCanvasElement>();
-
-  // Camera state
-  public camX = 25 * TILE_PX;
-  public camY = 17 * TILE_PX;
-  public zoom = 1.0;
-  public followActive = true;
-  public coneMode = false;
-
-  private isDragging = false;
-  private dragStartX = 0;
-  private dragStartY = 0;
-  private dragMoved = false;
-
-  public modeLabel = 'Atlas 48px · Y-Sorted';
-
-  constructor(opts: WarehouseRendererOptions) {
-    this.canvas = opts.canvas;
-    this.onSelectVehicle = opts.onSelectVehicle;
-    this.onClickTile = opts.onClickTile;
-    this.attachPointerListeners();
-  }
-
-  async init(): Promise<void> {
-    await this.loadAtlasAssets();
-
-    // Initialize 2D context for crisp hybrid/chunk rendering + PixiJS v8 texture registry when WebGL is present
-    const ctx = this.canvas.getContext('2d');
-    if (ctx) {
-      this.ctx2d = ctx;
+  constructor(o: WarehouseRendererInit) {
+    this.canvas = o.canvas;
+    const ctx = o.canvas.getContext('2d');
+    if (!ctx) throw new Error('WarehouseRenderer: Canvas2D context unavailable');
+    this.ctx = ctx;
+    this.painter = new Painter(ctx, this.cam);
+    this.onSelectVehicle = o.onSelectVehicle;
+    this.onClickTile = o.onClickTile;
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+      const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+      this.reducedMotion = mq.matches;
+      const onMq = (e: MediaQueryListEvent) => {
+        this.reducedMotion = e.matches;
+      };
+      mq.addEventListener('change', onMq);
+      this.cleanup.push(() => mq.removeEventListener('change', onMq));
     }
-
-    if (typeof window !== 'undefined' && this.atlasImage && this.atlasManifest) {
-      try {
-        const source = new PIXI.ImageSource({ resource: this.atlasImage });
-        for (const [key, rect] of Object.entries(this.atlasManifest.sprites)) {
-          const tex = new PIXI.Texture({
-            source,
-            frame: new PIXI.Rectangle(rect.x, rect.y, rect.w, rect.h),
-          });
-          this.pixiTextures.set(key, tex);
-        }
-        this.modeLabel = `Pixi v${PIXI.VERSION} Atlas · ${this.pixiTextures.size} frames`;
-      } catch {
-        this.modeLabel = 'Atlas 48px · Y-Sorted';
-      }
-    }
-
+    this.attachPointer();
     this.resize();
   }
 
-  private async loadAtlasAssets(): Promise<void> {
-    if (typeof fetch === 'undefined') return;
-    try {
-      const res = await fetch('/assets/atlas.json');
-      if (res.ok) {
-        this.atlasManifest = (await res.json()) as AtlasManifest;
-      }
-    } catch {
-      // Headless test environment without static server
-    }
-
-    if (typeof Image !== 'undefined') {
-      await new Promise<void>((resolvePromise) => {
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.onload = () => {
-          this.atlasImage = img;
-          resolvePromise();
-        };
-        img.onerror = () => resolvePromise();
-        img.src = '/assets/atlas.png';
-      });
-    }
+  get zoom(): number {
+    return this.cam.zoom;
   }
 
-  public getLoadedTextureCount(): number {
-    return this.pixiTextures.size || Object.keys(this.atlasManifest?.sprites ?? {}).length;
+  /** Fit the iso bounds of the current map into the viewport. */
+  fit(): void {
+    if (!this.lastMap) {
+      this.needsFit = true;
+      return;
+    }
+    Object.assign(this.cam, fitCamera(this.lastMap.w, this.lastMap.h, this.VW, this.VH));
+    this.needsFit = false;
   }
 
-  public resize(): void {
+  /** Zoom about the screen centre. */
+  zoomBy(factor: number): void {
+    Object.assign(this.cam, zoomAt(this.cam, this.VW / 2, this.VH / 2, factor));
+  }
+
+  /** Call after a tier expansion/compaction; re-fits on the next frame with the new map. */
+  onMapRebuilt(): void {
+    this.needsFit = true;
+  }
+
+  /** Re-measure the canvas (call on window resize only). Keeps the view centre fixed. */
+  resize(): void {
     const parent = this.canvas.parentElement;
-    if (!parent) return;
-    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-    const w = Math.max(320, parent.clientWidth);
-    const h = Math.max(240, parent.clientHeight);
-    if (this.canvas.width !== Math.floor(w * dpr) || this.canvas.height !== Math.floor(h * dpr)) {
-      this.canvas.width = Math.floor(w * dpr);
-      this.canvas.height = Math.floor(h * dpr);
+    const winW = typeof window !== 'undefined' ? window.innerWidth : 1024;
+    const winH = typeof window !== 'undefined' ? window.innerHeight : 768;
+    const w = Math.max(1, Math.round(parent?.clientWidth || winW));
+    const h = Math.max(1, Math.round(parent?.clientHeight || winH));
+    const dpr = Math.min(2, (typeof window !== 'undefined' && window.devicePixelRatio) || 1);
+    if (this.VW && this.VH) {
+      this.cam.x += (w - this.VW) / 2;
+      this.cam.y += (h - this.VH) / 2;
     }
-    if (this.pixiApp) {
-      this.pixiApp.renderer.resize(w, h);
-    }
+    this.VW = w;
+    this.VH = h;
+    this.dpr = dpr;
+    this.canvas.width = Math.round(w * dpr);
+    this.canvas.height = Math.round(h * dpr);
+    this.canvas.style.width = `${w}px`;
+    this.canvas.style.height = `${h}px`;
   }
 
-  public fitFloor(map: WorldMap): void {
-    const parent = this.canvas.parentElement;
-    const viewW = parent?.clientWidth || 900;
-    const viewH = parent?.clientHeight || 650;
-    const mapPxW = map.w * TILE_PX;
-    const mapPxH = map.h * TILE_PX;
-    const zx = (viewW - 48) / mapPxW;
-    const zy = (viewH - 48) / mapPxH;
-    this.zoom = Math.max(0.42, Math.min(1.8, Math.min(zx, zy)));
-    this.camX = mapPxW / 2;
-    this.camY = mapPxH / 2;
-    this.followActive = false;
+  destroy(): void {
+    for (const fn of this.cleanup.splice(0)) fn();
+    this.tracker.clear();
+    this.poses.clear();
+    this.canvas.style.cursor = '';
   }
 
-  private attachPointerListeners(): void {
-    this.canvas.addEventListener('mousedown', (ev) => {
-      if (ev.button !== 0) return;
-      this.isDragging = true;
-      this.dragMoved = false;
-      this.dragStartX = ev.clientX;
-      this.dragStartY = ev.clientY;
-    });
+  // -------------------------------------------------------------------------
+  // Input: pan (pointer capture, 4px threshold), wheel zoom about cursor, pick
+  // -------------------------------------------------------------------------
 
-    window.addEventListener('mousemove', (ev) => {
-      if (!this.isDragging) return;
-      const dx = ev.clientX - this.dragStartX;
-      const dy = ev.clientY - this.dragStartY;
-      if (Math.hypot(dx, dy) > 4) {
-        this.dragMoved = true;
-        this.followActive = false;
-      }
-      this.camX -= dx / this.zoom;
-      this.camY -= dy / this.zoom;
-      this.dragStartX = ev.clientX;
-      this.dragStartY = ev.clientY;
-    });
+  private on<K extends keyof HTMLElementEventMap>(
+    type: K,
+    fn: (ev: HTMLElementEventMap[K]) => void,
+    opts?: AddEventListenerOptions,
+  ): void {
+    this.canvas.addEventListener(type, fn, opts);
+    this.cleanup.push(() => this.canvas.removeEventListener(type, fn, opts));
+  }
 
-    window.addEventListener('mouseup', (ev) => {
-      if (!this.isDragging) return;
-      this.isDragging = false;
-      if (!this.dragMoved) {
-        this.handleCanvasClick(ev.clientX, ev.clientY);
+  private local(ev: MouseEvent): [number, number] {
+    const r = this.canvas.getBoundingClientRect();
+    return [ev.clientX - r.left, ev.clientY - r.top];
+  }
+
+  private attachPointer(): void {
+    this.on('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      this.drag = { id: e.pointerId, x: e.clientX, y: e.clientY, cx: this.cam.x, cy: this.cam.y, moved: false };
+      try {
+        this.canvas.setPointerCapture(e.pointerId);
+      } catch {
+        // pointer already released; nothing to capture
       }
     });
-
-    this.canvas.addEventListener(
+    this.on('pointermove', (e) => {
+      const d = this.drag;
+      if (!d || d.id !== e.pointerId) return;
+      const dx = e.clientX - d.x;
+      const dy = e.clientY - d.y;
+      if (!d.moved && Math.abs(dx) + Math.abs(dy) > DRAG_THRESHOLD) {
+        d.moved = true;
+        this.updateCursor();
+      }
+      if (d.moved) {
+        this.cam.x = d.cx + dx;
+        this.cam.y = d.cy + dy;
+      }
+    });
+    const end = (e: PointerEvent, click: boolean) => {
+      const d = this.drag;
+      if (!d || d.id !== e.pointerId) return;
+      this.drag = null;
+      if (this.canvas.hasPointerCapture?.(e.pointerId)) this.canvas.releasePointerCapture(e.pointerId);
+      this.updateCursor();
+      if (!click || d.moved) return;
+      const [sx, sy] = this.local(e);
+      const g = unproject(this.cam, sx, sy);
+      if (this.coneMode) {
+        this.onClickTile(Math.floor(g.x), Math.floor(g.y));
+        return;
+      }
+      this.onSelectVehicle(pickNearest(this.poses, g.x, g.y, PICK_RADIUS));
+    };
+    this.on('pointerup', (e) => end(e, true));
+    this.on('pointercancel', (e) => end(e, false));
+    this.on(
       'wheel',
-      (ev) => {
-        ev.preventDefault();
-        const factor = ev.deltaY < 0 ? 1.12 : 0.89;
-        this.zoom = Math.max(0.4, Math.min(2.4, this.zoom * factor));
+      (e) => {
+        e.preventDefault();
+        const [mx, my] = this.local(e);
+        Object.assign(this.cam, zoomAt(this.cam, mx, my, Math.exp(-e.deltaY * 0.0015)));
       },
       { passive: false },
     );
   }
 
-  private lastWorld: World | null = null;
-
-  private screenToWorldTile(clientX: number, clientY: number): { x: number; y: number } {
-    const rect = this.canvas.getBoundingClientRect();
-    const sx = clientX - rect.left;
-    const sy = clientY - rect.top;
-    const worldPxX = (sx - rect.width / 2) / this.zoom + this.camX;
-    const worldPxY = (sy - rect.height / 2) / this.zoom + this.camY;
-    return {
-      x: worldPxX / TILE_PX,
-      y: worldPxY / TILE_PX,
-    };
+  private updateCursor(): void {
+    const c = this.coneMode ? 'crosshair' : this.drag?.moved ? 'grabbing' : 'grab';
+    if (c !== this.cursor) {
+      this.cursor = c;
+      this.canvas.style.cursor = c;
+    }
   }
 
-  private handleCanvasClick(clientX: number, clientY: number): void {
-    if (!this.lastWorld) return;
-    const pt = this.screenToWorldTile(clientX, clientY);
-    const tileX = Math.floor(pt.x);
-    const tileY = Math.floor(pt.y);
+  // -------------------------------------------------------------------------
+  // Frame
+  // -------------------------------------------------------------------------
 
-    if (this.coneMode && this.onClickTile) {
-      this.onClickTile(tileX, tileY);
-      return;
+  /** 0..1 sine pulse; constant 0.5 under prefers-reduced-motion. */
+  private pulse = (periodMs: number, phase = 0): number =>
+    this.reducedMotion ? 0.5 : 0.5 + 0.5 * Math.sin((this.nowMs / periodMs) * Math.PI * 2 + phase);
+
+  render(world: World, opts: RenderOptions, nowMs: number): void {
+    this.nowMs = nowMs;
+    const map = world.map;
+    this.lastMap = map;
+    const key = `${map.w}x${map.h}`;
+    if (key !== this.mapKey) {
+      this.mapKey = key;
+      this.needsFit = true;
+    }
+    if (this.needsFit) this.fit();
+    this.coneMode = opts.coneMode;
+    this.updateCursor();
+
+    // Remote vehicles slide between the last two world.t values; the driven (locally
+    // predicted) vehicle is drawn at its actual pose.
+    this.tracker.update(world.t, nowMs, world.vehicles);
+    const poses = new Map<string, Pose>();
+    for (const v of world.vehicles) {
+      const p = v.id === opts.myVid ? null : this.tracker.pose(v.id, nowMs);
+      poses.set(v.id, p ?? { x: v.px, y: v.py, a: v.angle });
+    }
+    this.poses = poses;
+
+    // Camera follow: only the vehicle this client drives.
+    const me = opts.myVid ? world.vehicles.find((v) => v.id === opts.myVid) : undefined;
+    if (!me) this.followId = null;
+    else {
+      if (this.followId !== me.id) {
+        this.followId = me.id;
+        if (this.cam.zoom < 0.9) this.cam.zoom = 1;
+      }
+      const p = poses.get(me.id)!;
+      const t = centreOn(this.cam, p.x, p.y, this.VW, this.VH);
+      this.cam.x += (t.x - this.cam.x) * 0.12;
+      this.cam.y += (t.y - this.cam.y) * 0.12;
     }
 
-    // Check if user clicked on a vehicle
-    let closest: Vehicle | null = null;
-    let bestD = 0.85;
-    for (const v of this.lastWorld.vehicles) {
-      const d = Math.hypot(v.px - pt.x, v.py - pt.y);
-      if (d < bestD) {
-        bestD = d;
-        closest = v;
+    const ctx = this.ctx;
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = BG;
+    ctx.fillRect(0, 0, this.VW, this.VH);
+    this.drawFloor(world, opts);
+    if (opts.layers.routes) this.drawRoutes(world, opts);
+    const items = this.sceneItems(world, opts);
+    items.sort((a, b) => a.d - b.d);
+    for (const it of items) it.fn();
+    this.drawLabels(world, opts);
+    if (me) this.drawGuide(world, me, opts);
+  }
+
+  /** Is grid point (gx, gy) on screen (with an iso-pixel margin for tall objects)? */
+  private visible(gx: number, gy: number, margin = 80): boolean {
+    const [sx, sy] = this.painter.P(gx, gy);
+    const m = margin * this.cam.zoom + 8;
+    return sx > -m && sx < this.VW + m && sy > -m && sy < this.VH + m * 1.5;
+  }
+
+  private drawFloor(world: World, opts: RenderOptions): void {
+    const pt = this.painter;
+    const ctx = this.ctx;
+    const map = world.map;
+    const W = map.w;
+    const H = map.h;
+    const z = this.cam.zoom;
+    const stroke = 'rgba(148,163,184,0.35)';
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        if (!this.visible(x + 0.5, y + 0.5, TW)) continue;
+        const wall = x === 0 || y === 0 || x === W - 1 || y === H - 1;
+        const fill = wall ? '#C3CCD8' : isHighway(map, x, y) ? '#D4DFED' : KFLOOR[floorKind(map, x, y)];
+        pt.tile(x, y, fill, stroke, 0.7);
       }
     }
-
-    if (closest && this.onSelectVehicle) {
-      this.onSelectVehicle(closest.id);
-    } else if (this.onClickTile && this.coneMode) {
-      this.onClickTile(tileX, tileY);
-    }
-  }
-
-  private drawAtlasSprite(
-    ctx: CanvasRenderingContext2D,
-    spriteName: string,
-    dx: number,
-    dy: number,
-    dw: number,
-    dh: number,
-  ): boolean {
-    if (!this.atlasImage || !this.atlasManifest) return false;
-    const rect = this.atlasManifest.sprites[spriteName];
-    if (!rect) return false;
-    ctx.drawImage(this.atlasImage, rect.x, rect.y, rect.w, rect.h, dx, dy, dw, dh);
-    return true;
-  }
-
-  /**
-   * Re-bakes 16x16 floor chunks only when facility tier changes.
-   */
-  private ensureFloorChunks(map: WorldMap): void {
-    if (this.cachedFloorTier === map.tier && this.floorChunks.size > 0) return;
-    this.cachedFloorTier = map.tier;
-    this.floorChunks.clear();
-
-    if (typeof document === 'undefined') return;
-
-    const chunksX = Math.ceil(map.w / CHUNK_TILES);
-    const chunksY = Math.ceil(map.h / CHUNK_TILES);
-
-    for (let cy = 0; cy < chunksY; cy++) {
-      for (let cx = 0; cx < chunksX; cx++) {
-        const chunkCanvas = document.createElement('canvas');
-        chunkCanvas.width = CHUNK_TILES * TILE_PX;
-        chunkCanvas.height = CHUNK_TILES * TILE_PX;
-        const cctx = chunkCanvas.getContext('2d');
-        if (!cctx) continue;
-
-        for (let ty = 0; ty < CHUNK_TILES; ty++) {
-          const gy = cy * CHUNK_TILES + ty;
-          if (gy >= map.h) continue;
-          for (let tx = 0; tx < CHUNK_TILES; tx++) {
-            const gx = cx * CHUNK_TILES + tx;
-            if (gx >= map.w) continue;
-
-            const px = tx * TILE_PX;
-            const py = ty * TILE_PX;
-            const isWall = gx === 0 || gy === 0 || gx === map.w - 1 || gy === map.h - 1;
-            const fk = floorKind(map, gx, gy);
-            const hwy = isHighway(map, gx, gy);
-
-            let floorSprite = 'floor_main';
-            if (isWall) floorSprite = 'wall';
-            else if (hwy) floorSprite = 'floor_aisle';
-            else if (fk === 'cold') floorSprite = 'floor_cold';
-            else if (fk === 'haz') floorSprite = 'floor_hazmat';
-            else if (fk === 'bulk') floorSprite = 'floor_bulk';
-            else if (fk === 'ambient') floorSprite = 'floor_ambient';
-
-            if (!this.drawAtlasSprite(cctx, floorSprite, px, py, TILE_PX, TILE_PX)) {
-              cctx.fillStyle = isWall
-                ? '#334155'
-                : hwy
-                  ? '#e5dec9'
-                  : fk === 'cold'
-                    ? '#e0f2fe'
-                    : fk === 'haz'
-                      ? '#fef3c7'
-                      : '#ece7dc';
-              cctx.fillRect(px, py, TILE_PX, TILE_PX);
-              cctx.strokeStyle = 'rgba(148, 163, 184, 0.22)';
-              cctx.strokeRect(px + 0.5, py + 0.5, TILE_PX - 1, TILE_PX - 1);
-            }
-
-            // Draw subtle directional lane arrows on highway & aisles
-            const dir = laneDir(map, gx, gy);
-            if (dir && (dir[0] !== 0 || dir[1] !== 0) && (gx + gy) % 3 === 0) {
-              cctx.save();
-              cctx.translate(px + TILE_PX / 2, py + TILE_PX / 2);
-              cctx.rotate(Math.atan2(dir[1], dir[0]));
-              cctx.fillStyle = 'rgba(100, 116, 139, 0.28)';
-              cctx.beginPath();
-              cctx.moveTo(5, 0);
-              cctx.lineTo(-4, -3.5);
-              cctx.lineTo(-4, 3.5);
-              cctx.closePath();
-              cctx.fill();
-              cctx.restore();
-            }
-          }
-        }
-
-        this.floorChunks.set(`${cx},${cy}`, chunkCanvas);
+    // one-way lane arrows
+    ctx.strokeStyle = 'rgba(71,85,105,0.55)';
+    ctx.lineWidth = Math.max(1, 1.6 * z);
+    ctx.lineJoin = 'round';
+    for (let y = 1; y < H - 1; y++) {
+      for (let x = 1; x < W - 1; x++) {
+        if ((x + y) % 3) continue;
+        const d = laneDir(map, x, y);
+        if (!d || !this.visible(x + 0.5, y + 0.5, TW)) continue;
+        const cx = x + 0.5;
+        const cy = y + 0.5;
+        const pp = [-d[1], d[0]];
+        const tip = pt.P(cx + d[0] * 0.2, cy + d[1] * 0.2);
+        const a = pt.P(cx - d[0] * 0.1 + pp[0] * 0.15, cy - d[1] * 0.1 + pp[1] * 0.15);
+        const b = pt.P(cx - d[0] * 0.1 - pp[0] * 0.15, cy - d[1] * 0.1 - pp[1] * 0.15);
+        ctx.beginPath();
+        ctx.moveTo(a[0], a[1]);
+        ctx.lineTo(tip[0], tip[1]);
+        ctx.lineTo(b[0], b[1]);
+        ctx.stroke();
       }
     }
-  }
-
-  public render(
-    w: World,
-    selectedVid: string | null,
-    myVid: string | null,
-    overlays: Map<string, RenderVehicleOverlay>,
-  ): void {
-    this.lastWorld = w;
-    this.resize();
-    const ctx = this.ctx2d;
-    if (!ctx) return;
-
-    this.ensureFloorChunks(w.map);
-
-    const activeId = myVid || selectedVid;
-    if (this.followActive && activeId) {
-      const targetV = w.vehicles.find((v) => v.id === activeId);
-      if (targetV) {
-        this.camX += (targetV.px * TILE_PX - this.camX) * 0.18;
-        this.camY += (targetV.py * TILE_PX - this.camY) * 0.18;
-      }
-    }
-
-    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-    const viewW = this.canvas.width / dpr;
-    const viewH = this.canvas.height / dpr;
-
+    // dashed lane centre lines
     ctx.save();
-    ctx.scale(dpr, dpr);
-    ctx.fillStyle = '#e5e0d3';
-    ctx.fillRect(0, 0, viewW, viewH);
-
-    ctx.translate(viewW / 2, viewH / 2);
-    ctx.scale(this.zoom, this.zoom);
-    ctx.translate(-this.camX, -this.camY);
-
-    // 1. Draw cached 16x16 floor chunks
-    const chunksX = Math.ceil(w.map.w / CHUNK_TILES);
-    const chunksY = Math.ceil(w.map.h / CHUNK_TILES);
-    for (let cy = 0; cy < chunksY; cy++) {
-      for (let cx = 0; cx < chunksX; cx++) {
-        const chunk = this.floorChunks.get(`${cx},${cy}`);
-        if (chunk) {
-          ctx.drawImage(chunk, cx * CHUNK_TILES * TILE_PX, cy * CHUNK_TILES * TILE_PX);
-        }
-      }
-    }
-
-    // Zone labels
-    for (const z of w.map.zones) {
-      const kInfo = KINDS[z.kind] || KINDS.ambient;
-      ctx.fillStyle = 'rgba(30, 41, 59, 0.55)';
-      ctx.font = '600 10px Inter, sans-serif';
-      ctx.fillText(
-        `${kInfo.label.toUpperCase()} ZONE`,
-        (z.x + 0.3) * TILE_PX,
-        (z.y - 0.25) * TILE_PX,
+    ctx.setLineDash([8 * z, 8 * z]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = Math.max(1, 1.5 * z);
+    const line = (a: [number, number], b: [number, number]) => {
+      ctx.beginPath();
+      ctx.moveTo(a[0], a[1]);
+      ctx.lineTo(b[0], b[1]);
+      ctx.stroke();
+    };
+    for (const h of map.hwyY) line(pt.P(1, h + 1), pt.P(W - 1, h + 1));
+    line(pt.P(5, 1), pt.P(5, H - 1));
+    ctx.restore();
+    // rack shadows
+    for (const r of map.racks) {
+      if (!this.visible(r.x + 0.5, r.y + 0.5)) continue;
+      pt.poly(
+        [pt.P(r.x + 1, r.y), pt.P(r.x + 1.6, r.y + 0.2), pt.P(r.x + 1.6, r.y + 1.2), pt.P(r.x + 1, r.y + 1)],
+        'rgba(15,23,42,0.09)',
       );
     }
-
-    // Index open orders by rack slot (`rx,ry`)
-    const rackOrders = new Map<string, Order>();
-    for (const o of w.orders) {
-      if (o.state === 'open' || o.state === 'claimed') {
-        rackOrders.set(`${o.slot.rx},${o.slot.ry}`, o);
-      }
+    // district outlines
+    for (const a of map.areas) {
+      if (a.kind === 'office') continue;
+      ctx.save();
+      ctx.setLineDash([6 * z + 2, 5 * z + 2]);
+      pt.poly(
+        [pt.P(a.x, a.y), pt.P(a.x + a.w, a.y), pt.P(a.x + a.w, a.y + a.h), pt.P(a.x, a.y + a.h)],
+        null,
+        KOUT[a.kind],
+        Math.max(1.2, 2 * z),
+      );
+      ctx.restore();
     }
-
-    // 2. Build Y-sorted draw list for racks, conveyors, bays, chargers, spills, cones, and vehicles
-    interface DrawItem {
-      sortY: number;
-      draw: () => void;
+    // bay drop pads (transfer bays in the → NET accent) and charger pads
+    for (const b of map.bays) {
+      const net = b.isTransferBay;
+      for (const t of b.tiles) pt.tile(t.x, t.y, net ? '#C7D2FE' : '#BFD3F2', net ? '#6366F1' : '#3B82F6', 1.5);
     }
-    const yItems: DrawItem[] = [];
-
-    const convPhase = Math.floor((w.t * 8) % 4);
-    for (const r of w.map.racks) {
-      const x = r.x;
-      const y = r.y;
-      const px = x * TILE_PX;
-      const py = y * TILE_PX;
-      const ord = rackOrders.get(`${x},${y}`);
-      const fk = r.kind || floorKind(w.map, x, y);
-      let spriteName = ord
-        ? ord.p0
-          ? 'rack_stocked_p0'
-          : ord.card
-            ? 'rack_stocked_card'
-            : `rack_stocked_${fk}`
-        : `rack_empty_${fk}`;
-      if (!this.atlasManifest?.sprites[spriteName]) {
-        spriteName = ord ? 'rack_stocked' : 'rack_empty';
-      }
-      yItems.push({
-        sortY: y + 0.1,
-        draw: () => {
-          if (!this.drawAtlasSprite(ctx, spriteName, px, py, TILE_PX, TILE_PX)) {
-            ctx.fillStyle = ord ? '#1e3a8a' : '#334155';
-            ctx.fillRect(px + 2, py + 2, TILE_PX - 4, TILE_PX - 4);
-          }
-          if (ord?.isTransfer || ord?.destSite) {
-            ctx.strokeStyle = '#6366f1';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(px + 3, py + 3, TILE_PX - 6, TILE_PX - 6);
-          }
-        },
-      });
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `700 ${Math.max(9, 13 * z)}px sans-serif`;
+    for (const c of map.chargers) {
+      pt.tile(c.x, c.y, '#BBF7D0', '#16A34A', 1.5);
+      const [bx, by] = pt.P(c.x + 0.5, c.y + 0.5);
+      ctx.fillStyle = '#15803D';
+      ctx.fillText('⚡', bx, by);
     }
-
-    for (const c of w.map.conveyors) {
-      const px = c.x * TILE_PX;
-      const py = c.y * TILE_PX;
-      const spriteName = `conveyor_f${convPhase}`;
-      yItems.push({
-        sortY: c.y + 0.05,
-        draw: () => {
-          if (!this.drawAtlasSprite(ctx, spriteName, px, py, TILE_PX, TILE_PX)) {
-            ctx.fillStyle = '#475569';
-            ctx.fillRect(px + 2, py + 5, TILE_PX - 4, TILE_PX - 10);
-          }
-        },
-      });
-    }
-
-    // Outbound Bays & Transfer Bays (`→ NET`)
-    for (const b of w.map.bays) {
-      const bayState = w.bays.find((bs) => bs.id === b.id);
-      const isTransfer = Boolean(b.isTransferBay || bayState?.isTransferBay);
-      const isAway = bayState ? w.t < bayState.departUntil : false;
-
-      for (const t of b.tiles) {
-        const px = t.x * TILE_PX;
-        const py = t.y * TILE_PX;
-        yItems.push({
-          sortY: t.y + 0.08,
-          draw: () => {
-            const sprite = isTransfer
-              ? 'transfer_bay_net'
-              : isAway
-                ? 'bay_east'
-                : 'trailer';
-            if (!this.drawAtlasSprite(ctx, sprite, px, py, TILE_PX, TILE_PX)) {
-              ctx.fillStyle = isTransfer ? '#312e81' : '#1e293b';
-              ctx.fillRect(px + 2, py + 2, TILE_PX - 4, TILE_PX - 4);
-            }
-          },
-        });
-      }
-
-      // Bay label & load counter
-      yItems.push({
-        sortY: b.y + 0.9,
-        draw: () => {
-          const lx = (b.dropX - 0.8) * TILE_PX;
-          const ly = (b.y + 0.5) * TILE_PX;
-          ctx.fillStyle = isTransfer ? '#312e81' : '#0f172a';
-          ctx.font = 'bold 10px Inter, sans-serif';
-          const loadStr = bayState ? `${bayState.load}/${bayState.cap}` : '';
-          const tag = isTransfer ? `${b.id} → NET (${loadStr})` : `${b.id} (${loadStr})`;
-          ctx.fillText(tag, lx, ly);
-        },
-      });
-    }
-
-    // Chargers
-    w.map.chargers.forEach((c, idx) => {
-      const busy = w.vehicles.some((v) => v.chargerIdx === idx || (v.humanCharging && v.tile.x === c.x && v.tile.y === c.y));
-      const px = c.x * TILE_PX;
-      const py = c.y * TILE_PX;
-      yItems.push({
-        sortY: c.y + 0.06,
-        draw: () => {
-          const sName = busy ? 'charger_busy' : 'charger';
-          if (!this.drawAtlasSprite(ctx, sName, px, py, TILE_PX, TILE_PX)) {
-            ctx.fillStyle = busy ? '#065f46' : '#0f172a';
-            ctx.fillRect(px + 4, py + 4, TILE_PX - 8, TILE_PX - 8);
-          }
-        },
-      });
-    });
-
-    // Spills / Hazards
-    for (const h of w.spills) {
-      const px = h.x * TILE_PX;
-      const py = h.y * TILE_PX;
-      yItems.push({
-        sortY: h.y + 0.12,
-        draw: () => {
-          if (!this.drawAtlasSprite(ctx, 'spill', px, py, TILE_PX, TILE_PX)) {
-            ctx.fillStyle = 'rgba(234, 179, 8, 0.75)';
-            ctx.beginPath();
-            ctx.arc(px + TILE_PX / 2, py + TILE_PX / 2, TILE_PX * 0.35, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        },
-      });
-    }
-
-    // Cones
-    for (const coneKey of w.cones) {
-      const [cxStr, cyStr] = coneKey.split(',');
-      const cx = Number(cxStr);
-      const cy = Number(cyStr);
-      if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
-      const px = cx * TILE_PX;
-      const py = cy * TILE_PX;
-      yItems.push({
-        sortY: cy + 0.2,
-        draw: () => {
-          if (!this.drawAtlasSprite(ctx, 'cone', px, py, TILE_PX, TILE_PX)) {
-            ctx.fillStyle = '#ea580c';
-            ctx.beginPath();
-            ctx.arc(px + TILE_PX / 2, py + TILE_PX / 2, 8, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        },
-      });
-    }
-
-    // Guide ring & path beam for selected/driven vehicle
-    const focusV =
-      w.vehicles.find((v) => v.id === (myVid || selectedVid)) || w.vehicles[0];
-    if (focusV) {
-      // Draw planned AI path if available
-      if (focusV.path && focusV.path.length > 0) {
-        ctx.save();
-        ctx.strokeStyle = 'rgba(13, 148, 136, 0.45)';
-        ctx.lineWidth = 2.5;
-        ctx.setLineDash([5, 4]);
-        ctx.beginPath();
-        ctx.moveTo(focusV.px * TILE_PX, focusV.py * TILE_PX);
-        for (const pt of focusV.path) {
-          ctx.lineTo((pt.x + 0.5) * TILE_PX, (pt.y + 0.5) * TILE_PX);
+    // traffic heat
+    const heat = world.heat;
+    if (opts.layers.traffic && heat && heat.length >= W * H) {
+      for (let y = 1; y < H - 1; y++) {
+        for (let x = 1; x < W - 1; x++) {
+          const h = (heat[y * W + x] || 0) / 14;
+          if (h < 0.05) continue;
+          const hot = h > 0.5;
+          pt.tile(x, y, `rgba(${hot ? 220 : 245},${hot ? 38 : 158},${hot ? 38 : 11},${Math.min(0.6, h * 0.7)})`);
         }
-        ctx.stroke();
-        ctx.restore();
-      }
-
-      const g = guide(w, focusV);
-      if (g && g.x != null && g.y != null) {
-        const gx = (g.x + 0.5) * TILE_PX;
-        const gy = (g.y + 0.5) * TILE_PX;
-        const ringColor =
-          g.kind === 'pick' ? '#d97706' : g.kind === 'drop' ? '#0d9488' : '#16a34a';
-        ctx.save();
-        ctx.strokeStyle = ringColor;
-        ctx.lineWidth = 2.5;
-        ctx.setLineDash([4, 3]);
-        ctx.beginPath();
-        ctx.moveTo(focusV.px * TILE_PX, focusV.py * TILE_PX);
-        ctx.lineTo(gx, gy);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.beginPath();
-        ctx.arc(gx, gy, TILE_PX * 0.48, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
       }
     }
+    // order pickup rings
+    for (const o of world.orders) {
+      if (o.state === 'picked' || o.state === 'done') continue;
+      const s = o.slot;
+      const claimer = o.claimant ? world.vehicles.find((v) => v.id === o.claimant) : undefined;
+      const col = claimer
+        ? teamColor(claimer)
+        : o.p0
+          ? '#F59E0B'
+          : o.card
+            ? '#7C3AED'
+            : o.isTransfer || o.destSite
+              ? '#6366F1'
+              : '#64748B';
+      const pulse = this.pulse(280 * Math.PI * 2, o.id);
+      pt.poly(
+        pt.circleGrid(s.ax + 0.5, s.ay + 0.5, 0.36 + (claimer ? 0 : 0.06 * pulse)),
+        claimer && col.startsWith('#') ? `${col}33` : null,
+        col,
+        o.p0 ? 3 : 2,
+      );
+    }
+    // spills shrink as their TTL runs out
+    for (const h of world.hazards ?? world.spills ?? []) {
+      const left = Math.max(0, Math.min(1, (h.until - world.t) / 30));
+      pt.poly(pt.circleGrid(h.x + 0.5, h.y + 0.5, 0.42 + 0.08 * left), 'rgba(250,204,21,0.55)', '#CA8A04', 2);
+      pt.poly(pt.circleGrid(h.x + 0.5, h.y + 0.5, 0.22), 'rgba(250,204,21,0.85)', 'rgba(202,138,4,0.5)', 1);
+    }
+    // pulsing incident / near-miss markers
+    const mp = this.pulse(150 * Math.PI * 2);
+    for (const m of world.markers) {
+      if (m.until <= world.t) continue;
+      const inc = m.kind === 'incident';
+      pt.poly(
+        pt.circleGrid(m.x + 0.5, m.y + 0.5, 0.5 + 0.35 * mp * (inc ? 1 : 0.6)),
+        inc ? 'rgba(220,38,38,0.28)' : 'rgba(245,158,11,0.3)',
+        inc ? '#DC2626' : '#D97706',
+        2,
+      );
+    }
+  }
 
-    // Vehicles (Y-sorted by py)
-    for (const v of w.vehicles) {
-      const ov = overlays.get(v.id);
-      const brainError = v.brainError || ov?.brainError || null;
-      const brainThinking =
-        Boolean(ov?.brainThinking) ||
-        w.pendingDecisions.some((req) => req.agentId === v.id);
-      const isBot = Boolean(ov?.isBot);
-      const isSelected = v.id === selectedVid || v.id === myVid;
-
-      yItems.push({
-        sortY: v.py + 0.5,
-        draw: () => {
-          const vx = v.px * TILE_PX;
-          const vy = v.py * TILE_PX;
-          const size = TILE_PX * 1.18;
-
-          if (isSelected) {
-            ctx.save();
-            ctx.strokeStyle = v.id === myVid ? '#0d9488' : '#4f46e5';
-            ctx.lineWidth = 2.2;
-            ctx.beginPath();
-            ctx.arc(vx, vy, TILE_PX * 0.52, 0, Math.PI * 2);
-            ctx.stroke();
-            ctx.restore();
-          }
-
-          if (brainError) {
-            ctx.save();
-            ctx.strokeStyle = '#e11d48';
-            ctx.lineWidth = 2.5;
-            ctx.beginPath();
-            ctx.arc(vx, vy, TILE_PX * 0.56, 0, Math.PI * 2);
-            ctx.stroke();
-            ctx.restore();
-          }
-
-          const spriteKey = resolveVehicleSpriteKey(
-            v.type,
-            v.strategy,
-            v.human,
-            v.cargo.length > 0,
-            v.angle,
-            this.atlasManifest,
-          );
-
-          if (!this.drawAtlasSprite(ctx, spriteKey, vx - size / 2, vy - size / 2, size, size)) {
-            const stratColor = v.human
-              ? HUMAN.color
-              : STRATEGIES[v.strategy]?.color || '#4f46e5';
-            ctx.save();
-            ctx.translate(vx, vy);
-            ctx.rotate(v.angle);
-            ctx.fillStyle = stratColor;
-            ctx.fillRect(-11, -8, 22, 16);
-            ctx.restore();
-          }
-
-          // Battery mini-bar below vehicle
-          const bw = 24;
-          const bh = 3.5;
-          ctx.fillStyle = 'rgba(15, 23, 42, 0.65)';
-          ctx.fillRect(vx - bw / 2, vy + 15, bw, bh);
-          ctx.fillStyle =
-            v.battery > 40 ? '#22c55e' : v.battery > 20 ? '#f59e0b' : '#ef4444';
-          ctx.fillRect(
-            vx - bw / 2,
-            vy + 15,
-            bw * Math.max(0, Math.min(1, v.battery / 100)),
-            bh,
-          );
-
-          // Floating label above vehicle (ID / Driver + BOT / Thinking / Brain Error badge)
-          ctx.font = 'bold 9.5px Inter, sans-serif';
-          ctx.textAlign = 'center';
-          const baseLabel = v.driver ? `${v.id} · ${v.driver}` : `${v.id}`;
-          const fullLabel = isBot ? `${baseLabel} [BOT]` : baseLabel;
-          ctx.fillStyle = '#0f172a';
-          ctx.fillText(fullLabel, vx, vy - 17);
-
-          if (brainError) {
-            const errBadge = '! BRAIN ERR';
-            ctx.fillStyle = '#be123c';
-            ctx.fillRect(vx - 30, vy - 31, 60, 11);
-            ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 8.5px Inter, sans-serif';
-            ctx.fillText(errBadge, vx, vy - 23);
-          } else if (brainThinking) {
-            ctx.fillStyle = '#4f46e5';
-            ctx.fillRect(vx - 20, vy - 31, 40, 11);
-            ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 8.5px Inter, sans-serif';
-            ctx.fillText('⋯ AI', vx, vy - 23);
+  private sceneItems(world: World, opts: RenderOptions): SceneItem[] {
+    const pt = this.painter;
+    const ctx = this.ctx;
+    const map = world.map;
+    const items: SceneItem[] = [];
+    for (const r of map.racks) {
+      if (this.visible(r.x + 0.5, r.y + 0.5)) items.push({ d: r.x + r.y + 1, fn: () => drawRack(pt, r) });
+    }
+    for (const st of map.structs) items.push({ d: st.x + st.w + st.y + st.h - 1, fn: () => drawStruct(pt, st) });
+    for (const c of map.conveyors) {
+      items.push({
+        d: c.x + c.y + 1,
+        fn: () => {
+          pt.aaBox(c.x + 0.1, c.y, 0.8, 1, 0, 7, '#94A3B8', 'rgba(15,23,42,0.2)');
+          pt.aaBox(c.x + 0.2, c.y, 0.6, 1, 7, 1.5, '#475569');
+        },
+      });
+    }
+    // totes riding the conveyor line (positions are a pure function of sim time)
+    const NCV = map.conveyors.length;
+    if (NCV) {
+      for (let i = 0; i < 16; i++) {
+        const p = (world.t * 0.6 + (i * NCV) / 16) % NCV;
+        const c = map.conveyors[Math.floor(p)];
+        if (!c) continue;
+        const fy = p - Math.floor(p);
+        items.push({ d: c.x + c.y + fy + 1, fn: () => pt.aaBox(c.x + 0.3, c.y + fy * 0.6, 0.4, 0.4, 8.5, 5, '#E2B77A') });
+      }
+    }
+    // west dock trucks
+    for (const dk of map.westDocks) {
+      items.push({
+        d: 1 + dk.y + 1,
+        fn: () => {
+          pt.aaBox(0.1, dk.y - 1, 0.8, 3, 0, 18, '#94A3B8', 'rgba(15,23,42,0.2)');
+          pt.aaBox(0.1, dk.y - 0.5, 0.25, 2, 4, 8, '#334155');
+        },
+      });
+    }
+    // east trailers: slide out + fade while departing; fill bar while docked
+    for (const bay of map.bays) {
+      const b = world.bays.find((s) => s.id === bay.id);
+      const away = !!b && world.t < b.departUntil;
+      const slide = away ? Math.min(1, (b.departUntil - world.t) / 3) : 0;
+      const dx = away ? (1 - slide) * 5 : 0;
+      const net = bay.isTransferBay || !!b?.isTransferBay;
+      items.push({
+        d: map.w + bay.y + 2,
+        fn: () => {
+          if (away && dx > 4.5) return;
+          ctx.save();
+          if (away) ctx.globalAlpha = Math.max(0, 1 - dx / 5);
+          pt.aaBox(map.w - 0.95 + dx, bay.y - 1, 3.2, 3, 0, 26, net ? '#E0E7FF' : '#E2E8F0', 'rgba(15,23,42,0.25)');
+          pt.aaBox(map.w - 0.95 + dx, bay.y - 1, 3.2, 3, 26, 2, net ? '#A5B4FC' : '#CBD5E1');
+          pt.aaBox(map.w - 0.8 + dx, bay.y + 1.9, 0.14, 0.14, 28, 6, '#475569');
+          ctx.restore();
+          if (!away && b && b.cap > 0) {
+            const fill = Math.max(0, Math.min(1, b.load / b.cap));
+            const [lx, ly] = pt.P(map.w + 0.4 + dx, bay.y + 0.5, 40);
+            ctx.fillStyle = '#CBD5E1';
+            ctx.fillRect(lx - 24, ly - 5, 48, 7);
+            ctx.fillStyle = fill > 0.75 ? '#EA580C' : net ? NET_COLOR : '#2563EB';
+            ctx.fillRect(lx - 24, ly - 5, 48 * fill, 7);
           }
         },
       });
     }
-
-    yItems.sort((a, b) => a.sortY - b.sortY);
-    for (const item of yItems) {
-      item.draw();
+    for (const c of map.chargers) {
+      items.push({ d: c.x + c.y + 0.6, fn: () => pt.aaBox(c.x + 0.3, c.y + 0.82, 0.4, 0.14, 0, 16, '#16A34A') });
     }
+    // order pallets (P0 star)
+    for (const o of world.orders) {
+      if (o.state === 'picked' || o.state === 'done') continue;
+      const s = o.slot;
+      items.push({
+        d: s.ax + s.ay + 1,
+        fn: () => {
+          pt.aaBox(s.ax + 0.28, s.ay + 0.28, 0.44, 0.44, 0, 3, '#C4A06B');
+          pt.aaBox(s.ax + 0.32, s.ay + 0.32, 0.36, 0.36, 3, 8, o.p0 ? '#F59E0B' : o.card ? '#8B5CF6' : '#D9B98A');
+          if (o.p0) {
+            const [sx, sy] = pt.P(s.ax + 0.5, s.ay + 0.5, 26);
+            pt.star(sx, sy, 8 * Math.max(0.8, this.cam.zoom), '#FBBF24');
+          }
+        },
+      });
+    }
+    // cones
+    for (const k of world.cones) {
+      const [x, y] = k.split(',').map(Number);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      items.push({
+        d: x + y + 1,
+        fn: () => {
+          pt.aaBox(x + 0.25, y + 0.25, 0.5, 0.5, 0, 2, '#334155');
+          pt.aaBox(x + 0.36, y + 0.36, 0.28, 0.28, 2, 9, '#F97316');
+          pt.aaBox(x + 0.4, y + 0.4, 0.2, 0.2, 7, 2, '#FFFFFF');
+        },
+      });
+    }
+    // vehicles
+    const hl = opts.highlightStrategy;
+    for (const v of world.vehicles) {
+      const p = this.poses.get(v.id)!;
+      const strat = stratOf(v);
+      const ov = opts.overlays.get(v.id);
+      items.push({
+        d: p.x + p.y + 0.5,
+        fn: () =>
+          drawVehicle(pt, v, p, {
+            worldT: world.t,
+            dim: !!hl && hl !== strat,
+            emphasised: v.human || opts.selectedVid === v.id || (!!hl && hl === strat),
+            brainError: !!(ov?.brainError || v.brainError),
+            pulse: this.pulse,
+            nowMs: this.nowMs,
+          }),
+      });
+    }
+    return items;
+  }
 
-    // Incident / Near-miss markers
-    for (const m of w.markers) {
-      if (m.until <= w.t) continue;
-      const mx = (m.x + 0.5) * TILE_PX;
-      const my = (m.y + 0.5) * TILE_PX;
-      ctx.strokeStyle = m.kind === 'incident' ? '#e11d48' : '#f59e0b';
-      ctx.lineWidth = 2.5;
+  private drawRoutes(world: World, opts: RenderOptions): void {
+    const pt = this.painter;
+    const ctx = this.ctx;
+    const hl = opts.highlightStrategy;
+    ctx.save();
+    ctx.setLineDash([3, 6]);
+    ctx.lineWidth = Math.max(1.5, 2.2 * this.cam.zoom);
+    ctx.lineCap = 'round';
+    for (const v of world.vehicles) {
+      if (v.human || !v.path?.length) continue;
+      if (hl && hl !== stratOf(v)) continue;
+      const p = this.poses.get(v.id)!;
+      const gold = (v.orders ?? []).some((o) => o.p0) || (v.cargo ?? []).some((o) => o.p0);
+      ctx.strokeStyle = gold ? '#D97706' : teamColor(v);
+      ctx.globalAlpha = opts.selectedVid === v.id ? 1 : 0.55;
       ctx.beginPath();
-      ctx.arc(mx, my, TILE_PX * 0.45, 0, Math.PI * 2);
+      const a = pt.P(p.x, p.y);
+      ctx.moveTo(a[0], a[1]);
+      for (const n of v.path) {
+        const q = pt.P(n.x + 0.5, n.y + 0.5);
+        ctx.lineTo(q[0], q[1]);
+      }
       ctx.stroke();
     }
-
     ctx.restore();
   }
+
+  private drawLabels(world: World, opts: RenderOptions): void {
+    const pt = this.painter;
+    const ctx = this.ctx;
+    const map = world.map;
+    const z = this.cam.zoom;
+    const labels = opts.layers.labels;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    if (labels) {
+      if (z > 0.45) {
+        ctx.font = '800 13px Inter, sans-serif';
+        for (const zn of map.zones) {
+          const [sx, sy] = pt.P(zn.x + 1, zn.y + 3, 38);
+          ctx.fillStyle = KOUT[zn.kind];
+          ctx.fillText(zn.id, sx, sy - 8);
+        }
+      }
+      for (const a of map.areas) {
+        const [sx, sy] = pt.P(a.x + a.w / 2, a.y + 0.2, a.kind === 'office' ? 56 : 0);
+        pt.pill(a.name, sx, sy, KOUT[a.kind]);
+      }
+      for (const b of map.bays) {
+        const [sx, sy] = pt.P(b.dropX + 0.5, b.y + 0.5, 0);
+        const net = b.isTransferBay;
+        pt.pill(net ? `${b.id} → NET` : b.id, sx - 26 * Math.min(1, z + 0.3), sy + 1, net ? NET_COLOR : '#1D4ED8');
+      }
+    }
+    for (const m of world.markers) {
+      if (m.kind !== 'incident' || m.until <= world.t) continue;
+      const [sx, sy] = pt.P(m.x + 0.5, m.y + 0.5, 46);
+      pt.pill('Incident', sx, sy, '#DC2626');
+    }
+    if (labels && z > 1.1) {
+      for (const v of world.vehicles) {
+        const p = this.poses.get(v.id)!;
+        const [sx, sy] = pt.P(p.x, p.y, 44);
+        ctx.font = '700 11px Inter, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+        ctx.fillStyle = '#334155';
+        ctx.strokeText(v.id, sx, sy);
+        ctx.fillText(v.id, sx, sy);
+        const bw = 26;
+        const bx = sx - bw / 2;
+        const by = sy + 7;
+        const bat = Math.max(0, Math.min(100, v.battery));
+        ctx.fillStyle = 'rgba(15,23,42,0.18)';
+        ctx.fillRect(bx, by, bw, 4);
+        ctx.fillStyle = bat < 20 ? '#DC2626' : bat < 40 ? '#D97706' : '#16A34A';
+        ctx.fillRect(bx, by, (bw * bat) / 100, 4);
+      }
+    }
+    for (const v of world.vehicles) {
+      const p = this.poses.get(v.id)!;
+      const carryP0 = (v.cargo ?? []).some((o: Order) => o.p0);
+      const named = v.human || opts.selectedVid === v.id || carryP0;
+      const [sx, sy] = pt.P(p.x, p.y, 60);
+      if (named) pt.pill(carryP0 ? `★ ${v.id}` : v.id, sx, sy, carryP0 ? '#D97706' : teamColor(v));
+      // live extra: brain badges from server overlays
+      const ov = opts.overlays.get(v.id);
+      const err = ov?.brainError || v.brainError;
+      const by = named ? sy - 24 : sy;
+      if (err) pt.pill('! BRAIN ERR', sx, by, '#BE123C');
+      else if (ov?.brainThinking && labels) pt.pill('⋯ AI', sx, by, '#4F46E5');
+    }
+  }
+
+  private drawGuide(world: World, me: Vehicle, opts: RenderOptions): void {
+    const g: GuideInfo | null = opts.guide !== undefined ? opts.guide : (simGuide(world, me) as GuideInfo | null);
+    if (!g || g.x == null || g.y == null) return;
+    const pt = this.painter;
+    const ctx = this.ctx;
+    const z = this.cam.zoom;
+    const col = g.inRange ? '#16A34A' : g.kind === 'pick' ? '#F59E0B' : g.kind === 'drop' ? '#2563EB' : '#16A34A';
+    const pulse = this.pulse(260 * Math.PI * 2);
+    const cx = g.x + 0.5;
+    const cy = g.y + 0.5;
+    const p = this.poses.get(me.id) ?? { x: me.px, y: me.py, a: me.angle };
+    ctx.save();
+    pt.poly(
+      pt.circleGrid(cx, cy, g.inRange ? REACH : 0.55 + 0.15 * pulse),
+      col + (g.inRange ? '30' : '40'),
+      col,
+      g.inRange ? 4 : 3,
+    );
+    const [bx, by] = pt.P(cx, cy, 0);
+    const [, ty] = pt.P(cx, cy, 90);
+    const grd = ctx.createLinearGradient(0, by, 0, ty);
+    grd.addColorStop(0, `${col}AA`);
+    grd.addColorStop(1, `${col}00`);
+    ctx.fillStyle = grd;
+    ctx.fillRect(bx - 5 * z, ty, 10 * z, by - ty);
+    ctx.setLineDash([2, 7]);
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = col;
+    ctx.globalAlpha = 0.7;
+    const a = pt.P(p.x, p.y);
+    const b = pt.P(cx, cy);
+    ctx.beginPath();
+    ctx.moveTo(a[0], a[1]);
+    ctx.lineTo(b[0], b[1]);
+    ctx.stroke();
+    ctx.restore();
+    let label = '';
+    if (g.inRange) label = 'Press E';
+    else if (g.kind === 'pick') {
+      const id = g.order?.id ?? world.orders.find((o) => o.slot.ax === g.x && o.slot.ay === g.y)?.id;
+      label = id != null ? `Pick #${id}` : 'Pick';
+    } else if (g.kind === 'drop') {
+      const bay = g.order?.bay ?? world.map.bays.find((bb) => bb.tiles.some((t) => t.x === g.x && t.y === g.y))?.id;
+      label = bay ? `Bay ${bay}` : 'Bay';
+    } else if (g.kind === 'charge') label = 'Charger';
+    if (label) {
+      const VW = this.VW;
+      const VH = this.VH;
+      const off = bx < 40 || bx > VW - 40 || ty < 70 || by > VH - 40;
+      pt.pill(
+        label,
+        off ? Math.max(70, Math.min(VW - 70, bx)) : bx,
+        off ? Math.max(100, Math.min(VH - 120, ty)) : ty - 12,
+        col,
+      );
+    }
+  }
 }
+
+// Re-export the iso tile constants for callers that need screen<->tile math.
+export { TW, TH };

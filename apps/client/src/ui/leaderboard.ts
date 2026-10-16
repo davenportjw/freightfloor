@@ -1,0 +1,170 @@
+/**
+ * "Win the shift" leaderboard (mock updateLb, lines 2004-2021): top 5 + my row, rules,
+ * site record, difficulty vote, agent decision counts and hall of fame.
+ */
+import type { DifficultyLevel } from '@warehouse/protocol';
+import { leaderboard, type World } from '@warehouse/sim';
+import type { UiCtx, UiModule } from './context.js';
+import { button, el, KeyedView, swatch, type Child } from './dom.js';
+import {
+  difficultyLabel,
+  difficultyTooltip,
+  plural,
+  shiftLeft,
+  teamColor,
+  VOTE_LEVELS,
+  voteCounts,
+  voteLevelOf,
+} from './format.js';
+import { createPanel, type PanelHandle } from './panel.js';
+
+export type LeaderRow = ReturnType<typeof leaderboard>[number];
+
+export interface LeaderboardView<T> {
+  rows: Array<{ rank: number; row: T; mine: boolean }>;
+  /** True when my row is appended after a ⋯ gap. */
+  gap: boolean;
+  myRank: number | null;
+}
+
+/** Top `top` rows plus (after a gap) my own row when I am further down. */
+export function leaderboardView<T extends { id: string }>(
+  rows: readonly T[],
+  myVid: string | null,
+  top = 5,
+): LeaderboardView<T> {
+  const myIdx = myVid ? rows.findIndex((r) => r.id === myVid) : -1;
+  const out = rows.slice(0, top).map((row, i) => ({ rank: i + 1, row, mine: i === myIdx }));
+  const gap = myIdx >= top;
+  if (gap) out.push({ rank: myIdx + 1, row: rows[myIdx], mine: true });
+  return { rows: out, gap, myRank: myIdx >= 0 ? myIdx + 1 : null };
+}
+
+export function leaderboardHeader(myRank: number | null, t: number): string {
+  return `Win the shift${myRank ? ` · #${myRank}` : ''} · ends in ${shiftLeft(t)}`;
+}
+
+export function leaderRowEl(r: { rank: number; row: LeaderRow; mine: boolean }, onClick: () => void): HTMLElement {
+  const who = r.row.human && r.row.driver ? ` · ${r.row.driver}` : '';
+  return el(
+    'button',
+    {
+      class: `board-row lb-row num${r.mine ? ' row-hl b' : ''}`,
+      attrs: { type: 'button' },
+      title: `Select ${r.row.id}`,
+      onClick,
+    },
+    [
+      el('span', { class: 'rank muted', text: String(r.rank) }),
+      swatch(r.row.human ? teamColor('Human') : teamColor(r.row.strat)),
+      el('span', { class: 'grow ellipsis', text: `${r.row.id}${who}${r.mine ? ' ★ you' : ''}` }),
+      el('span', { class: 'muted small', text: r.row.strat }),
+      el('span', { class: 'pts b', text: String(Math.round(r.row.pts)) }),
+    ],
+  );
+}
+
+export function hallRows(w: World, limit = 5): HTMLElement[] {
+  return w.hallOfFame.slice(0, limit).map((h, i) =>
+    el('div', { class: `lb-row num${h.human ? ' row-hl b' : ''}`, title: `${h.shift} · ${h.diff} · ${h.pts} raw pts` }, [
+      el('span', { class: 'rank muted', text: String(i + 1) }),
+      el('span', { class: 'grow ellipsis' }, [
+        `${h.human && h.driver ? h.driver : h.id}${h.human ? ' ★' : ''} `,
+        el('span', { class: 'muted small', text: `${h.strat} · ${difficultyLabel(h.diff)}` }),
+      ]),
+      el('span', { class: 'pts b', text: String(h.scored) }),
+    ]),
+  );
+}
+
+export function mountLeaderboard(zone: HTMLElement, ctx: UiCtx): UiModule & { panel: PanelHandle } {
+  const header = el('div', { class: 'lb-head num' });
+  const rowsEl = el('div');
+  const rows = new KeyedView(rowsEl);
+  const restEl = el('div');
+  const rest = new KeyedView(restEl);
+  const body = el('div', { class: 'leaderboard' }, [header, rowsEl, restEl]);
+  const panel = createPanel(
+    {
+      id: 'leaderboard',
+      title: 'Leaderboard',
+      zone: 'right',
+      defaultState: 'open',
+      summary: () => {
+        const s = ctx.store;
+        if (!s.welcomed) return '';
+        const v = leaderboardView(leaderboard(s.world), s.renderMyVid());
+        return leaderboardHeader(v.myRank, s.world.t);
+      },
+    },
+    body,
+  );
+  zone.append(panel.root);
+
+  return {
+    panel,
+    update() {
+      const { store, actions } = ctx;
+      if (!store.welcomed) {
+        header.textContent = '';
+        rows.render('wait', () => [el('div', { class: 'empty', text: 'Waiting for the site…' })]);
+        rest.render('wait', () => []);
+        return;
+      }
+      const w = store.world;
+      const lb = leaderboard(w);
+      const view = leaderboardView(lb, store.renderMyVid());
+      header.textContent = leaderboardHeader(view.myRank, w.t);
+      rows.render(
+        JSON.stringify(view.rows.map((r) => [r.rank, r.row.id, Math.round(r.row.pts), r.row.driver, r.mine, r.row.strat])),
+        () => {
+          const out: Child[] = [];
+          view.rows.forEach((r, i) => {
+            if (view.gap && i === view.rows.length - 1) out.push(el('div', { class: 'gap muted', text: '⋯' }));
+            out.push(leaderRowEl(r, () => actions.select(r.row.id)));
+          });
+          if (!out.length) out.push(el('div', { class: 'empty', text: 'No vehicles on the floor.' }));
+          return out;
+        },
+      );
+      const t = w.totals;
+      const counts = voteCounts(w.difficultyVotes);
+      const myVote = store.you ? voteLevelOf(w.difficultyVotes[store.you.clientId]) : null;
+      const current = voteLevelOf(w.difficulty);
+      const dc = t.decisions;
+      const dn = dc.reroute + dc.wait + dc.push;
+      rest.render(
+        JSON.stringify([t.wins, t.humanShifts, counts, myVote, current, w.difficulty, dc, t.hazards, w.hallOfFame.length, w.hallOfFame[0]?.scored]),
+        () => [
+          el('div', { class: 'hint' }, [
+            '+10 per pallet, +40 P0, half if late, −15 per crash.',
+            t.humanShifts
+              ? el('div', { text: `Human drivers on this site: ${plural(t.wins, 'win')} in ${plural(t.humanShifts, 'shift')}.` })
+              : null,
+          ]),
+          el('div', { class: 'vote-row' }, [
+            el('span', { class: 'label', text: 'Mode', title: `Current: ${difficultyLabel(w.difficulty)}` }),
+            ...VOTE_LEVELS.map((lvl) => {
+              const b = button(
+                `${difficultyLabel(lvl)} ${counts[lvl]}`,
+                `btn small${current === lvl ? ' on' : ''}${myVote === lvl ? ' voted' : ''}`,
+                () => actions.vote(lvl as DifficultyLevel),
+                `${difficultyTooltip(lvl)}. ${plural(counts[lvl], 'vote')}${myVote === lvl ? ' (yours)' : ''}.`,
+              );
+              b.setAttribute('aria-pressed', String(myVote === lvl));
+              return b;
+            }),
+          ]),
+          el('div', {
+            class: 'hint num',
+            title: 'Each agent scores reroute, wait and push-through from its own policy, cargo and deadline slack.',
+            text: `Spills ${t.hazards} · agent calls ${dn}${dn ? ` (reroute ${dc.reroute}, wait ${dc.wait}, push ${dc.push})` : ''}`,
+          }),
+          w.hallOfFame.length ? el('div', { class: 'label sub', text: 'Hall of fame' }) : null,
+          ...hallRows(w),
+        ],
+      );
+      panel.refreshSummary();
+    },
+  };
+}

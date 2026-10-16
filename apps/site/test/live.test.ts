@@ -19,10 +19,10 @@ import {
 const runLive = process.env.RUN_LIVE === '1' || process.env.RUN_LIVE === 'true';
 
 describe.skipIf(!runLive)(
-  'M3 live Vertex AI Gemini 3.8 Flash Brain Decisions (@warehouse/site)',
+  'M3 live Vertex AI Gemini 3.5 Flash-Lite Brain Decisions (@warehouse/site)',
   () => {
     it(
-      'executes real Vertex AI gemini-3.8-flash decisions across all 4 kinds (contract, hazard, tactics, cards) with p50 < 900ms and p95 < 1800ms',
+      'executes real Vertex AI gemini-3.5-flash-lite decisions across all 4 kinds (contract, hazard, tactics, cards) with p50 < 900ms and p95 < 1800ms',
       async () => {
         const world = createWorld({ siteId: 'den-1', seed: 2026, agents: 14 });
         world.pendingDecisions.length = 0;
@@ -75,7 +75,7 @@ describe.skipIf(!runLive)(
           const v = world.vehicles.find((veh) => veh.id === vid)!;
           expect(v.brainError).toBeNull();
           expect(v.lastDecision).not.toBeNull();
-          expect(v.lastDecision?.model).toBe('gemini-3.8-flash');
+          expect(v.lastDecision?.model).toBe('gemini-3.5-flash-lite');
           expect(typeof v.lastDecision?.reason).toBe('string');
           expect(v.lastDecision!.reason.length).toBeGreaterThan(0);
           expect(v.lastDecision!.reason.length).toBeLessThanOrEqual(120);
@@ -86,7 +86,7 @@ describe.skipIf(!runLive)(
         const p95 = latencies[Math.floor((latencies.length - 1) * 0.95)];
 
         console.log(
-          `[live.test] Gemini 3.8 Flash latencies (ms): ${latencies.join(', ')} | p50=${p50}ms, p95=${p95}ms`,
+          `[live.test] Gemini 3.5 Flash-Lite latencies (ms): ${latencies.join(', ')} | p50=${p50}ms, p95=${p95}ms`,
         );
 
         expect(p50).toBeGreaterThan(0);

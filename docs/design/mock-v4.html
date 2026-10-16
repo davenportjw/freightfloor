@@ -1,0 +1,2152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Warehouse Strategy Sim — Mock v4</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+    body {
+      background: #CBD5E1; color: #0F172A; user-select: none;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+    }
+    canvas#world { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; cursor: grab; }
+    canvas#world.dragging { cursor: grabbing; }
+    canvas#world.cone-mode { cursor: crosshair; }
+    .hud {
+      background: rgba(255, 255, 255, 0.9);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(148, 163, 184, 0.45);
+      box-shadow: 0 8px 24px -6px rgba(15, 23, 42, 0.14), 0 2px 6px -1px rgba(15, 23, 42, 0.06);
+      border-radius: 14px;
+    }
+    .btn {
+      background: #F8FAFC; border: 1px solid #CBD5E1; color: #334155;
+      border-radius: 9px; padding: 5px 10px; font-weight: 600; font-size: 12.5px;
+      transition: background .12s, border-color .12s, color .12s;
+    }
+    .btn:hover { background: #EFF6FF; border-color: #3B82F6; color: #1D4ED8; }
+    .btn.on { background: #2563EB; border-color: #1D4ED8; color: #fff; }
+    .btn.warn { background: #FFF7ED; border-color: #FDBA74; color: #C2410C; }
+    .btn.warn:hover { background: #EA580C; color: #fff; border-color: #C2410C; }
+    .btn.drive { background: #0D9488; border-color: #0F766E; color: #fff; }
+    .btn.drive:hover { background: #0F766E; }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .label { font-size: 11px; font-weight: 700; letter-spacing: .06em; color: #64748B; text-transform: uppercase; }
+    .num { font-variant-numeric: tabular-nums; }
+    .row-hl { background: #EFF6FF; }
+    .board-row { cursor: pointer; border-radius: 8px; }
+    .board-row:hover { background: #F1F5F9; }
+    .toast {
+      animation: tin .18s ease-out;
+      border-left: 4px solid #64748B;
+    }
+    @keyframes tin { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; background: #F1F5F9; border: 1px solid #CBD5E1; border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; }
+    #drawer { transition: transform .2s ease; }
+    #drawer.closed { transform: translateX(calc(100% + 24px)); }
+    ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+    @media (prefers-reduced-motion: reduce) { .toast, #drawer { animation: none; transition: none; } }
+  </style>
+</head>
+<body>
+  <canvas id="world"></canvas>
+
+  <!-- TOP-LEFT: clock + fleet KPIs (all computed from sim events) -->
+  <div class="hud fixed top-3 left-3 z-20 px-3 py-2 flex items-center gap-4">
+    <div class="flex items-center gap-2">
+      <span id="liveDot" class="w-2.5 h-2.5 rounded-full bg-blue-600"></span>
+      <span class="font-bold num" id="clock">Day 1 · 06:00</span>
+      <span id="phasePill" class="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 font-semibold text-xs">Shift A</span>
+    </div>
+    <div class="h-5 w-px bg-slate-200"></div>
+    <div class="flex items-center gap-4 num">
+      <div><div class="label">Shipped</div><div class="font-bold" id="kShipped">0</div></div>
+      <div><div class="label">On-time</div><div class="font-bold" id="kOnTime">—</div></div>
+      <div><div class="label">Incidents</div><div class="font-bold" id="kIncidents">0</div></div>
+      <div><div class="label">Backlog</div><div class="font-bold" id="kBacklog">0</div></div>
+      <div><div class="label">Lost</div><div class="font-bold" id="kLost">0</div></div>
+    </div>
+    <div class="h-5 w-px bg-slate-200"></div>
+    <div class="flex items-center gap-1" id="speedBtns">
+      <button class="btn" data-speed="0" title="Pause">❚❚</button>
+      <button class="btn on" data-speed="1">1×</button>
+      <button class="btn" data-speed="2">2×</button>
+      <button class="btn" data-speed="4">4×</button>
+    </div>
+  </div>
+
+  <!-- LEFT: Strategy Board (foldable) -->
+  <div class="hud fixed left-3 top-[76px] z-20 w-[330px]">
+    <button id="boardToggle" class="w-full flex items-center justify-between px-3 py-2">
+      <span class="label">Strategy Board · last 60 game-min</span>
+      <span id="boardChevron" class="text-slate-500">▾</span>
+    </button>
+    <div id="boardBody" class="px-2 pb-2">
+      <div class="grid grid-cols-[1fr_52px_48px_34px_46px] gap-1 px-2 pb-1 label" style="font-size:10.5px">
+        <span>Strategy</span><span class="text-right">/hr</span><span class="text-right">On-time</span><span class="text-right">⚠</span><span class="text-right">kWh/ord</span>
+      </div>
+      <div id="boardRows"></div>
+      <div class="px-2 pt-1 text-[11.5px] text-slate-500">Click a row to highlight that team on the map.</div>
+    </div>
+  </div>
+
+  <!-- TOP-RIGHT: layers, camera, presence, history -->
+  <div class="fixed top-3 right-3 z-20 flex flex-col items-end gap-2">
+    <div class="hud px-2 py-1.5 flex items-center gap-1">
+      <span class="label px-1">Layers</span>
+      <button class="btn on" id="lyRoutes">Routes</button>
+      <button class="btn" id="lyTraffic">Traffic</button>
+      <button class="btn on" id="lyLabels">Labels</button>
+      <span class="w-px h-5 bg-slate-200 mx-1"></span>
+      <button class="btn" id="zoomOut">−</button>
+      <button class="btn" id="zoomIn">+</button>
+      <button class="btn" id="recenter">Fit</button>
+      <span class="w-px h-5 bg-slate-200 mx-1"></span>
+      <button class="btn" id="historyBtn">History</button>
+      <button class="btn" id="helpBtn" title="How to play">?</button>
+    </div>
+    <div class="hud px-3 py-1.5 text-[12.5px] flex items-center gap-2" title="Multiplayer presence">
+      <span class="label">Drivers</span>
+      <span id="presence" class="text-slate-700">You (spectating)</span>
+      <span class="text-slate-400" title="Remote players connect through the server build's WebSocket lease service; this static file only knows about you.">· local only</span>
+    </div>
+    <div class="hud px-3 py-1.5 text-[12.5px] flex items-center gap-2 w-[290px]" id="fleet">
+      <span class="label">Fleet</span>
+      <span id="fleetInfo" class="text-slate-700 num flex-1"></span>
+      <button class="btn" id="fleetDown" title="Remove the most recently added idle agent">−</button>
+      <button class="btn" id="fleetUp" title="Add a real AI agent. Past the base fleet size the warehouse builds a new wing.">+ Agent</button>
+    </div>
+    <div id="lb" class="hud px-2 py-2 w-[290px] text-[12.5px]"></div>
+    <div id="valueChart" class="hud px-2 py-2 w-[290px] text-[12.5px]"></div>
+  </div>
+
+  <!-- BOTTOM-RIGHT: contract card hand -->
+  <div id="cards" class="fixed right-3 bottom-3 z-20 flex items-end gap-2"></div>
+
+  <!-- BOTTOM-LEFT: Inspector / Drive HUD -->
+  <div id="inspector" class="hud fixed left-3 bottom-3 z-20 w-[330px] px-3 py-2.5 hidden"></div>
+
+  <!-- BOTTOM-CENTER: Command bar -->
+  <div class="hud fixed bottom-3 left-1/2 -translate-x-1/2 z-20 px-2 py-1.5 flex items-center gap-1.5">
+    <button class="btn drive" id="cmdDrive" title="Take the wheel of the best available vehicle">🚜 Drive</button>
+    <span class="w-px h-5 bg-slate-200 mx-1"></span>
+    <button class="btn warn" id="cmdRush" title="Post a burst of 8 orders and raise arrivals for 30 game-min">⚡ Rush wave</button>
+    <button class="btn warn" id="cmdP0" title="Post one high-value P0 contract">★ P0 order</button>
+    <button class="btn" id="cmdCone" title="Click floor tiles to place or remove cones">🚧 Cones</button>
+    <span class="w-px h-5 bg-slate-200 mx-1"></span>
+    <input id="nlInput" disabled class="w-[300px] px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 text-slate-400 text-[12.5px]"
+      placeholder="Typed orders are parsed by Gemini 3.8 Flash in the server build" />
+  </div>
+
+  <!-- Contract offer (non-blocking; the sim keeps running) -->
+  <div id="deal" class="hud fixed left-1/2 -translate-x-1/2 bottom-[128px] z-30 p-3 text-[13px]" style="display:none"></div>
+
+  <!-- Drive guidance bar -->
+  <div id="driveBar" class="hud fixed left-1/2 -translate-x-1/2 bottom-[68px] z-20 px-4 py-2 text-[14px] font-semibold items-center gap-3" style="display:none"></div>
+
+  <!-- How to win -->
+  <div id="help" class="fixed inset-0 z-40 items-center justify-center" style="display:none;background:rgba(15,23,42,.35)">
+    <div class="hud w-[580px] max-w-[92vw] p-5 text-[14px] leading-relaxed" style="background:#fff">
+      <div class="flex items-center justify-between mb-2"><div class="text-[19px] font-bold">How to win</div><button class="btn" id="helpClose">Got it</button></div>
+      <p><b>Goal:</b> finish each 8-hour shift ranked <b>#1</b> on the leaderboard (top-right). Every vehicle, AI or human, scores the same way.</p>
+      <p class="mt-2"><b>Points:</b> +10 per pallet delivered, +40 for a P0 order. Half points if late. −15 if you cause a crash.</p>
+      <div class="mt-3 label">Your first minute</div>
+      <ol class="list-decimal ml-5 mt-1">
+        <li>Press <b>🚜 Drive</b> (or click any vehicle, then <b>Take the wheel</b>).</li>
+        <li>Follow the glowing ring. When the ring turns <b>green</b> and the bar says <b>In range</b>, you are close enough (within about 1.5 tiles, no need to be exact). Press <span class="kbd">E</span> to pick up. Then drive to the blue bay ring and press <span class="kbd">E</span> again to deliver.</li>
+        <li>Pick contract cards when offered. They add bonus points and post purple pallets for you.</li>
+        <li>Keep the battery above 20%. Park on a green charger and press <span class="kbd">E</span>.</li>
+      </ol>
+      <div class="mt-3 label">Controls</div>
+      <div class="mt-1"><span class="kbd">W</span> / <span class="kbd">S</span> forward and reverse · <span class="kbd">A</span> / <span class="kbd">D</span> steer · <span class="kbd">E</span> pick, drop, charge · <span class="kbd">Esc</span> hand back to the AI</div>
+      <p class="mt-2 text-slate-600"><b>Districts:</b> cold storage drains the battery faster, the hazmat cage caps your speed, fast pick loads quickly and bulk floor stacks load slowly. Contracts into harder districts pay more.</p>
+      <p class="mt-2 text-slate-600">Hitting another vehicle at speed is a crash: both stop for 4 minutes and a pallet may be damaged. Slow down near aisles and bays.</p>
+      <p class="mt-2 text-slate-600"><b>Growth:</b> the floor fits 24 vehicles. Every 6 more (use <b>+ Agent</b> in the Fleet pill) builds a new rack wing to the south with its own bays, chargers and districts, up to 4 wings. Order demand scales with fleet size.</p>
+      <p class="mt-2 text-slate-500 text-[12.5px]">Multiplayer: in the server build, other players take over other vehicles and appear on the same leaderboard. This static mock only knows about you.</p>
+    </div>
+  </div>
+
+  <!-- BOTTOM-RIGHT: toasts -->
+  <div id="toasts" class="fixed right-3 bottom-3 z-20 flex flex-col gap-2 w-[320px] items-stretch"></div>
+
+  <!-- RIGHT DRAWER: day history + event log -->
+  <aside id="drawer" class="hud closed fixed right-3 top-[104px] bottom-3 z-30 w-[380px] flex flex-col">
+    <div class="flex items-center justify-between px-3 py-2 border-b border-slate-200">
+      <div class="flex gap-1">
+        <button class="btn on" id="tabDays">Days</button>
+        <button class="btn" id="tabEvents">Events</button>
+      </div>
+      <button class="btn" id="drawerClose">✕</button>
+    </div>
+    <div id="drawerBody" class="flex-1 overflow-y-auto px-3 py-2 text-[12.5px]"></div>
+    <div class="px-3 py-2 border-t border-slate-200 flex items-center justify-between text-[12px] text-slate-500">
+      <span>Saved in this browser (localStorage)</span>
+      <button class="btn" id="resetWorld">Reset world…</button>
+    </div>
+  </aside>
+
+
+<!-- =====================================================================
+     SIM CORE — DOM-free. Mirrors the planned server-authoritative engine:
+     fixed 10 Hz tick, seeded RNG, task market, reservations, incidents.
+     The UI below only reads world state and sends commands.
+     ===================================================================== -->
+<script id="sim-core">
+'use strict';
+const SimCore = (() => {
+  const MAP_W = 60, BASE_H = 43;
+  // Facility growth: the base floor suits BASE_FLEET vehicles; every TIER_STEP extra vehicles add one 9-row rack wing to the south.
+  const BASE_FLEET = 24, TIER_STEP = 6, MAX_TIER = 4, BASE_AI = 20;
+  let MAP_H = BASE_H, activeTier = 0;
+  const tierFor = n => Math.max(0, Math.min(MAX_TIER, Math.ceil((n - BASE_FLEET) / TIER_STEP)));
+  const FLEET_CAP = BASE_FLEET + TIER_STEP * MAX_TIER;
+  const TICK_MIN = 0.1;          // game-minutes per tick at 1x (10 Hz => 1 real s = 1 game min)
+  const DAY_START = 6 * 60;      // day rolls over at 06:00
+  const BACKLOG_CAP = 60;
+  const KWH_PER_PCT = 0.24;
+  const INCIDENT_PENALTY = 15;   // points lost by the at-fault vehicle      // 24 kWh pack
+
+  const STRATEGIES = {
+    Sprinter:    { color: '#EA580C', speed: 1.30, respect: 0.35, buffer: 1, chargeAt: 12, flatPath: true,  preemptForP0: true,  poach: false, batch: 1,
+                   blurb: 'Fast, short buffer, cuts through picking aisles, ignores soft claims.' },
+    Steady:      { color: '#2563EB', speed: 0.90, respect: 1.00, buffer: 3, chargeAt: 30, flatPath: false, preemptForP0: false, poach: false, batch: 1,
+                   blurb: 'Respects every claim, wide buffer, finishes current work before P0.' },
+    Batcher:     { color: '#7C3AED', speed: 1.00, respect: 0.90, buffer: 2, chargeAt: 22, flatPath: false, preemptForP0: false, poach: false, batch: 2,
+                   blurb: 'Waits to carry two orders bound for the same bay.' },
+    Opportunist: { color: '#CA8A04', speed: 1.10, respect: 0.70, buffer: 2, chargeAt: 20, flatPath: false, preemptForP0: true,  poach: true,  batch: 1,
+                   blurb: 'Grabs the best contract, even one another agent already claimed.' },
+    Strategist:  { color: '#059669', speed: 1.00, respect: 0.90, buffer: 2, chargeAt: 22, flatPath: false, preemptForP0: false, poach: false, batch: 1, tunable: true,
+                   blurb: 'Retunes its own parameters at each shift change from its metrics.' },
+  };
+  const HUMAN = { color: '#0D9488', speed: 1.0 };
+  const STRAT_ORDER = ['Sprinter', 'Steady', 'Batcher', 'Opportunist', 'Strategist', 'Human'];
+  const BASE_SPEED = { forklift: 3.0, reach: 2.6, agv: 3.3 };   // tiles per game-minute
+
+  // ---------- Seeded RNG (mulberry32); state persisted so history is reproducible ----------
+  function rng(w) {
+    w.rngState = (w.rngState + 0x6D2B79F5) | 0;
+    let t = w.rngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // ---------- Static map ----------
+  // ---------- Static map: a 60x43 floor with distinct districts ----------
+  // Paired one-way highways run east-west; two-way highways run north-south every 5 tiles.
+  const BASE_HWY_Y = [2, 11, 20, 29, 38];
+  const HWY_Y = BASE_HWY_Y.slice();                       // west-bound lane; the east-bound lane is y + 1
+  const HWY_X = [10, 15, 20, 25, 30, 35, 40, 45, 50, MAP_W - 5];
+  const HWY_E = MAP_W - 5, PARK_Y = 39;
+  // Nearest east-bound lane for a vehicle leaving a charger: the original highway for the base floor, or the wing's own highway.
+  const parkY = y => (y < 42 ? PARK_Y : HWY_Y.filter(h => h <= y).pop() + 1);
+  const isHighway = (x, y) =>
+    HWY_Y.some(h => y === h || y === h + 1) || x === 4 || x === 5 || HWY_X.includes(x);
+  // One-way lanes on paired highways: returns [dx, dy] of legal flow or null for two-way.
+  function laneDir(x, y) {
+    if (HWY_Y.includes(y)) return [-1, 0];
+    if (HWY_Y.includes(y - 1)) return [1, 0];
+    if (x === 4) return [0, -1];
+    if (x === 5) return [0, 1];
+    return null;
+  }
+
+  // District kinds. pick = seconds to load a pallet, drain = battery multiplier, speed = speed multiplier.
+  const KINDS = {
+    ambient:  { label: 'Ambient racking',  short: 'Ambient',   pick: 1.2, drain: 1.0,  speed: 1.0, bonus: 0 },
+    cold:     { label: 'Cold storage',     short: 'Cold',      pick: 1.5, drain: 1.6,  speed: 1.0, bonus: 3 },
+    fast:     { label: 'Fast pick',        short: 'Fast pick', pick: 0.7, drain: 1.0,  speed: 1.0, bonus: 0 },
+    bulk:     { label: 'Bulk floor stack', short: 'Bulk',      pick: 1.8, drain: 1.15, speed: 1.0, bonus: 2 },
+    haz:      { label: 'Hazmat cage',      short: 'Hazmat',    pick: 1.6, drain: 1.0,  speed: 0.6, bonus: 5 },
+    returns:  { label: 'Returns & QA',     short: 'Returns',   pick: 1.2, drain: 1.0,  speed: 1.0, bonus: 0 },
+    staging:  { label: 'Outbound staging', short: 'Staging',   pick: 1.2, drain: 1.0,  speed: 1.0, bonus: 0 },
+    office:   { label: 'Offices',          short: 'Offices',   pick: 1.2, drain: 1.0,  speed: 1.0, bonus: 0 },
+    charging: { label: 'Charging bank',    short: 'Charging',  pick: 1.2, drain: 1.0,  speed: 1.0, bonus: 0 },
+  };
+  const KIND_IDS = Object.keys(KINDS);
+  const K_SPEED = KIND_IDS.map(k => KINDS[k].speed), K_DRAIN = KIND_IDS.map(k => KINDS[k].drain), K_PICK = KIND_IDS.map(k => KINDS[k].pick);
+
+  const TIER_ROWS = 9;
+  const BAND_Y = [5, 14, 23, 32];                           // first of five rack rows in each band
+  const BLOCK_X = [7, 12, 17, 22, 27, 32, 37, 42, 47];      // west column of each double-rack block
+  const LAYOUT = [
+    ['A:ambient', 'B:ambient', 'C:ambient', 'D:ambient', 'E:cold', 'F:cold', 'G:bulk', 'H:bulk', null],
+    ['I:ambient', 'J:ambient', 'K:fast', 'L:fast', 'M:cold', 'N:cold', null, null, 'O:haz'],
+    ['P:fast', 'Q:fast', 'R:ambient', 'S:ambient', 'T:ambient', 'U:ambient', 'V:bulk', 'W:bulk', null],
+    [null, null, null, 'X:ambient', 'Y:ambient', 'Z:haz', null, null, null],
+  ];
+  const RACKS = [], SLOTS = [], ZONES = [], AREAS = [], STRUCTS = [], ZONE_FAR = {}, ZONE_KIND = {};
+  const CONVEYORS = [], BAYS = [], WEST_DOCKS = [], CHARGERS = [];
+  let FLOORK = new Uint8Array(MAP_W * BASE_H), STATIC_BLOCK = new Uint8Array(MAP_W * BASE_H);
+  const kindIdx = k => KIND_IDS.indexOf(k);
+  function paint(x0, y0, x1, y1, kind) {
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+      if (x < 1 || y < 1 || x > MAP_W - 2 || y > MAP_H - 2 || isHighway(x, y)) continue;
+      FLOORK[y * MAP_W + x] = kindIdx(kind);
+    }
+  }
+  const area = (kind, x, y, w, h, name) => { AREAS.push({ kind, x, y, w, h, name: name || KINDS[kind].label }); paint(x, y, x + w - 1, y + h - 1, kind); };
+
+  // Added wings rotate this district mix; the last column stays open for east staging.
+  const WING_KINDS = ['ambient', 'ambient', 'fast', 'fast', 'ambient', 'cold', 'cold', 'bulk', 'bulk'];
+  // Rebuilds the floor for a facility tier. Tier 0 is the original floor; higher tiers only append rows to the south,
+  // so every existing coordinate (vehicles, orders, cones) stays valid. Arrays are mutated in place so references persist.
+  function buildMap(tier) {
+  activeTier = tier;
+  MAP_H = tier ? BASE_H + 3 + TIER_ROWS * tier : BASE_H;
+  [RACKS, SLOTS, ZONES, AREAS, STRUCTS, CONVEYORS, BAYS, WEST_DOCKS, CHARGERS].forEach(a => { a.length = 0; });
+  Object.keys(ZONE_FAR).forEach(k => delete ZONE_FAR[k]); Object.keys(ZONE_KIND).forEach(k => delete ZONE_KIND[k]);
+  FLOORK = new Uint8Array(MAP_W * MAP_H); STATIC_BLOCK = new Uint8Array(MAP_W * MAP_H);
+  HWY_Y.length = 0; BASE_HWY_Y.forEach(h => HWY_Y.push(h));
+  const bandY = BAND_Y.slice(), layout = LAYOUT.slice();
+  for (let j = 1; j <= tier; j++) {
+    HWY_Y.push(43 + TIER_ROWS * (j - 1));
+    bandY.push(46 + TIER_ROWS * (j - 1));
+    layout.push(Array.from({ length: 9 }, (_, ci) => (ci === 8 ? null : `${'ABCDEFGHI'[ci]}${j}:${WING_KINDS[(ci + j * 3) % 9]}`)));
+  }
+  if (tier) HWY_Y.push(43 + TIER_ROWS * tier);
+  layout.forEach((row, bi) => {
+    const y0 = bandY[bi];
+    row.forEach((cell, ci) => {
+      if (!cell) return;
+      const [zone, kind] = cell.split(':'), x0 = BLOCK_X[ci];
+      ZONES.push({ id: zone, kind, x: x0, y: y0 });
+      ZONE_FAR[zone] = x0 + 1; ZONE_KIND[zone] = kind;
+      [x0, x0 + 1].forEach((x, k) => [0, 1, 2, 3, 4].forEach(ri => {
+        const y = y0 + ri, id = `${zone}${zone.length > 1 ? '.' : ''}${k + 1}-${ri + 1}`, ax = k === 0 ? x - 1 : x + 1;
+        RACKS.push({ id, zone, kind, x, y, tone: (x + y) % 2 });
+        SLOTS.push({ key: `${ax},${y}`, rackId: id, zone, rx: x, ry: y, ax, ay: y });
+      }));
+    });
+    // runs of the same special kind form one named district
+    for (let ci = 0; ci < row.length; ci++) {
+      const kind = row[ci] && row[ci].split(':')[1];
+      if (!kind || kind === 'ambient') continue;
+      let cj = ci; while (cj + 1 < row.length && row[cj + 1] && row[cj + 1].split(':')[1] === kind) cj++;
+      area(kind, BLOCK_X[ci] - 1, y0 - 1, BLOCK_X[cj] - BLOCK_X[ci] + 4, 7);
+      ci = cj;
+    }
+  });
+  area('returns', 6, 31, 15, 7);                              // returns & QA with work benches
+  [6, 11, 16].forEach(x => STRUCTS.push({ type: 'bench', x, y: 33, w: 3, h: 2 }));
+  area('staging', 36, 31, 15, 7); area('staging', 46, 4, 5, 7); area('staging', 46, 22, 5, 7);
+  area('office', 36, 14, 4, 5, 'Admin'); STRUCTS.push({ type: 'office', x: 36, y: 14, w: 4, h: 5, name: 'Admin' });
+  area('office', 41, 14, 4, 5, 'Break room'); STRUCTS.push({ type: 'break', x: 41, y: 14, w: 4, h: 5, name: 'Break room' });
+  area('charging', 7, 40, 26, 2);
+
+  bandY.forEach(y0 => { for (let y = y0; y < y0 + 5; y++) CONVEYORS.push({ x: MAP_W - 8, y }); });
+  // Each bay has three adjacent drop tiles so deliveries do not queue single-file.
+  bandY.flatMap(y0 => [y0 + 1, y0 + 4]).forEach((y, i) => BAYS.push({ id: `E${i + 1}`, y, dropX: MAP_W - 2, tiles: [y - 1, y, y + 1].map(ty => ({ x: MAP_W - 2, y: ty })) }));
+  bandY.forEach((y0, i) => WEST_DOCKS.push({ id: `W${i + 1}`, y: y0 + 2 }));
+  [...Array(10).keys()].forEach(i => CHARGERS.push({ x: 8 + i, y: 40 })); [...Array(10).keys()].forEach(i => CHARGERS.push({ x: 22 + i, y: 40 }));
+  for (let j = 1; j <= tier; j++) {       // each wing brings its own charging row and east staging pad
+    const y0 = bandY[3 + j];
+    area('charging', 7, y0 - 1, 10, 1); [...Array(8).keys()].forEach(i => CHARGERS.push({ x: 8 + i, y: y0 - 1 }));
+    area('staging', 46, y0 - 1, 5, 7);
+  }
+  RACKS.forEach(r => { STATIC_BLOCK[r.y * MAP_W + r.x] = 1; });
+  CONVEYORS.forEach(c => { STATIC_BLOCK[c.y * MAP_W + c.x] = 1; });
+  STRUCTS.forEach(s => { for (let y = s.y; y < s.y + s.h; y++) for (let x = s.x; x < s.x + s.w; x++) STATIC_BLOCK[y * MAP_W + x] = 1; });
+  }
+  buildMap(0);
+  const floorKind = (x, y) => KIND_IDS[FLOORK[y * MAP_W + x]] || 'ambient';
+  const kindAtTile = (x, y) => FLOORK[y * MAP_W + x];
+
+  function laneAgainst(x, y, dx, dy) {
+    const d = laneDir(x, y);
+    return !!d && ((d[0] !== 0 && dx === -d[0]) || (d[1] !== 0 && dy === -d[1]));
+  }
+
+  function isBlocked(w, x, y) {
+    if (x < 1 || x > MAP_W - 2 || y < 1 || y > MAP_H - 2) return true;
+    if (STATIC_BLOCK[y * MAP_W + x]) return true;
+    return w.cones.has(`${x},${y}`);
+  }
+  const bayAt = (x, y) => BAYS.find(b => b.tiles.some(t => t.x === x && t.y === y)) || null;
+  // Nearest free drop tile of a bay for a vehicle at (fx, fy).
+  function dropTile(w, bay, fx, fy) {
+    const busy = new Set(); w.vehicles.forEach(q => { busy.add(`${q.tile.x},${q.tile.y}`); if (q.moveTo) busy.add(`${q.moveTo.x},${q.moveTo.y}`); });
+    const cost = t => Math.abs(t.x - fx) + Math.abs(t.y - fy) + (busy.has(`${t.x},${t.y}`) ? 6 : 0) + (w.cones.has(`${t.x},${t.y}`) ? 99 : 0);
+    return bay.tiles.slice().sort((a, b) => cost(a) - cost(b))[0];
+  }
+  const chargerAt = (x, y) => CHARGERS.findIndex(c => c.x === x && c.y === y);
+
+  // ---------- A* (binary heap). Highways are cheaper unless the policy cuts through aisles ----------
+  function heapPush(h, n) { h.push(n); let i = h.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (h[p][0] <= h[i][0]) break; [h[p], h[i]] = [h[i], h[p]]; i = p; } }
+  function heapPop(h) {
+    const top = h[0], last = h.pop();
+    if (h.length) { h[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i;
+      if (l < h.length && h[l][0] < h[m][0]) m = l; if (r < h.length && h[r][0] < h[m][0]) m = r;
+      if (m === i) break; [h[m], h[i]] = [h[i], h[m]]; i = m; } }
+    return top;
+  }
+  function findPath(w, sx, sy, ex, ey, opts = {}) {
+    if (sx === ex && sy === ey) return [];
+    if (isBlocked(w, ex, ey)) return null;
+    const N = MAP_W * MAP_H, s = sy * MAP_W + sx, e = ey * MAP_W + ex;
+    const g = new Float32Array(N).fill(Infinity), came = new Int32Array(N).fill(-1), closed = new Uint8Array(N);
+    const open = []; g[s] = 0; heapPush(open, [0, s]);
+    const D = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    while (open.length) {
+      const cur = heapPop(open)[1];
+      if (closed[cur]) continue; closed[cur] = 1;
+      if (cur === e) break;
+      const cx = cur % MAP_W, cy = (cur / MAP_W) | 0;
+      for (const [dx, dy] of D) {
+        const nx = cx + dx, ny = cy + dy, ni = ny * MAP_W + nx;
+        if (isBlocked(w, nx, ny) || closed[ni]) continue;
+        if (opts.avoid && ni !== e && opts.avoid.has(`${nx},${ny}`)) continue;
+        const cost = (opts.flat ? 1 : (isHighway(nx, ny) ? 0.8 : 1.25)) + (laneAgainst(nx, ny, dx, dy) ? (opts.flat ? 1 : 3) : 0);
+        const ng = g[cur] + cost;
+        if (ng < g[ni]) { g[ni] = ng; came[ni] = cur; heapPush(open, [ng + 0.8 * (Math.abs(ex - nx) + Math.abs(ey - ny)), ni]); }
+      }
+    }
+    if (came[e] === -1) return null;
+    const path = []; for (let c = e; c !== s; c = came[c]) path.push({ x: c % MAP_W, y: (c / MAP_W) | 0 });
+    return path.reverse();
+  }
+
+  // ---------- Time helpers ----------
+  const dayIndex = t => Math.floor(t / 1440);
+  const minuteOfDay = t => (DAY_START + Math.floor(t)) % 1440;
+  const shiftIndex = t => Math.floor(t / 480);
+  const shiftName = t => ['A', 'B', 'C'][shiftIndex(t) % 3];
+  function clockText(t) {
+    const m = minuteOfDay(t);
+    return `Day ${dayIndex(t) + 1} · ${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  }
+  // Orders per game-hour by hour of day: two rush waves and a quiet night.
+  const FLOW = 1.0;   // demand scale, sized so a 20-vehicle fleet keeps up on the 60x43 floor
+  const HOURLY_RATE = [6, 6, 6, 6, 6, 6, 14, 18, 40, 42, 40, 22, 20, 22, 40, 42, 40, 20, 18, 14, 10, 8, 8, 6].map(r => Math.round(r * FLOW));
+  const isRushHour = mod => HOURLY_RATE[Math.floor(mod / 60)] >= Math.round(40 * FLOW);
+  function phaseText(w) {
+    const mod = minuteOfDay(w.t);
+    if (w.t < w.rushUntil) return 'Manual rush wave';
+    if (isRushHour(mod)) return 'Rush wave';
+    return HOURLY_RATE[Math.floor(mod / 60)] <= Math.round(10 * FLOW) ? 'Night lull' : 'Steady flow';
+  }
+
+  // ---------- Stats containers ----------
+  const emptyStrat = () => ({ shipped: 0, onTime: 0, incidents: 0, nearMisses: 0, kwh: 0 });
+  const emptyStats = () => ({ shipped: 0, onTime: 0, incidents: 0, nearMisses: 0, lost: 0, damaged: 0, poaches: 0,
+    byStrat: Object.fromEntries(STRAT_ORDER.map(s => [s, emptyStrat()])) });
+
+  // ---------- World ----------
+  function makeVehicles(w) {
+    const spec = [
+      ['FL-01', 'forklift', 'Sprinter', 5, 2],  ['FL-02', 'forklift', 'Sprinter', 5, 21],
+      ['FL-03', 'forklift', 'Steady', 10, 11],  ['FL-04', 'forklift', 'Steady', 20, 12],
+      ['RT-05', 'reach', 'Batcher', 15, 3],     ['RT-06', 'reach', 'Batcher', 25, 20],
+      ['AGV-07', 'agv', 'Opportunist', 31, 11], ['AGV-08', 'agv', 'Opportunist', 4, 12],
+      ['FL-09', 'forklift', 'Strategist', 15, 20], ['FL-10', 'forklift', 'Strategist', 25, 3],
+      ['FL-11', 'forklift', 'Sprinter', 12, 2],  ['FL-12', 'forklift', 'Sprinter', 22, 3],
+      ['FL-13', 'forklift', 'Steady', 8, 11],    ['FL-14', 'forklift', 'Steady', 26, 12],
+      ['RT-15', 'reach', 'Batcher', 18, 20],     ['RT-16', 'reach', 'Batcher', 10, 6],
+      ['AGV-17', 'agv', 'Opportunist', 20, 17],  ['AGV-18', 'agv', 'Opportunist', 31, 6],
+      ['FL-19', 'forklift', 'Strategist', 31, 17], ['FL-20', 'forklift', 'Strategist', 25, 9],
+    ];
+    const SPAWN_Y = [2, 3, 11, 12, 20, 21, 29, 30, 38, 39];   // spawn on the highways, spread across the width
+    return spec.map(([id, type, strategy], i) => vehicleObj(w, id, type, strategy, 6 + Math.floor(i * 2.6), SPAWN_Y[i % 10]));
+  }
+  function vehicleObj(w, id, type, strategy, tx, ty) {
+    return {
+      id, type, strategy, human: false, extra: false,
+      px: tx + 0.5, py: ty + 0.5, angle: 0, tile: { x: tx, y: ty }, moveTo: null, path: [],
+      state: 'idle', orders: [], cargo: [], battery: 55 + rng(w) * 40,
+      fork: 0.15, forkTarget: 0.15, timer: 0, wait: 0, waitKey: null, waitRespect: true,
+      stunnedUntil: 0, idleSince: 0, energySince: 0, deliveries: 0, incidents: 0, nearMisses: 0,
+      chargerIdx: -1, speedNow: 0, braking: false, humanCharging: false, msg: '',
+      driver: null, input: { up: false, down: false, left: false, right: false }, sPts: 0, sShipped: 0,
+      hzSeen: new Set(), hold: null, pushing: null, skidRolled: false, bank: 0, aiValue: 0, lastTot: 0,
+    };
+  }
+
+  // ---------- Fleet growth: real vehicles added at runtime, and the facility that grows with them ----------
+  const ADD_TYPES = ['forklift', 'forklift', 'reach', 'agv', 'forklift'], ADD_STRATS = ['Sprinter', 'Steady', 'Batcher', 'Opportunist', 'Strategist'];
+  const TYPE_PREFIX = { forklift: 'FL', reach: 'RT', agv: 'AGV' };
+  function growCheck(w) {
+    const t = tierFor(w.vehicles.length);
+    if (t <= w.tier) return false;
+    w.tier = t; buildMap(t);
+    const heat = new Float32Array(MAP_W * MAP_H); heat.set(w.heat); w.heat = heat;
+    BAYS.forEach(b => { if (!w.bays.some(x => x.id === b.id)) w.bays.push({ id: b.id, load: 0, cap: 8, departUntil: 0 }); });
+    emit(w, 'expand', `Facility expanded to tier ${t}: ${MAP_H} rows, ${BAYS.length} bays, ${CHARGERS.length} chargers for ${w.vehicles.length} vehicles.`, { tier: t });
+    return true;
+  }
+  function addVehicle(w, opts = {}) {
+    if (w.vehicles.length >= FLEET_CAP) return null;
+    const k = w.vehicleSeq, type = ADD_TYPES[k % 5], strategy = ADD_STRATS[k % 5];
+    const taken = new Set(w.vehicles.map(q => `${q.tile.x},${q.tile.y}`));
+    let spot = null;
+    for (const y of [2, 3, 11, 12, 20, 21, 29, 30]) for (let x = 6 + (k % 7); x < MAP_W - 6 && !spot; x += 3) {
+      if (!taken.has(`${x},${y}`) && !isBlocked(w, x, y) && !hazardAt(w, x, y)) spot = { x, y };
+    }
+    if (!spot) return null;
+    w.vehicleSeq++;
+    const v = vehicleObj(w, `${TYPE_PREFIX[type]}-${String(w.vehicleSeq).padStart(2, '0')}`, type, strategy, spot.x, spot.y);
+    v.extra = true; w.vehicles.push(v);
+    if (!opts.silent) { emit(w, 'fleet', `${v.id} (${strategy}) joined the fleet: ${w.vehicles.length} vehicles.`, { vid: v.id }); growCheck(w); }
+    return v;
+  }
+  // Only an idle, empty vehicle that was added at runtime can leave. The facility never shrinks, so nobody is stranded.
+  function removeVehicle(w) {
+    for (let i = w.vehicles.length - 1; i >= 0; i--) {
+      const v = w.vehicles[i];
+      if (!v.extra || v.human || v.cargo.length || v.orders.length || v.moveTo || v.state === 'charging') continue;
+      w.vehicles.splice(i, 1);
+      emit(w, 'fleet', `${v.id} left the fleet: ${w.vehicles.length} vehicles.`);
+      return v;
+    }
+    return null;
+  }
+
+  function createWorld(saved) {
+    const tier0 = saved && saved.v === 4 ? Math.max(0, Math.min(MAX_TIER, saved.tier | 0)) : 0;
+    buildMap(tier0);
+    const w = {
+      tier: tier0, vehicleSeq: BASE_AI,
+      t: 0, hands: {}, cardSeq: 0, rngState: 20261015, nextOrderId: 1000, cones: new Set(), orders: [], markers: [],
+      rushUntil: 0, deliveries: [], incidentLog: [], log: [], history: [],
+      difficulty: 'normal', hazards: [], nextHazardId: 0, decisions: [], hall: [],
+      humanValue: 0, agentValue: 0, series: [], aiShift: -1,
+      totals: { shipped: 0, onTime: 0, incidents: 0, lost: 0, days: 0, wins: 0, humanShifts: 0, cardDeals: 0, cardsDone: 0, aiCardsDone: 0,
+        hazards: 0, decisions: { reroute: 0, wait: 0, push: 0 } },
+      day: emptyStats(), shift: emptyStats(),
+      tuned: { speed: 1.0, respect: 0.9, chargeAt: 22, preemptForP0: false },
+      heat: new Float32Array(MAP_W * MAP_H), bays: BAYS.map(b => ({ id: b.id, load: 0, cap: 8, departUntil: 0 })),
+      input: { up: false, down: false, left: false, right: false }, listeners: [], marketTimer: 0, resumed: false,
+    };
+    if (saved && saved.v === 4) {
+      Object.assign(w, {
+        t: saved.t, rngState: saved.rngState, nextOrderId: saved.nextOrderId,
+        totals: { wins: 0, humanShifts: 0, cardDeals: 0, cardsDone: 0, aiCardsDone: 0, hazards: 0, ...saved.totals,
+          decisions: { reroute: 0, wait: 0, push: 0, ...((saved.totals || {}).decisions || {}) } },
+        day: saved.day, shift: saved.shift, tuned: saved.tuned, history: saved.history || [],
+        log: saved.log || [], deliveries: saved.deliveries || [], incidentLog: saved.incidentLog || [],
+        cones: new Set(saved.cones || []), resumed: true,
+        difficulty: DIFFICULTY[saved.difficulty] ? saved.difficulty : 'normal', hall: saved.hall || [],
+        decisions: saved.decisions || [],
+      });
+      STRAT_ORDER.forEach(s => { w.day.byStrat[s] ??= emptyStrat(); w.shift.byStrat[s] ??= emptyStrat(); });
+    }
+    w.vehicles = makeVehicles(w);
+    for (let i = 0; i < ((saved && saved.v === 4 && saved.extra) | 0); i++) addVehicle(w, { silent: true });
+    return w;
+  }
+
+  function serialize(w) {
+    return {
+      v: 4, t: w.t, rngState: w.rngState, nextOrderId: w.nextOrderId, totals: w.totals, day: w.day, shift: w.shift,
+      tuned: w.tuned, history: w.history.slice(-60), log: w.log.slice(-200),
+      deliveries: w.deliveries.filter(d => d.t > w.t - 60), incidentLog: w.incidentLog.filter(d => d.t > w.t - 60),
+      cones: [...w.cones], difficulty: w.difficulty, hall: w.hall, decisions: w.decisions.slice(-50),
+      tier: w.tier, extra: w.vehicles.filter(v => v.extra).length,
+    };
+  }
+
+  // ---------- Events ----------
+  function emit(w, type, text, extra = {}) {
+    const ev = { t: w.t, type, text, ...extra };
+    w.log.push(ev); if (w.log.length > 300) w.log.shift();
+    w.listeners.forEach(fn => fn(ev));
+  }
+
+  function policy(w, v) {
+    if (v.human) return { ...HUMAN, respect: 1, buffer: 2, chargeAt: 0, batch: 2, flatPath: true };
+    if (v.strategy === 'Strategist') return { ...STRATEGIES.Strategist, ...w.tuned };
+    return STRATEGIES[v.strategy];
+  }
+  const stratOf = v => (v.human ? 'Human' : v.strategy);
+  const capacity = v => (v.human ? 2 : STRATEGIES[v.strategy].batch || 1);
+
+  // ---------- Orders & market ----------
+  function postOrder(w, opts = {}) {
+    const active = w.orders.filter(o => o.state === 'open' || o.state === 'claimed').length;
+    if (active >= BACKLOG_CAP * Math.max(1, w.vehicles.length / BASE_AI) && !opts.p0 && !opts.card) { w.day.lost++; w.totals.lost++; return null; }
+    const used = new Set(w.orders.map(o => o.slot.key));
+    const free = SLOTS.filter(s => !used.has(s.key) && !w.cones.has(s.key) && (!opts.zone || s.zone === opts.zone));
+    if (!free.length) { w.day.lost++; w.totals.lost++; return null; }
+    const slot = free[Math.floor(rng(w) * free.length)];
+    const bay = opts.bayId ? BAYS.find(b => b.id === opts.bayId) : BAYS[Math.floor(rng(w) * BAYS.length)];
+    const rush = isRushHour(minuteOfDay(w.t)) || w.t < w.rushUntil;
+    const o = { id: ++w.nextOrderId, slot, bay: bay.id, p0: !!opts.p0, value: opts.p0 ? 40 : 10, created: w.t,
+      due: w.t + (opts.p0 ? 30 : opts.card ? 100 : (rush ? 80 : 120) * diffOf(w).due), state: 'open', claimant: null, card: opts.card || null };
+    w.orders.push(o);
+    if (o.p0) {
+      emit(w, 'p0', `P0 #${o.id} posted: rack ${slot.rackId} → bay ${o.bay}, due in 30 min`);
+      // Aggressive policies abandon un-picked work to chase it; cautious ones finish first.
+      w.vehicles.forEach(v => {
+        if (v.human || v.cargo.length || v.state !== 'toPick' || !policy(w, v).preemptForP0) return;
+        v.orders.forEach(x => { x.state = 'open'; x.claimant = null; });
+        v.orders = []; v.state = 'idle'; v.path = []; v.idleSince = w.t;
+        emit(w, 'preempt', `${v.id} (${v.strategy}) dropped its contract to chase P0 #${o.id}`, { vid: v.id });
+      });
+    }
+    return o;
+  }
+
+  const manhattan = (ax, ay, bx, by) => Math.abs(ax - bx) + Math.abs(ay - by);
+  const etaTo = (w, v, x, y) => manhattan(v.tile.x, v.tile.y, x, y) / (BASE_SPEED[v.type] * policy(w, v).speed);
+
+  function assign(w, v, orders) {
+    orders.forEach(o => { o.state = 'claimed'; o.claimant = v.id; });
+    v.orders.push(...orders);
+    nextLeg(w, v);
+  }
+
+  function runMarket(w) {
+    const open = w.orders.filter(o => o.state === 'open');
+    const bidders = w.vehicles.filter(v => !v.human && v.state === 'idle' && w.t >= v.stunnedUntil && v.battery > policy(w, v).chargeAt + 4);
+    const bids = [];
+    for (const v of bidders) {
+      const pol = policy(w, v);
+      const score = o => {
+        const urg = o.p0 ? 3 : (o.due - w.t < 30 ? 1.6 : 1);
+        return (o.value * urg) / (etaTo(w, v, o.slot.ax, o.slot.ay) + 2);
+      };
+      if (pol.batch > 1) {
+        // Batcher: two orders to the same bay, else a single one after waiting 6 game-min.
+        const byBay = {};
+        open.forEach(o => (byBay[o.bay] ??= []).push(o));
+        let best = null;
+        Object.values(byBay).forEach(list => {
+          if (list.length < 2) return;
+          const pair = list.sort((a, b) => etaTo(w, v, a.slot.ax, a.slot.ay) - etaTo(w, v, b.slot.ax, b.slot.ay)).slice(0, 2);
+          const sc = (score(pair[0]) + score(pair[1])) * 0.8;
+          if (!best || sc > best.score) best = { v, orders: pair, score: sc };
+        });
+        if (best) bids.push(best);
+        else if (w.t - v.idleSince > 6) open.forEach(o => bids.push({ v, orders: [o], score: score(o) * 0.7 }));
+        continue;
+      }
+      open.forEach(o => bids.push({ v, orders: [o], score: score(o) }));
+      if (pol.poach) {
+        w.orders.filter(o => o.state === 'claimed').forEach(o => {
+          const owner = w.vehicles.find(x => x.id === o.claimant);
+          if (!owner || owner.human || owner.cargo.length) return;
+          const mine = etaTo(w, v, o.slot.ax, o.slot.ay), theirs = etaTo(w, owner, o.slot.ax, o.slot.ay);
+          if (mine < theirs * 0.6 && (o.p0 || theirs > 3)) bids.push({ v, orders: [o], score: score(o) * 0.95, poachFrom: owner });
+        });
+      }
+    }
+    bids.sort((a, b) => b.score - a.score);
+    const usedV = new Set(), usedO = new Set();
+    for (const b of bids) {
+      if (usedV.has(b.v) || b.orders.some(o => usedO.has(o))) continue;
+      if (b.poachFrom) {
+        if (b.orders[0].claimant !== b.poachFrom.id) continue;
+        const loser = b.poachFrom;
+        loser.orders = loser.orders.filter(o => o !== b.orders[0]);
+        if (!loser.orders.length) { loser.state = 'idle'; loser.path = []; loser.idleSince = w.t; } else nextLeg(w, loser);
+        w.day.poaches++;
+        emit(w, 'poach', `${b.v.id} (Opportunist) took #${b.orders[0].id} from ${loser.id} (${stratOf(loser)})`, { vid: b.v.id });
+      }
+      usedV.add(b.v); b.orders.forEach(o => usedO.add(o));
+      assign(w, b.v, b.orders);
+    }
+  }
+  // (sim core continues below)
+
+  // ---------- Legs, planning, parking, charging ----------
+  const keyOf = p => `${p.x},${p.y}`;
+  function plan(w, v, avoid) {
+    if (!v.target) { v.path = []; return false; }
+    const p = findPath(w, v.tile.x, v.tile.y, v.target.x, v.target.y, { flat: policy(w, v).flatPath, avoid });
+    if (p === null) { v.path = []; v.msg = 'No route — waiting'; return false; }
+    v.path = p; v.msg = ''; return true;
+  }
+  function nextLeg(w, v) {
+    v.path = []; v.wait = 0; v.waitKey = null;
+    const unpicked = v.orders.filter(o => o.state === 'claimed' && o.claimant === v.id);
+    if (unpicked.length && v.cargo.length < capacity(v)) {
+      unpicked.sort((a, b) => etaTo(w, v, a.slot.ax, a.slot.ay) - etaTo(w, v, b.slot.ax, b.slot.ay));
+      const o = unpicked[0];
+      v.target = { kind: 'pick', order: o, x: o.slot.ax, y: o.slot.ay }; v.state = 'toPick';
+    } else if (v.cargo.length) {
+      const bay = BAYS.find(b => b.id === v.cargo[0].bay);
+      const dt = dropTile(w, bay, v.tile.x, v.tile.y); v.target = { kind: 'drop', bay: bay.id, x: dt.x, y: dt.y }; v.state = 'toDrop';
+    } else { v.state = 'idle'; v.target = null; v.idleSince = w.t; return; }
+    plan(w, v);
+  }
+  function park(w, v) {
+    const bay = bayAt(v.tile.x, v.tile.y);
+    if (bay) { v.target = { kind: 'park', x: HWY_E, y: bay.y }; plan(w, v); return; }
+    if (chargerAt(v.tile.x, v.tile.y) >= 0) { v.target = { kind: 'park', x: v.tile.x, y: parkY(v.tile.y) }; plan(w, v); }
+  }
+  function nudge(w, v, avoidKey, occ) {
+    const D = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    const off = Math.floor(rng(w) * 4);
+    for (let i = 0; i < 4; i++) {
+      const [dx, dy] = D[(i + off) % 4], nx = v.tile.x + dx, ny = v.tile.y + dy, k = `${nx},${ny}`;
+      if (isBlocked(w, nx, ny) || k === avoidKey || occ.has(k) || bayAt(nx, ny)) continue;
+      v.target = { kind: 'park', x: nx, y: ny }; v.path = [{ x: nx, y: ny }]; return true;
+    }
+    return false;
+  }
+  function goCharge(w, v) {
+    const taken = new Set(w.vehicles.filter(x => x !== v && x.chargerIdx >= 0).map(x => x.chargerIdx));
+    let best = -1, bd = 1e9;
+    CHARGERS.forEach((c, i) => { if (taken.has(i)) return; const d = manhattan(v.tile.x, v.tile.y, c.x, c.y); if (d < bd) { bd = d; best = i; } });
+    if (best < 0) { v.msg = 'Waiting for a free charger'; return; }
+    v.chargerIdx = best; v.state = 'toCharge';
+    v.target = { kind: 'charge', x: CHARGERS[best].x, y: CHARGERS[best].y };
+    plan(w, v);
+  }
+  function drain(w, v, pct) { v.battery = Math.max(0, v.battery - pct); v.energySince += pct; }
+  function turnToward(v, target, dt) {
+    let d = target - v.angle;
+    while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI;
+    const max = 9 * dt;
+    v.angle += Math.abs(d) <= max ? d : Math.sign(d) * max;
+  }
+
+  // ---------- Space reservations ----------
+  function buildOccupancy(w) {
+    const occ = new Map(), res = new Map();
+    for (const v of w.vehicles) {
+      occ.set(keyOf(v.tile), v);
+      if (v.moveTo) occ.set(keyOf(v.moveTo), v);
+      if (v.human) {
+        const fx = Math.floor(v.px + Math.cos(v.angle) * 0.4), fy = Math.floor(v.py + Math.sin(v.angle) * 0.4);
+        if (!occ.has(`${fx},${fy}`)) occ.set(`${fx},${fy}`, v);
+      }
+    }
+    for (const v of w.vehicles) {
+      if (v.human) {
+        for (let k = 1; k <= 2; k++) {
+          const kk = `${Math.floor(v.px + Math.cos(v.angle) * k * 0.9)},${Math.floor(v.py + Math.sin(v.angle) * k * 0.9)}`;
+          if (!res.has(kk)) res.set(kk, v);
+        }
+        continue;
+      }
+      const b = policy(w, v).buffer;
+      for (let i = 0; i < Math.min(b, v.path.length); i++) { const kk = keyOf(v.path[i]); if (!res.has(kk)) res.set(kk, v); }
+    }
+    return { occ, res };
+  }
+
+  // ---------- Incidents ----------
+  function bump(w, field, s, n = 1) { [w.day, w.shift].forEach(st => { st[field] += n; if (s) st.byStrat[s][field] += n; }); }
+  function incident(w, a, b, x, y) {
+    const sa = stratOf(a);
+    let damaged = [];
+    [a, b].forEach(v => {
+      v.stunnedUntil = w.t + 4; v.speedNow = 0; v.incidents++;
+      if (v.cargo.length && rng(w) < 0.5) {
+        const o = v.cargo.shift(); o.state = 'open'; o.claimant = null;
+        v.orders = v.orders.filter(x => x !== o); damaged.push(o.id); w.day.damaged++;
+      }
+      if (!v.human) nextLeg(w, v);
+    });
+    bump(w, 'incidents', sa); w.totals.incidents++; a.sPts -= INCIDENT_PENALTY; cardsOnCrash(w, a);
+    w.incidentLog.push({ t: w.t, strat: sa });
+    w.markers.push({ x, y, until: w.t + 10, kind: 'incident' });
+    emit(w, 'incident', `${a.id} (${sa}) hit ${b.id} (${stratOf(b)}). Both stopped 4 min` +
+      (damaged.length ? `; pallet damaged, #${damaged.join(', #')} back in the queue` : ''), { vid: a.id, x, y });
+  }
+  function intrude(w, v, other, n) {
+    const dist = manhattan(other.tile.x, other.tile.y, n.x, n.y);
+    if (dist > 2) return;                        // cut-in far ahead of the claimer: no risk
+    v.nearMisses++; bump(w, 'nearMisses', stratOf(v));
+    const moving = other.moveTo || Math.abs(other.speedNow) > 0.2;
+    const p = 0.12 * diffOf(w).crash * policy(w, v).speed * (moving ? 1.4 : 0.6) * (dist <= 1 ? 1.5 : 1);
+    w.markers.push({ x: n.x, y: n.y, until: w.t + 2, kind: 'near' });
+    if (rng(w) < p) incident(w, v, other, n.x, n.y);
+    else emit(w, 'nearmiss', `${v.id} (${stratOf(v)}) cut into ${other.id}'s claimed lane`, { vid: v.id, x: n.x, y: n.y });
+  }
+
+  // ---------- AI movement ----------
+  function backOff(w, v, occ, res) {
+    const D = [[1, 0], [-1, 0], [0, 1], [0, -1]], off = Math.floor(rng(w) * 4);
+    for (let i = 0; i < 4; i++) {
+      const [dx, dy] = D[(i + off) % 4], nx = v.tile.x + dx, ny = v.tile.y + dy, k = `${nx},${ny}`;
+      if (isBlocked(w, nx, ny) || occ.has(k) || (res.get(k) && res.get(k) !== v)) continue;
+      v.moveTo = { x: nx, y: ny }; occ.set(k, v); v.path = []; v.wait = 2; v.stuck = 0; v.waitKey = null;
+      return true;
+    }
+    return false;
+  }
+  function waitFor(w, v, dt, n, other, hard, occ, res) {
+    v.braking = true; v.speedNow = 0; v.wait += dt; v.stuck = (v.stuck || 0) + dt;
+    if (hard && !other.human && other.state === 'idle' && !other.path.length && !other.moveTo) nudge(w, other, keyOf(v.tile), occ);
+    if (v.stuck > 6 + rng(w) * 3 && backOff(w, v, occ, res)) return;
+    if (v.wait > (hard ? 2.5 : 4)) {
+      v.wait = 0; v.waitKey = null;
+      const isTarget = v.target && n.x === v.target.x && n.y === v.target.y;
+      if (!isTarget) plan(w, v, new Set([keyOf(n)]));
+    }
+  }
+  function stepAI(w, v, dt, occ, res) {
+    v.braking = false;
+    if (w.t < v.stunnedUntil) { v.speedNow = 0; return; }
+    const pol = policy(w, v);
+    if (!v.moveTo) {
+      if (!v.path.length) {
+        v.speedNow = 0;
+        if (v.target && (v.tile.x !== v.target.x || v.tile.y !== v.target.y)) {
+          v.wait += dt; if (v.wait > 2) { v.wait = 0; plan(w, v); }
+        }
+        return;
+      }
+      const n = v.path[0], nk = keyOf(n);
+      if (isBlocked(w, n.x, n.y)) { plan(w, v); return; }
+      const occupant = occ.get(nk);
+      if (occupant && occupant !== v) { waitFor(w, v, dt, n, occupant, true, occ, res); return; }
+      const claimer = res.get(nk);
+      if (claimer && claimer !== v) {
+        if (v.waitKey !== nk) {
+          let respect = pol.respect;
+          if (claimer.human) respect = Math.min(1, respect + 0.35);          // wider berth for humans
+          else if (claimer.strategy === 'Opportunist') respect -= 0.15;      // nobody yields to the Opportunist
+          v.waitKey = nk; v.wait = 0; v.waitRespect = rng(w) < respect;
+          if (!v.waitRespect) { intrude(w, v, claimer, n); if (w.t < v.stunnedUntil) return; }
+        }
+        if (v.waitRespect) { waitFor(w, v, dt, n, claimer, false, occ, res); return; }
+      }
+      v.moveTo = { x: n.x, y: n.y }; v.path.shift(); occ.set(nk, v); v.wait = 0; v.waitKey = null;
+    }
+    const tx = v.moveTo.x + 0.5, ty = v.moveTo.y + 0.5;
+    const dx = tx - v.px, dy = ty - v.py, d = Math.hypot(dx, dy);
+    const onSpill = hazardAt(w, v.tile.x, v.tile.y) || hazardAt(w, v.moveTo.x, v.moveTo.y);
+    const spd = BASE_SPEED[v.type] * pol.speed * (v.cargo.length ? 0.92 : 1) * (v.battery <= 0 ? 0.3 : 1) * K_SPEED[kindAtTile(v.tile.x, v.tile.y)] * (onSpill ? 0.45 : 1);
+    v.speedNow = spd;
+    if (d > 1e-4) turnToward(v, Math.atan2(dy, dx), dt);
+    const step = spd * dt;
+    if (step >= d) {
+      v.px = tx; v.py = ty; v.tile = v.moveTo; v.moveTo = null; v.stuck = 0;
+      drain(w, v, 0.11 * pol.speed * pol.speed * K_DRAIN[kindAtTile(v.tile.x, v.tile.y)]);                // energy grows with speed^2
+    } else { v.px += (dx / d) * step; v.py += (dy / d) * step; }
+  }
+
+  // ---------- AI task state machine ----------
+  function deliver(w, v, bayId) {
+    const here = v.cargo.filter(o => o.bay === bayId);
+    if (!here.length) return 0;
+    const bay = w.bays.find(b => b.id === bayId), s = stratOf(v);
+    const kwhEach = (v.energySince * KWH_PER_PCT) / here.length; v.energySince = 0;
+    const recs = [];
+    here.forEach(o => {
+      o.state = 'done';
+      const onTime = w.t <= o.due;
+      v.sPts += o.value * (onTime ? 1 : 0.5); v.sShipped++;
+      recs.push({ o, onTime, trip: w.t - (o.pickedAt ?? w.t) });
+      w.deliveries.push({ t: w.t, strat: s, vid: v.id, onTime, kwh: kwhEach, p0: o.p0 });
+      [w.day, w.shift].forEach(st => {
+        st.shipped++; if (onTime) st.onTime++;
+        st.byStrat[s].shipped++; if (onTime) st.byStrat[s].onTime++; st.byStrat[s].kwh += kwhEach;
+      });
+      w.totals.shipped++; if (onTime) w.totals.onTime++;
+      v.deliveries++; bay.load++;
+      if (o.p0) emit(w, 'p0done', `P0 #${o.id} delivered by ${v.id} (${s}), ${onTime ? 'on time' : 'late'}`, { vid: v.id });
+    });
+    v.cargo = v.cargo.filter(o => o.state !== 'done');
+    v.orders = v.orders.filter(o => o.state !== 'done');
+    w.orders = w.orders.filter(o => o.state !== 'done');
+    if (bay.load >= bay.cap) { bay.load = 0; bay.departUntil = w.t + 3; emit(w, 'truck', `Trailer at bay ${bay.id} left full; next one docks in 3 min`); }
+    cardsOnDeliver(w, v, recs);
+    return here.length;
+  }
+  function stepTask(w, v, dt) {
+    v.fork += (v.forkTarget - v.fork) * Math.min(1, dt * 5);
+    if (w.t < v.stunnedUntil || v.moveTo || v.path.length) return;
+    const at = (x, y) => v.tile.x === x && v.tile.y === y;
+    switch (v.state) {
+      case 'idle':
+        if (v.target && v.target.kind === 'park' && at(v.target.x, v.target.y)) v.target = null;
+        if (!v.cargo.length && !v.orders.length && v.battery < policy(w, v).chargeAt) goCharge(w, v);
+        break;
+      case 'toPick': {
+        const o = v.target && v.target.order;
+        if (!o || o.claimant !== v.id || o.state !== 'claimed') { nextLeg(w, v); break; }
+        if (at(v.target.x, v.target.y)) {
+          v.state = 'picking'; v.timer = K_PICK[kindAtTile(o.slot.rx, o.slot.ry)]; v.forkTarget = 0.95;
+          v.angle = Math.atan2(o.slot.ry - o.slot.ay, o.slot.rx - o.slot.ax);
+        }
+        break;
+      }
+      case 'picking':
+        v.timer -= dt;
+        if (v.timer <= 0) {
+          const o = v.target.order;
+          if (o.claimant === v.id && o.state === 'claimed') { o.state = 'picked'; o.pickedAt = w.t; v.cargo.push(o); }
+          v.forkTarget = 0.3; nextLeg(w, v);
+        }
+        break;
+      case 'toDrop':
+        if (at(v.target.x, v.target.y)) {
+          const bay = w.bays.find(b => b.id === v.target.bay);
+          if (w.t < bay.departUntil) { v.braking = true; v.msg = 'Waiting for the next trailer'; break; }
+          v.state = 'dropping'; v.timer = 1.0; v.forkTarget = 0.55; v.angle = 0; v.msg = '';
+        }
+        break;
+      case 'dropping':
+        v.timer -= dt;
+        if (v.timer <= 0) { deliver(w, v, v.target.bay); v.forkTarget = 0.15; nextLeg(w, v); if (v.state === 'idle') park(w, v); }
+        break;
+      case 'toCharge':
+        if (v.target && at(v.target.x, v.target.y)) { v.state = 'charging'; v.msg = ''; }
+        break;
+      case 'charging':
+        v.battery = Math.min(100, v.battery + 5 * dt);
+        if (v.battery >= 95) { v.chargerIdx = -1; v.state = 'idle'; v.idleSince = w.t; v.target = null; park(w, v); }
+        break;
+    }
+  }
+
+  // ---------- Human driving (continuous throttle / steering) ----------
+  function stepHuman(w, v, dt, occ) {
+    v.fork += (v.forkTarget - v.fork) * Math.min(1, dt * 5);
+    if (w.t < v.stunnedUntil) { v.speedNow = 0; return; }
+    const inp = v.input, maxF = 3.0 * (v.battery <= 0 ? 0.3 : 1) * K_SPEED[kindAtTile(v.tile.x, v.tile.y)], maxR = 1.2;
+    if (inp.up) v.speedNow = Math.min(maxF, v.speedNow + 5 * dt);
+    else if (inp.down) v.speedNow = Math.max(-maxR, v.speedNow - 7 * dt);
+    else { v.speedNow *= Math.max(0, 1 - 4 * dt); if (Math.abs(v.speedNow) < 0.03) v.speedNow = 0; }
+    if (v.speedNow > maxF) v.speedNow = Math.max(maxF, v.speedNow - 8 * dt);   // hazmat speed limit
+    if (inp.up || inp.down) v.humanCharging = false;
+    v.braking = inp.down && v.speedNow > 0;
+    const steer = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
+    if (steer) v.angle += steer * dt * (Math.abs(v.speedNow) > 0.05 ? 2.8 * Math.sign(v.speedNow) : 1.6);
+    if (v.humanCharging) {
+      if (chargerAt(v.tile.x, v.tile.y) >= 0 && v.speedNow === 0) v.battery = Math.min(100, v.battery + 5 * dt);
+      else v.humanCharging = false;
+    }
+    if (v.speedNow === 0) return;
+    const nx = v.px + Math.cos(v.angle) * v.speedNow * dt, ny = v.py + Math.sin(v.angle) * v.speedNow * dt;
+    const dir = Math.sign(v.speedNow);
+    const ftx = Math.floor(nx + Math.cos(v.angle) * 0.32 * dir), fty = Math.floor(ny + Math.sin(v.angle) * 0.32 * dir);
+    if (isBlocked(w, ftx, fty) || isBlocked(w, Math.floor(nx), Math.floor(ny))) { v.speedNow = 0; return; }
+    const other = occ.get(`${ftx},${fty}`);
+    if (other && other !== v) {
+      if (Math.abs(v.speedNow) > 1.3) incident(w, v, other, ftx, fty);
+      v.speedNow = 0; return;
+    }
+    const s = Math.abs(v.speedNow);
+    v.px = nx; v.py = ny; v.tile = { x: Math.floor(nx), y: Math.floor(ny) };
+    drain(w, v, s * dt * 0.11 * (s / 2.4) ** 2 * K_DRAIN[kindAtTile(v.tile.x, v.tile.y)]);
+  }
+  // A driver does not need to sit on the exact tile: anything within REACH tiles of the vehicle's centre can be worked.
+  // Returns the nearest bay, charger or open pickup in range (priority: bay, charger, pickup) plus the nearest of each for hints.
+  const REACH = 1.6;
+  const dist2 = (v, tx, ty) => Math.hypot(v.px - (tx + 0.5), v.py - (ty + 0.5));
+  function interactAt(w, v) {
+    let bay = null, bd = 1e9;
+    BAYS.forEach(b => b.tiles.forEach(t => { const d = dist2(v, t.x, t.y); if (d < bd) { bd = d; bay = b; } }));
+    let ci = -1, cd = 1e9;
+    CHARGERS.forEach((c, i) => { const d = dist2(v, c.x, c.y); if (d < cd) { cd = d; ci = i; } });
+    let order = null, od = 1e9;
+    w.orders.forEach(o => { if (o.state === 'picked') return; const d = dist2(v, o.slot.ax, o.slot.ay); if (d < od) { od = d; order = o; } });
+    const hit = bd <= REACH ? { kind: 'drop', bay } : cd <= 1.0 ? { kind: 'charge', charger: ci } : od <= REACH ? { kind: 'pick', order } : null;
+    return { hit, bay, bd, ci, cd, order, od };
+  }
+  function humanInteract(w, vid) {
+    const v = w.vehicles.find(x => x.id === vid && x.human);
+    if (!v || w.t < v.stunnedUntil) return;
+    const hint = text => emit(w, 'hint', text, { vid: v.id });
+    const near = interactAt(w, v), bay = near.hit && near.hit.kind === 'drop' ? near.hit.bay : null;
+    if (bay) {
+      if (!v.cargo.length) return hint('Nothing on the forks to drop.');
+      if (w.t < w.bays.find(b => b.id === bay.id).departUntil) return hint('Trailer is away. Wait for the next one to dock.');
+      if (!deliver(w, v, bay.id)) return hint(`Wrong bay. Your load goes to ${[...new Set(v.cargo.map(o => o.bay))].join(', ')}.`);
+      v.fork = 0.55; v.forkTarget = 0.15; return;
+    }
+    if (near.hit && near.hit.kind === 'charge') { v.humanCharging = true; v.speedNow = 0; const c = CHARGERS[near.hit.charger]; v.px = c.x + 0.5; v.py = c.y + 0.5; v.tile = { x: c.x, y: c.y }; return hint('Charging. Any throttle input stops it.'); }
+    const o = near.hit && near.hit.kind === 'pick' ? near.hit.order : null;
+    if (o) {
+      if (v.cargo.length >= capacity(v)) return hint('Forks are full (2 pallets max).');
+      if (o.claimant && o.claimant !== v.id) {
+        const owner = w.vehicles.find(q => q.id === o.claimant);
+        if (owner) { owner.orders = owner.orders.filter(q => q !== o); nextLeg(w, owner); }
+        emit(w, 'poach', `You took #${o.id} from ${o.claimant} (${owner ? owner.strategy : '?'})`, { vid: v.id });
+      }
+      if (!v.orders.includes(o)) v.orders.push(o);
+      o.claimant = v.id; o.state = 'picked'; o.pickedAt = w.t; v.cargo.push(o);
+      v.fork = 0.95; v.forkTarget = 0.3;
+      return hint(`Picked #${o.id} → bay ${o.bay}${o.p0 ? ' (P0)' : ''}. Due in ${Math.max(0, Math.round(o.due - w.t))} min.`);
+    }
+    const g = guide(w, v);
+    if (g && g.kind !== 'wait' && g.x != null) {
+      const d = Math.hypot(v.px - (g.x + 0.5), v.py - (g.y + 0.5));
+      return hint(`Too far: ${g.kind === 'pick' ? 'the pickup' : g.kind === 'drop' ? `bay ${g.order.bay}` : 'the charger'} is ${d.toFixed(1)} tiles away. Get within ${REACH} tiles of the glowing ring, then press E.`);
+    }
+    hint('Nothing in range. Open pickups appear as amber rings once you have free forks.');
+  }
+  // One lease per vehicle; a player drives at most one vehicle. Returns an error string or null.
+  function takeWheel(w, vid, player = 'you') {
+    const v = w.vehicles.find(x => x.id === vid);
+    if (!v) return 'Unknown vehicle.';
+    if (v.human) return v.driver === player ? null : `${v.id} is being driven by ${v.driver}.`;
+    w.vehicles.filter(x => x.human && x.driver === player).forEach(x => release(w, x.id));
+    if (v.chargerIdx >= 0 && v.state !== 'charging') v.chargerIdx = -1;
+    v.human = true; v.driver = player; v.input = { up: false, down: false, left: false, right: false }; v.state = 'driven'; v.path = []; v.target = null; v.speedNow = 0; v.msg = '';
+    if (v.moveTo) { v.tile = { x: Math.floor(v.px), y: Math.floor(v.py) }; v.moveTo = null; }
+    if (v.chargerIdx >= 0) v.chargerIdx = -1;
+    emit(w, 'drive', `${player === 'you' ? 'You' : player} took the wheel of ${v.id}. Its ${v.orders.length} order(s) are now yours.`, { vid: v.id });
+    dealCards(w, player);
+    return null;
+  }
+  function release(w, vid) {
+    const v = w.vehicles.find(x => x.id === vid);
+    if (!v || !v.human) return;
+    v.human = false; v.driver = null; v.input = { up: false, down: false, left: false, right: false }; v.speedNow = 0; v.humanCharging = false;
+    v.tile = { x: Math.floor(v.px), y: Math.floor(v.py) }; v.moveTo = { ...v.tile };
+    v.orders.forEach(o => { if (o.state !== 'picked') o.state = 'claimed'; });
+    nextLeg(w, v);
+    emit(w, 'drive', `${v.id} handed back to its ${v.strategy} AI.`, { vid: v.id });
+  }
+
+  // ---------- Shift / day rollover ----------
+  const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+  function leaderboard(w) {
+    return w.vehicles.map(v => ({ id: v.id, strat: stratOf(v), pts: v.sPts, shipped: v.sShipped, human: v.human, driver: v.driver, type: v.type }))
+      .sort((a, b) => b.pts - a.pts);
+  }
+  function onShiftEnd(w) {
+    cardsResolveShift(w);
+    const lb = leaderboard(w), lbl = shiftName(w.t - 1);
+    emit(w, 'shift', `Shift ${lbl} final: ${lb.slice(0, 3).map(r => `${r.id} ${Math.round(r.pts)}`).join(', ')}.`);
+    lb.forEach((r, i) => {
+      if (!r.human) return;
+      w.totals.humanShifts++; if (i === 0) w.totals.wins++;
+      emit(w, 'shift', `${r.driver === 'you' ? 'You' : r.driver} finished #${i + 1} of ${lb.length} in ${r.id} with ${Math.round(r.pts)} pts${i === 0 ? '. Shift win!' : '.'}`, { vid: r.id });
+    });
+    const D = diffOf(w), shiftLabel = `Day ${dayIndex(w.t - 1) + 1} · Shift ${lbl}`;
+    const hallRows = [lb[0], lb.find(r => r.human)].filter((r, i, a) => r && r.pts > 0 && a.indexOf(r) === i);
+    hallRows.forEach(r => w.hall.push({ shift: shiftLabel, id: r.id, strat: r.strat, human: r.human, driver: r.driver,
+      pts: Math.round(r.pts), scored: Math.round(r.pts * D.score), diff: w.difficulty }));
+    w.hall.sort((a, b) => b.scored - a.scored); w.hall = w.hall.slice(0, 10);
+    w.vehicles.forEach(v => { v.bank += v.sPts; v.sPts = 0; v.sShipped = 0; });
+    const bs = w.shift.byStrat, S = bs.Strategist, label = shiftName(w.t - 1);
+    const others = ['Sprinter', 'Steady', 'Batcher', 'Opportunist'].map(s => bs[s].shipped).sort((a, b) => a - b);
+    const median = (others[1] + others[2]) / 2;
+    const before = { ...w.tuned }, t = w.tuned;
+    let reason;
+    if (S.incidents >= 2) {
+      t.speed = clamp(t.speed - 0.1, 0.8, 1.35); t.respect = clamp(t.respect + 0.15, 0.3, 1); t.preemptForP0 = false;
+      reason = `${S.incidents} at-fault incidents, so slowing down and yielding more`;
+    } else if (S.shipped < median) {
+      t.speed = clamp(t.speed + 0.1, 0.8, 1.35); t.respect = clamp(t.respect - 0.1, 0.3, 1);
+      t.chargeAt = clamp(t.chargeAt - 3, 10, 35); t.preemptForP0 = true;
+      reason = `shipped ${S.shipped} vs team median ${median}, so pushing harder`;
+    } else if (S.shipped && S.onTime / S.shipped < 0.85) {
+      t.speed = clamp(t.speed + 0.05, 0.8, 1.35);
+      reason = `on-time ${Math.round(100 * S.onTime / S.shipped)}% is under 85%, so a small speed bump`;
+    } else reason = 'at or above the median with few incidents, so holding settings';
+    emit(w, 'retune', `Strategist, end of Shift ${label}: ${reason}. Speed ${before.speed.toFixed(2)}→${t.speed.toFixed(2)}, ` +
+      `yield ${before.respect.toFixed(2)}→${t.respect.toFixed(2)}, charge at ${before.chargeAt}%→${t.chargeAt}%.`);
+    w.shift = emptyStats();
+  }
+  function onDayEnd(w, idx) {
+    const d = w.day, per = {};
+    STRAT_ORDER.forEach(s => { const b = d.byStrat[s];
+      per[s] = { shipped: b.shipped, onTimePct: b.shipped ? Math.round(100 * b.onTime / b.shipped) : null,
+        incidents: b.incidents, kwhPerOrder: b.shipped ? +(b.kwh / b.shipped).toFixed(2) : null }; });
+    const ai = STRAT_ORDER.slice(0, 5).sort((a, b) => (per[b].shipped - 2 * per[b].incidents) - (per[a].shipped - 2 * per[a].incidents));
+    const onTimePct = d.shipped ? Math.round(100 * d.onTime / d.shipped) : null;
+    w.history.push({ day: idx + 1, shipped: d.shipped, onTimePct, incidents: d.incidents, nearMisses: d.nearMisses,
+      lost: d.lost, damaged: d.damaged, poaches: d.poaches, per, winner: ai[0], tuned: { ...w.tuned } });
+    w.totals.days++;
+    emit(w, 'day', `Day ${idx + 1} closed: ${d.shipped} shipped, ${onTimePct ?? '—'}% on time, ${d.incidents} incidents. Best strategy: ${ai[0]}.`);
+    w.day = emptyStats();
+  }
+
+  // ---------- Difficulty ----------
+  // demand: order arrival multiplier; due: deadline multiplier; hazardPerHr: random spills per game hour;
+  // crash: multiplier on cut-in crash probability; score: multiplier used to rank hall-of-fame shifts.
+  const DIFFICULTY = {
+    easy:   { label: 'Easy',   demand: 0.7, due: 1.3, hazardPerHr: 1, hazardTtl: [2, 20], crash: 0.7, score: 0.75 },
+    normal: { label: 'Normal', demand: 1.0, due: 1.0, hazardPerHr: 3, hazardTtl: [2, 30], crash: 1.0, score: 1.0 },
+    hard:   { label: 'Hard',   demand: 1.3, due: 0.8, hazardPerHr: 8, hazardTtl: [2, 45], crash: 1.4, score: 1.4 },
+  };
+  const diffOf = w => DIFFICULTY[w.difficulty] || DIFFICULTY.normal;
+  function setDifficulty(w, key) {
+    if (!DIFFICULTY[key]) return `Unknown difficulty "${key}"`;
+    if (w.difficulty === key) return null;
+    w.difficulty = key;
+    emit(w, 'difficulty', `Difficulty set to ${DIFFICULTY[key].label}: demand x${DIFFICULTY[key].demand}, deadlines x${DIFFICULTY[key].due}, ~${DIFFICULTY[key].hazardPerHr} spills/hr.`);
+    return null;
+  }
+
+  // ---------- Random hazards and per-agent decisions ----------
+  // A spill appears on a tile an agent is about to cross. Each agent that reaches it scores three options
+  // (reroute / wait it out / push through) from its own policy, cargo and deadline slack, then takes the cheapest.
+  // These are rule-based scored decisions (a hook for Gemini in the server build); nothing is scripted per agent.
+  const hazardAt = (w, x, y) => w.hazards.find(h => h.x === x && h.y === y) || null;
+  const NOISE = { Sprinter: 0.8, Steady: 0.3, Batcher: 0.4, Opportunist: 1.5, Strategist: 0.5 };
+  const REPLAN_OVERHEAD = 0.9;   // game-minutes lost to stopping, replanning and turning around
+  function spawnHazard(w) {
+    const cands = w.vehicles.filter(v => !v.human && v.path.length >= 4);
+    let tile = null;
+    if (cands.length) { const v = cands[Math.floor(rng(w) * cands.length)]; tile = v.path[3]; }
+    if (!tile) return false;
+    const k = keyOf(tile);
+    if (isBlocked(w, tile.x, tile.y) || bayAt(tile.x, tile.y) || chargerAt(tile.x, tile.y) >= 0 || w.cones.has(k) || hazardAt(w, tile.x, tile.y)) return false;
+    const [lo, hi] = diffOf(w).hazardTtl;
+    const h = { id: ++w.nextHazardId, x: tile.x, y: tile.y, born: w.t, until: w.t + lo + rng(w) * (hi - lo) };
+    w.hazards.push(h); w.totals.hazards++;
+    emit(w, 'hazard', `Spill on aisle tile (${h.x}, ${h.y}); clears in about ${Math.round(h.until - w.t)} min.`, { x: h.x, y: h.y });
+    return true;
+  }
+  function slackOf(w, v) {
+    const all = [...v.cargo, ...v.orders.filter(o => !v.cargo.includes(o))];
+    if (!all.length) return null;
+    return Math.min(...all.map(o => o.due - w.t));
+  }
+  function decideHazard(w, v, h) {
+    const pol = policy(w, v), spd = BASE_SPEED[v.type] * pol.speed;
+    const slack = slackOf(w, v);
+    const urgency = slack === null ? 0.4 : slack < 10 ? 2.0 : slack < 30 ? 1.3 : 1.0;
+    const hk = `${h.x},${h.y}`;
+    let reroute = Infinity, alt = null;
+    if (v.target) {
+      alt = findPath(w, v.tile.x, v.tile.y, v.target.x, v.target.y, { flat: pol.flatPath, avoid: new Set([hk]) });
+      if (alt) reroute = (REPLAN_OVERHEAD + Math.max(0, alt.length - v.path.length) / spd) * urgency;
+    }
+    const wait = Math.max(0, h.until - w.t) * urgency;
+    const skid = 0.3 * (3 + (v.cargo.length ? 4 : 0)) * (0.5 + pol.respect);
+    const push = (1.2 / spd + skid) * urgency;
+    const noise = NOISE[stratOf(v)] || 0.4;
+    const opt = { reroute, wait, push };
+    let choice = 'push', best = Infinity;
+    for (const k of ['reroute', 'wait', 'push']) {
+      const c = opt[k] + (rng(w) - 0.5) * noise;
+      if (c < best) { best = c; choice = k; }
+    }
+    v.hzSeen.add(h.id);
+    if (choice === 'reroute') { v.path = alt; v.msg = ''; v.waitKey = null; }
+    else if (choice === 'wait') { v.hold = h.id; v.msg = 'Waiting for the spill to clear'; }
+    else { v.pushing = h.id; }
+    w.totals.decisions[choice]++;
+    const rec = { t: w.t, vid: v.id, strat: stratOf(v), choice, urgency,
+      costs: { reroute: reroute === Infinity ? null : +reroute.toFixed(2), wait: +wait.toFixed(2), push: +push.toFixed(2) } };
+    w.decisions.push(rec); if (w.decisions.length > 100) w.decisions.shift();
+    const c = rec.costs;
+    emit(w, 'decision', `${v.id} (${rec.strat}) at the spill: ${choice}. Costs: reroute ${c.reroute ?? 'none'}, wait ${c.wait}, push ${c.push}.`, { vid: v.id, x: h.x, y: h.y });
+    return rec;
+  }
+  function hazardStep(w, dt) {
+    const D = diffOf(w);
+    if (rng(w) < (D.hazardPerHr / 60) * dt) spawnHazard(w);
+    w.hazards = w.hazards.filter(h => h.until > w.t);
+    if (!w.hazards.length) { w.vehicles.forEach(v => { v.hold = null; }); return; }
+    for (const v of w.vehicles) {
+      const here = hazardAt(w, v.tile.x, v.tile.y);
+      if (v.hold && !w.hazards.some(h => h.id === v.hold)) { v.hold = null; v.msg = ''; }
+      if (here && !v.hzSeen.has(here.id) && v.human) {          // human driver crossed a spill
+        v.hzSeen.add(here.id);
+        if (Math.abs(v.speedNow) > 1.2) {
+          v.stunnedUntil = w.t + 3; v.speedNow = 0; v.sPts -= 5;
+          emit(w, 'hazard', `${v.id} skidded on a spill and lost 5 pts. Slow down near yellow patches.`, { vid: v.id });
+        }
+      }
+      if (v.human) continue;
+      if (here && v.pushing === here.id && !v.skidRolled) {      // pushed through: roll the skid once
+        v.skidRolled = true;
+        if (rng(w) < 0.3) {
+          v.stunnedUntil = w.t + 3; v.speedNow = 0; v.sPts -= 5;
+          if (v.cargo.length && rng(w) < 0.5) { const o = v.cargo.shift(); o.state = 'open'; o.claimant = null; v.orders = v.orders.filter(x => x !== o); w.day.damaged++; nextLeg(w, v); }
+          emit(w, 'hazard', `${v.id} (${stratOf(v)}) skidded pushing through the spill.`, { vid: v.id });
+        }
+      }
+      if (!here && v.pushing) { v.pushing = null; v.skidRolled = false; }
+      if (v.moveTo || !v.path.length || w.t < v.stunnedUntil) continue;
+      const nxt = v.path[0], h = hazardAt(w, nxt.x, nxt.y);
+      if (h && !v.hzSeen.has(h.id)) decideHazard(w, v, h);
+    }
+    if (v_prune(w)) w.vehicles.forEach(v => v.hzSeen.forEach(id => { if (!w.hazards.some(h => h.id === id)) v.hzSeen.delete(id); }));
+  }
+  const v_prune = w => Math.round(w.t * 10) % 300 === 0;
+
+  // ---------- Fixed tick ----------
+  function tick(w) {
+    if (activeTier !== w.tier) buildMap(w.tier);   // the floor is shared module state; make sure it is this world's
+    const dt = TICK_MIN, prevDay = dayIndex(w.t), prevShift = shiftIndex(w.t);
+    w.t = Math.round((w.t + dt) * 10) / 10;
+    const rate = (HOURLY_RATE[Math.floor(minuteOfDay(w.t) / 60)] + (w.t < w.rushUntil ? Math.round(32 * FLOW) : 0)) * diffOf(w).demand * Math.max(1, w.vehicles.length / BASE_AI);
+    if (rng(w) < (rate / 60) * dt) postOrder(w);
+    hazardStep(w, dt);
+    w.marketTimer -= dt;
+    if (w.marketTimer <= 0) { w.marketTimer = 0.5; runMarket(w); }
+    const { occ, res } = buildOccupancy(w);
+    const n = w.vehicles.length, start = Math.round(w.t * 10) % n;   // rotate update order for fairness
+    for (let i = 0; i < n; i++) {
+      const v = w.vehicles[(start + i) % n];
+      if (v.human) stepHuman(w, v, dt, occ);
+      else if (v.hold && !v.moveTo) { v.braking = true; v.speedNow = 0; stepTask(w, v, dt); }
+      else { stepAI(w, v, dt, occ, res); stepTask(w, v, dt); }
+    }
+    for (const v of w.vehicles) {
+      if (v.state !== 'charging' && !v.humanCharging) drain(w, v, 0.01 * dt);
+      w.heat[v.tile.y * MAP_W + v.tile.x] += dt;
+    }
+    for (let i = 0; i < w.heat.length; i++) w.heat[i] *= 0.997;
+    w.markers = w.markers.filter(m => m.until > w.t);
+    if (Math.round(w.t * 10) % 10 === 0) cardsTick(w);
+    aiDealCards(w);
+    if (Math.round(w.t * 10) % 50 === 0) sampleValue(w);
+    if (Math.round(w.t * 10) % 600 === 0) {
+      w.deliveries = w.deliveries.filter(d => d.t > w.t - 120);
+      w.incidentLog = w.incidentLog.filter(d => d.t > w.t - 120);
+    }
+    if (shiftIndex(w.t) !== prevShift) onShiftEnd(w);
+    if (dayIndex(w.t) !== prevDay) onDayEnd(w, prevDay);
+  }
+
+  // ---------- Commands ----------
+  function rushWave(w) {
+    let n = 0; for (let i = 0; i < 12; i++) if (postOrder(w)) n++;
+    w.rushUntil = w.t + 30;
+    emit(w, 'rush', `Rush wave: ${n} orders posted now, +45/hr for 30 min${n < 12 ? ` (${12 - n} lost to a full backlog)` : ''}.`);
+  }
+  function postP0(w) { if (!postOrder(w, { p0: true })) emit(w, 'hint', 'No free rack slot for a P0 right now.'); }
+  function toggleCone(w, x, y) {
+    const k = `${x},${y}`;
+    if (w.cones.has(k)) { w.cones.delete(k); return null; }
+    if (isBlocked(w, x, y)) return 'Cones go on open floor only.';
+    if (bayAt(x, y) || chargerAt(x, y) >= 0) return 'Keep bays and chargers clear.';
+    if (w.orders.some(o => o.slot.key === k)) return 'That tile is an active pickup.';
+    if (w.vehicles.some(v => (v.tile.x === x && v.tile.y === y) || (v.moveTo && v.moveTo.x === x && v.moveTo.y === y))) return 'A vehicle is on that tile.';
+    w.cones.add(k);
+    w.vehicles.forEach(v => { if (!v.human && v.path.some(p => p.x === x && p.y === y)) plan(w, v); });
+    return null;
+  }
+
+  // ---------- Contract cards (Ticket-to-Ride style objectives) ----------
+  // Route cards post real tagged orders into the shared pool (AI vehicles can take them).
+  // Skill cards are predicates over the delivery / incident stream. All progress comes from sim events.
+  const ZONE_COLS = ZONE_FAR;   // far column of each rack block
+  function mkRoute(w, zone, bayId, n, starter) {
+    const dist = MAP_W - 2 - ZONE_COLS[zone];
+    return { id: `c${++w.cardSeq}`, type: 'route', zone, bay: bayId, goal: n, progress: 0, status: 'offer', starter: !!starter,
+      pts: starter ? 10 : 10 + Math.round(dist / 3) + KINDS[ZONE_KIND[zone]].bonus, title: `${n > 1 ? n + ' pallets' : '1 pallet'}: Zone ${zone} (${KINDS[ZONE_KIND[zone]].short}) → Bay ${bayId}`,
+      desc: `${starter ? 'Starter. ' : ''}Purple pallets are posted for you. Rival vehicles can grab them first.` };
+  }
+  const SKILLS = [
+    { type: 'batch', goal: 1, pts: 20, title: 'Two pallets, one trip', desc: 'Carry 2 pallets for the same bay and deliver them together.',
+      feasible: w => { const c = {}; w.orders.forEach(o => { if (o.state !== 'picked') c[o.bay] = (c[o.bay] || 0) + 1; }); return Object.values(c).some(n => n >= 2); } },
+    { type: 'clean', goal: 1, pts: 20, title: 'Crash-free shift', desc: 'Finish the shift without causing a crash.' },
+    { type: 'ontime', goal: 5, pts: 25, title: 'Five on-time pallets', desc: 'Deliver 5 pallets before their due time.' },
+    { type: 'quick', goal: 2, pts: 20, title: 'Two quick runs', desc: 'Pick up and deliver within 8 min, twice.' },
+    { type: 'charge', goal: 1, pts: 15, title: 'Finish above 40% battery', desc: 'Be driving with 40%+ battery when the shift ends.' },
+  ];
+  const mkSkill = (w, s) => ({ id: `c${++w.cardSeq}`, type: s.type, goal: s.goal, progress: 0, status: 'offer', pts: s.pts, title: s.title, desc: s.desc });
+
+  // Deals 3 cards once per shift per player. The first deal ever includes an easy starter card.
+  function dealCards(w, player) {
+    const h = (w.hands[player] ??= { shift: -1, offer: null, cards: [] });
+    const si = shiftIndex(w.t);
+    if (h.shift === si) return h;
+    h.shift = si; h.cards = [];
+    const offer = [], pool = [], zones = Object.keys(ZONE_COLS);
+    if (w.totals.cardDeals === 0) offer.push(mkRoute(w, 'U', 'E5', 1, true));
+    for (let i = 0; i < 2; i++) pool.push(() => mkRoute(w, zones.splice(Math.floor(rng(w) * zones.length), 1)[0], BAYS[Math.floor(rng(w) * BAYS.length)].id, 2));
+    SKILLS.forEach(s => { if (!s.feasible || s.feasible(w)) pool.push(() => mkSkill(w, s)); });
+    while (offer.length < 3 && pool.length) offer.push(pool.splice(Math.floor(rng(w) * pool.length), 1)[0]());
+    h.offer = offer; w.totals.cardDeals++;
+    emit(w, 'card', 'New contract cards dealt. Keep at least one.', { player });
+    return h;
+  }
+  function keepCards(w, player, ids) {
+    const h = w.hands[player];
+    if (!h || !h.offer) return 'No cards to keep.';
+    const keep = h.offer.filter(c => ids.includes(c.id));
+    if (!keep.length) return 'Keep at least one card.';
+    h.offer = null;
+    keep.forEach(c => {
+      c.status = 'active';
+      if (c.type === 'route') {
+        let n = 0; for (let i = 0; i < c.goal; i++) if (postOrder(w, { zone: c.zone, bayId: c.bay, card: c.id })) n++;
+        if (!n) { emit(w, 'card', `No free pickup slot in Zone ${c.zone}, so "${c.title}" was voided.`); return; }
+        c.goal = n;
+      }
+      h.cards.push(c);
+    });
+    emit(w, 'card', `Contracts accepted: ${keep.map(c => c.title).join(' · ')}`, { player });
+    return null;
+  }
+  const activeCardIds = (w, player) => ((w.hands[player] && w.hands[player].cards) || []).filter(c => c.status === 'active').map(c => c.id);
+  const handKey = v => (v.human ? v.driver : v.id);
+  function finishCard(w, c, v) {
+    c.status = 'done'; v.sPts += c.pts;
+    if (v.human) { w.totals.cardsDone++; emit(w, 'card', `Contract done: ${c.title}. +${c.pts} pts`, { vid: v.id }); }
+    else w.totals.aiCardsDone++;
+  }
+  function cardsOnDeliver(w, v, recs) {
+    const h = w.hands[handKey(v)]; if (!h) return;
+    h.cards.forEach(c => {
+      if (c.status !== 'active') return;
+      if (c.type === 'route') c.progress += recs.filter(r => r.o.card === c.id).length;
+      else if (c.type === 'batch') { if (recs.length >= 2) c.progress = c.goal; }
+      else if (c.type === 'ontime') c.progress += recs.filter(r => r.onTime).length;
+      else if (c.type === 'quick') c.progress += recs.filter(r => r.trip <= 8).length;
+      if (c.progress >= c.goal) finishCard(w, c, v);
+    });
+  }
+  function cardsOnCrash(w, v) {
+    const h = w.hands[handKey(v)]; if (!h) return;
+    h.cards.forEach(c => { if (c.status === 'active' && c.type === 'clean') { c.status = 'lost'; if (v.human) emit(w, 'card', `Contract failed: ${c.title}. You caused a crash.`, { vid: v.id }); } });
+  }
+  function cardsTick(w) {
+    Object.values(w.hands).forEach(h => h.cards.forEach(c => {
+      if (c.status !== 'active' || c.type !== 'route') return;
+      const left = w.orders.filter(o => o.card === c.id).length;
+      if (c.progress + left < c.goal) { c.status = 'lost'; emit(w, 'card', `Contract lost: ${c.title}. Another driver delivered the pallets first.`); }
+    }));
+  }
+  // Runs at each shift change: settle end-of-shift cards, release tagged orders, deal again to players still driving.
+  function cardsResolveShift(w) {
+    Object.entries(w.hands).forEach(([player, h]) => {
+      const dv = w.vehicles.find(v => (v.human && v.driver === player) || (!v.human && v.id === player));
+      const human = !!(dv && dv.human);
+      h.cards.forEach(c => {
+        if (c.status !== 'active') return;
+        if (c.type === 'clean' && dv) finishCard(w, c, dv);
+        else if (c.type === 'charge' && dv && dv.battery >= 40) finishCard(w, c, dv);
+        else { c.status = 'expired'; if (human || !dv) emit(w, 'card', `Contract expired: ${c.title}.`); }
+      });
+      h.offer = null;
+    });
+    w.orders.forEach(o => { o.card = null; });
+    Object.keys(w.hands).forEach(p => { if (w.vehicles.some(v => v.human && v.driver === p)) dealCards(w, p); });
+  }
+  // Each AI vehicle draws three skill cards per shift and keeps one. The choice is rule-based per strategy
+  // (a hook for Gemini in the server build). Route cards stay human-only because they post tagged orders.
+  const CARD_PREF = { Sprinter: 'quick', Steady: 'clean', Batcher: 'batch', Opportunist: 'ontime', Strategist: null };
+  function aiDealCards(w) {
+    const si = shiftIndex(w.t);
+    if (w.aiShift === si) return;
+    w.aiShift = si;
+    w.vehicles.filter(v => !v.human).forEach(v => {
+      const h = (w.hands[v.id] ??= { shift: -1, offer: null, cards: [], ai: true });
+      h.shift = si; h.cards = []; h.offer = null;
+      const pool = SKILLS.filter(s => !s.feasible || s.feasible(w)), draw = [];
+      while (draw.length < 3 && pool.length) draw.push(pool.splice(Math.floor(rng(w) * pool.length), 1)[0]);
+      if (!draw.length) return;
+      const want = v.strategy === 'Strategist' ? w.tuned.respect > 0.9 ? 'clean' : 'ontime' : CARD_PREF[v.strategy];
+      const pick = draw.find(s => s.type === want) || draw.sort((a, b) => b.pts / b.goal - a.pts / a.goal)[0];
+      const c = mkSkill(w, pick); c.status = 'active'; h.cards.push(c);
+    });
+  }
+  // Samples cumulative value (shift points banked + current shift points, including card bonuses) for the
+  // you-versus-agents chart. Pure bookkeeping of events that already happened; nothing is estimated.
+  function sampleValue(w) {
+    let ai = 0, best = 0;
+    for (const v of w.vehicles) {
+      const tot = v.bank + v.sPts, d = tot - v.lastTot; v.lastTot = tot;
+      if (v.human) w.humanValue += d; else { v.aiValue += d; w.agentValue += d; ai++; }
+    }
+    w.vehicles.forEach(v => { if (!v.human && v.aiValue > best) best = v.aiValue; });
+    w.series.push({ t: w.t, you: Math.round(w.humanValue), avg: Math.round(w.agentValue / Math.max(1, ai)), best: Math.round(best) });
+    if (w.series.length > 300) w.series.shift();
+  }
+
+  // Next-step guidance for a human driver, derived from live world state.
+  function guide(w, v) {
+    if (!v) return null;
+    if (v.battery < 20 && !v.cargo.length) {
+      const taken = new Set(w.vehicles.filter(x => x !== v && x.chargerIdx >= 0).map(x => x.chargerIdx));
+      let best = null, bd = 1e9;
+      CHARGERS.forEach((c, i) => { if (taken.has(i)) return; const d = manhattan(v.tile.x, v.tile.y, c.x, c.y); if (d < bd) { bd = d; best = c; } });
+      if (best) { const nh = interactAt(w, v).hit, ready = !!nh && nh.kind === 'charge'; return { kind: 'charge', x: best.x, y: best.y, text: ready ? 'On a charger: press E to charge' : 'Battery low: park on a charger, press E', inRange: ready }; }
+    }
+    if (v.cargo.length) {
+      const o = v.cargo[0], bay = BAYS.find(b => b.id === o.bay);
+      const dt = dropTile(w, bay, v.tile.x, v.tile.y);
+      const nh = interactAt(w, v).hit, ready = !!nh && nh.kind === 'drop' && nh.bay.id === bay.id;
+      return { kind: 'drop', x: dt.x, y: dt.y, text: ready ? `In range of bay ${bay.id}: press E to deliver` : `Deliver to bay ${bay.id}, then press E`, order: o, inRange: ready };
+    }
+    const mine = new Set(activeCardIds(w, v.driver));
+    let best = null, bs = 1e9;
+    w.orders.forEach(o => {
+      if (o.state === 'picked') return;
+      const sc = manhattan(v.tile.x, v.tile.y, o.slot.ax, o.slot.ay) - (o.p0 ? 20 : 0) - (o.card && mine.has(o.card) ? 25 : 0) + (o.claimant && o.claimant !== v.id ? 8 : 0);
+      if (sc < bs) { bs = sc; best = o; }
+    });
+    if (best) {
+      const nh = interactAt(w, v).hit, ready = !!nh && nh.kind === 'pick';
+      if (ready) best = nh.order;   // E takes the nearest pickup in reach, so the ring and label must name that one
+      return { kind: 'pick', x: best.slot.ax, y: best.slot.ay, text: `${ready ? 'In range: press E to pick up' : 'Drive to the ring, then press E to pick up'} #${best.id}${best.p0 ? ' (P0, 40 pts)' : ''}${best.card ? ' (contract)' : ''}`, order: best, inRange: ready };
+    }
+    return { kind: 'wait', text: 'No open orders. Wait for the next one.' };
+  }
+
+  // ---------- Metrics (computed only from recorded events) ----------
+  function board(w) {
+    const since = w.t - 60, span = Math.max(1, Math.min(60, w.t));
+    return STRAT_ORDER.map(s => {
+      const ds = w.deliveries.filter(d => d.t > since && d.strat === s);
+      const vehicles = s === 'Human' ? w.vehicles.filter(v => v.human).length : w.vehicles.filter(v => v.strategy === s && !v.human).length;
+      return {
+        strat: s, vehicles, count: ds.length, perHr: (ds.length * 60) / span,
+        onTimePct: ds.length ? (100 * ds.filter(d => d.onTime).length) / ds.length : null,
+        incidents: w.incidentLog.filter(d => d.t > since && d.strat === s).length,
+        kwhPerOrder: ds.length ? ds.reduce((a, d) => a + d.kwh, 0) / ds.length : null,
+      };
+    }).filter(r => r.strat !== 'Human' || r.count > 0 || r.vehicles > 0);
+  }
+
+  return {
+    DIFFICULTY, setDifficulty, hazardStep, decideHazard, hazardAt,
+    MAP_W, get MAP_H() { return MAP_H; }, get TIER() { return activeTier; }, BASE_FLEET, TIER_STEP, MAX_TIER, FLEET_CAP, BASE_AI, tierFor, addVehicle, removeVehicle,
+    STRATEGIES, HUMAN, STRAT_ORDER, RACKS, SLOTS, CONVEYORS, BAYS, WEST_DOCKS, CHARGERS,
+    ZONES, AREAS, STRUCTS, KINDS, HWY_Y, HWY_X, floorKind, ZONE_KIND,
+    INCIDENT_PENALTY, leaderboard, guide, dealCards, keepCards, isHighway, laneDir, isBlocked, bayAt, chargerAt, createWorld, serialize, tick, clockText, shiftName, phaseText,
+    minuteOfDay, board, rushWave, postP0, toggleCone, takeWheel, release, humanInteract, interactAt, REACH, policy, stratOf, capacity,
+    on: (w, fn) => w.listeners.push(fn),
+  };
+})();
+if (typeof module !== 'undefined') module.exports = SimCore;
+</script>
+
+<!-- =====================================================================
+     RENDERER — Canvas2D isometric view. Reads world state only.
+     (Production build swaps this for PixiJS; same projection and draw order.)
+     ===================================================================== -->
+<script id="render">
+'use strict';
+const S = SimCore;
+const TW = 64, TH = 32;
+const cv = document.getElementById('world'), ctx = cv.getContext('2d');
+const ui = { sel: null, hl: null, layers: { routes: true, traffic: false, labels: true }, cone: false, speed: 1 };
+let world = null;
+const cam = { x: 0, y: 0, zoom: 1 };
+let VW = 0, VH = 0;
+
+function resize() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  VW = innerWidth; VH = innerHeight;
+  cv.width = VW * dpr; cv.height = VH * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+function fitCamera() {
+  const bw = (S.MAP_W + S.MAP_H) * TW / 2, bh = (S.MAP_W + S.MAP_H) * TH / 2 + 60;
+  cam.zoom = Math.max(0.12, Math.min((VW - 60) / bw, (VH - 150) / bh));
+  const ixc = (S.MAP_W - S.MAP_H) * TW / 4, iyc = (S.MAP_W + S.MAP_H) * TH / 4 - 8;
+  cam.x = VW / 2 - ixc * cam.zoom; cam.y = VH / 2 - iyc * cam.zoom + 24;
+}
+const SX = (gx, gy) => cam.x + (gx - gy) * TW / 2 * cam.zoom;
+const SY = (gx, gy, z = 0) => cam.y + ((gx + gy) * TH / 2 - z) * cam.zoom;
+const P = (gx, gy, z = 0) => [SX(gx, gy), SY(gx, gy, z)];
+function fromScreen(sx, sy) {
+  const ix = (sx - cam.x) / cam.zoom, iy = (sy - cam.y) / cam.zoom;
+  return { x: iy / TH + ix / TW, y: iy / TH - ix / TW };
+}
+function zoomAt(mx, my, k) {
+  const nz = Math.max(0.12, Math.min(3.2, cam.zoom * k)), r = nz / cam.zoom;
+  cam.x = mx - (mx - cam.x) * r; cam.y = my - (my - cam.y) * r; cam.zoom = nz;
+}
+
+// ---------- drawing helpers ----------
+function poly(pts, fill, stroke, lw = 1) {
+  ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))); ctx.closePath();
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+}
+const shadeCache = new Map();
+function shade(hex, f) {
+  const key = hex + f; let c = shadeCache.get(key); if (c) return c;
+  const n = parseInt(hex.slice(1), 16);
+  const ch = s => Math.max(0, Math.min(255, Math.round(((n >> s) & 255) * f)));
+  c = `rgb(${ch(16)},${ch(8)},${ch(0)})`; shadeCache.set(key, c); return c;
+}
+// Oriented box. A side face is visible when its outward normal satisfies nx + ny > 0
+// (the camera looks from +x,+y). Visible sides draw back to front, then the top.
+function oBox(cx, cy, len, wid, a, z0, h, hex, stroke) {
+  const ca = Math.cos(a), sa = Math.sin(a), hl = len / 2, hw = wid / 2;
+  const L = [[hl, hw], [hl, -hw], [-hl, -hw], [-hl, hw]].map(([u, v]) => [cx + ca * u - sa * v, cy + sa * u + ca * v]);
+  const faces = [];
+  for (let i = 0; i < 4; i++) {
+    const A = L[i], B = L[(i + 1) % 4], mx = (A[0] + B[0]) / 2, my = (A[1] + B[1]) / 2;
+    const nx = mx - cx, ny = my - cy;
+    if (nx + ny > 0.001) faces.push({ A, B, d: mx + my, left: ny > nx });
+  }
+  faces.sort((p, q) => p.d - q.d);
+  for (const f of faces) {
+    poly([P(f.A[0], f.A[1], z0), P(f.B[0], f.B[1], z0), P(f.B[0], f.B[1], z0 + h), P(f.A[0], f.A[1], z0 + h)],
+      shade(hex, f.left ? 0.84 : 0.66), stroke);
+  }
+  poly(L.map(p => P(p[0], p[1], z0 + h)), shade(hex, 1.06), stroke);
+}
+const aaBox = (x, y, w, d, z0, h, hex, stroke) => oBox(x + w / 2, y + d / 2, w, d, 0, z0, h, hex, stroke);
+function circleGrid(cx, cy, r, n = 28) {
+  const pts = []; for (let i = 0; i < n; i++) { const t = i / n * Math.PI * 2; pts.push(P(cx + Math.cos(t) * r, cy + Math.sin(t) * r)); } return pts;
+}
+function pill(text, sx, sy, bg, fg = '#fff') {
+  ctx.font = '700 12px Inter, -apple-system, sans-serif';
+  const w = ctx.measureText(text).width + 12;
+  ctx.fillStyle = bg; ctx.beginPath(); ctx.roundRect(sx - w / 2, sy - 10, w, 20, 7); ctx.fill();
+  ctx.fillStyle = fg; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, sx, sy + 0.5);
+}
+function star(sx, sy, r, fill) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) { const rr = i % 2 ? r * 0.45 : r, t = -Math.PI / 2 + i * Math.PI / 5; ctx.lineTo(sx + Math.cos(t) * rr, sy + Math.sin(t) * rr); }
+  ctx.closePath(); ctx.fillStyle = fill; ctx.fill(); ctx.strokeStyle = '#92400E'; ctx.lineWidth = 1; ctx.stroke();
+}
+
+// ---------- vehicles ----------
+const teamColor = v => (v.human ? S.HUMAN.color : S.STRATEGIES[v.strategy].color);
+const wrapA = d => { while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; return d; };
+function pose(v, al) {
+  const qx = v.qx ?? v.px, qy = v.qy ?? v.py, qa = v.qa ?? v.angle;
+  return { x: qx + (v.px - qx) * al, y: qy + (v.py - qy) * al, a: qa + wrapA(v.angle - qa) * al };
+}
+function vehicleParts(v, p) {
+  const ca = Math.cos(p.a), sa = Math.sin(p.a), team = teamColor(v), parts = [];
+  const add = (ox, oy, len, wid, z0, h, hex) => parts.push({ cx: p.x + ca * ox - sa * oy, cy: p.y + sa * ox + ca * oy, len, wid, z0, h, hex });
+  const forkZ = 2 + v.fork * (v.type === 'reach' ? 26 : 20);
+  const cargoAt = (ox, z) => v.cargo.forEach((o, i) => {
+    const zz = z + i * 13;
+    add(ox, 0, 0.42, 0.4, zz, 3, '#C4A06B');
+    add(ox, 0, 0.36, 0.34, zz + 3, 9, o.p0 ? '#F59E0B' : '#D9B98A');
+  });
+  if (v.type === 'agv') {
+    add(0, 0, 0.9, 0.52, 1.5, 6, '#E2E8F0');
+    add(0, 0, 0.84, 0.46, 7.5, 1.6, team);
+    add(0.38, 0, 0.1, 0.3, 7.5, 5, '#334155');           // sensor bar
+    cargoAt(-0.02, 9.2);
+  } else {
+    const reach = v.type === 'reach';
+    const wid = reach ? 0.38 : 0.48;
+    for (const sx of [-0.22, 0.24]) for (const sy of [-1, 1]) add(sx, sy * (wid / 2 + 0.02), 0.2, 0.1, 0, 5, '#1E293B');
+    add(-0.04, 0, reach ? 0.62 : 0.74, wid, 3, 7, '#94A3B8');
+    add(-0.36, 0, 0.26, wid, 3, reach ? 9 : 13, team);                       // counterweight carries the team color
+    if (!reach) {
+      for (const sx of [-0.22, 0.08]) for (const sy of [-1, 1]) add(sx, sy * 0.19, 0.04, 0.04, 10, 14, '#334155');
+      add(-0.07, 0, 0.4, 0.42, 24, 2, '#475569');                           // overhead guard
+    } else add(-0.1, 0, 0.3, 0.3, 10, 6, '#64748B');
+    const mastH = reach ? 40 : 32;
+    add(0.4, 0, 0.08, wid - 0.08, 0, mastH, '#334155');
+    for (const sy of [-1, 1]) add(0.62, sy * 0.12, 0.42, 0.06, forkZ, 2, '#475569');
+    cargoAt(0.62, forkZ + 2);
+  }
+  { const blink = Math.floor(performance.now() / 350) % 2 === 0 && (Math.abs(v.speedNow) > 0.2 || v.state === 'picking');
+    add(v.type === 'agv' ? -0.3 : -0.22, 0, 0.08, 0.08, v.type === 'agv' ? 9.5 : v.type === 'reach' ? 16 : 26, 3, blink ? '#FBBF24' : '#92400E'); }
+  if (v.braking) for (const sy of [-1, 1]) add(v.type === 'agv' ? -0.45 : -0.5, sy * 0.15, 0.04, 0.08, 6, 3, '#EF4444');
+  parts.sort((a, b) => (a.cx + a.cy) - (b.cx + b.cy) || a.z0 - b.z0);
+  return parts;
+}
+function drawVehicle(v, al, now) {
+  const p = pose(v, al), team = teamColor(v);
+  const dim = ui.hl && ui.hl !== S.stratOf(v) ? 0.4 : 1;
+  ctx.save(); ctx.globalAlpha = dim;
+  poly(circleGrid(p.x, p.y, 0.62), 'rgba(15,23,42,0.16)');                       // contact shadow
+  const emph = v.human || ui.sel === v.id || (ui.hl && ui.hl === S.stratOf(v));
+  poly(circleGrid(p.x, p.y, 0.72), null, team, emph ? 3 : 1.5);
+  if (Math.abs(v.speedNow) > 0.3 && world.t >= v.stunnedUntil) {                    // headlight pool
+    const ca = Math.cos(p.a), sa = Math.sin(p.a), dir = Math.sign(v.speedNow), n = -sa, m = ca;
+    poly([P(p.x + ca * 0.5 * dir + n * 0.18, p.y + sa * 0.5 * dir + m * 0.18), P(p.x + ca * 2.0 * dir + n * 0.55, p.y + sa * 2.0 * dir + m * 0.55),
+          P(p.x + ca * 2.0 * dir - n * 0.55, p.y + sa * 2.0 * dir - m * 0.55), P(p.x + ca * 0.5 * dir - n * 0.18, p.y + sa * 0.5 * dir - m * 0.18)], 'rgba(253,230,138,0.22)');
+  }
+  if (v.state === 'charging' || v.humanCharging) poly(circleGrid(p.x, p.y, 0.8 + 0.08 * Math.sin(now / 200)), 'rgba(34,197,94,0.22)', '#16A34A', 2);
+  for (const q of vehicleParts(v, p)) oBox(q.cx, q.cy, q.len, q.wid, p.a, q.z0, q.h, q.hex, 'rgba(15,23,42,0.28)');
+  if (world.t < v.stunnedUntil) {                                                   // stunned after an incident
+    ctx.setLineDash([5, 4]); poly(circleGrid(p.x, p.y, 0.85), null, '#DC2626', 2.5); ctx.setLineDash([]);
+  }
+  ctx.restore();
+}
+
+// ---------- district styling, rack and building drawing ----------
+const KFLOOR = { ambient: '#EAECEF', cold: '#DCEEF6', fast: '#E1F1E7', bulk: '#F0E7D6', haz: '#F6E1DE', returns: '#EDE6F5', staging: '#E6ECF5', office: '#E5E7EB', charging: '#E3F3E8' };
+const KOUT = { cold: '#0891B2', fast: '#059669', bulk: '#B45309', haz: '#DC2626', returns: '#7C3AED', staging: '#2563EB', office: '#64748B', charging: '#16A34A' };
+const RACK_PAL = {
+  ambient: ['#1D4ED8', '#2563EB', ['#D9B98A', '#C4A06B', '#CDAE82']],
+  cold: ['#0E7490', '#0891B2', ['#E0F2FE', '#BAE6FD', '#CFE8F3']],
+  haz: ['#B91C1C', '#DC2626', ['#FACC15', '#EF4444', '#F59E0B']],
+  fast: ['#047857', '#059669', ['#FB923C', '#FACC15', '#38BDF8']],
+};
+function drawRack(r) {
+  const x = r.x, y = r.y, hsh = (x * 7 + y * 13 + x * y) % 7, k = r.kind, pal = RACK_PAL[k] || RACK_PAL.ambient;
+  if (cam.zoom < 0.7) {                                   // distant LOD: one box per rack
+    const h = k === 'bulk' ? 30 : k === 'fast' ? 26 : 38;
+    aaBox(x + 0.04, y + 0.04, 0.92, 0.92, 0, h, k === 'bulk' ? '#C8963F' : pal[r.tone ? 1 : 0]);
+    return;
+  }
+  if (k === 'bulk') {                                     // pallets stacked on the floor, no frame
+    aaBox(x + 0.06, y + 0.06, 0.88, 0.88, 0, 3, '#C4A06B');
+    const n = 1 + (hsh % 3);
+    for (let i = 0; i < n; i++) {
+      aaBox(x + 0.1, y + 0.1, 0.8, 0.8, 3 + i * 15, 14, ['#D6A75C', '#C8963F', '#DDB46B'][(hsh + i) % 3]);
+      aaBox(x + 0.08, y + 0.08, 0.84, 0.84, 8 + i * 15, 2, '#E5E7EB');
+    }
+    return;
+  }
+  const lv = k === 'fast' ? 2 : 3, H = lv === 2 ? 25 : 36, base = pal[r.tone ? 1 : 0];
+  const post = (px, py) => aaBox(x + px, y + py, 0.07, 0.07, 0, H, base);
+  post(0.04, 0.04); post(0.89, 0.04); post(0.04, 0.89);
+  for (let l = 0; l < lv; l++) {
+    const z = 3 + l * 11;
+    aaBox(x + 0.03, y + 0.03, 0.94, 0.94, z, 1.6, '#64748B');
+    const q = (hsh + l * 3) % 7;                          // decorative stock, not order data
+    if (q === 0 || q === 3) continue;
+    if (k === 'fast') {
+      aaBox(x + 0.12, y + 0.14, 0.34, 0.7, z + 1.6, 6, pal[2][q % 3]);
+      aaBox(x + 0.54, y + 0.14, 0.34, 0.7, z + 1.6, 6, pal[2][(q + 1) % 3]);
+    } else if (k === 'haz') {
+      aaBox(x + 0.14, y + 0.16, 0.3, 0.3, z + 1.6, 8, pal[2][q % 3]);
+      aaBox(x + 0.54, y + 0.16, 0.3, 0.3, z + 1.6, 8, pal[2][(q + 1) % 3]);
+      aaBox(x + 0.34, y + 0.58, 0.3, 0.3, z + 1.6, 8, pal[2][(q + 2) % 3]);
+    } else aaBox(x + 0.16, y + 0.14, 0.68, 0.72, z + 1.6, 7 + (q % 3) * 1.5, pal[2][q % 3]);
+  }
+  post(0.89, 0.89);
+  aaBox(x + 0.02, y + 0.02, 0.96, 0.96, H - 1, 2.5, k === 'cold' ? '#7DD3FC' : '#334155');   // top beam
+}
+function drawStruct(s) {
+  const o = 'rgba(15,23,42,0.22)';
+  if (s.type === 'bench') {
+    aaBox(s.x + 0.05, s.y + 0.1, s.w - 0.1, s.h - 0.2, 0, 11, '#8B5CF6', o);
+    aaBox(s.x + 0.15, s.y + 0.2, s.w - 0.3, s.h - 0.4, 11, 1.5, '#EDE9FE');
+    for (let i = 0; i < s.w; i++) aaBox(s.x + 0.35 + i * 0.95, s.y + 0.25, 0.3, 0.1, 12.5, 9, '#334155');   // monitors
+    return;
+  }
+  const office = s.type === 'office', h = office ? 46 : 34;
+  aaBox(s.x, s.y, s.w, s.h, 0, h, office ? '#CBD5E1' : '#D3E6CC', o);
+  aaBox(s.x + 0.1, s.y + 0.1, s.w - 0.2, s.h - 0.2, h, 2.5, office ? '#E2E8F0' : '#BBF7D0');
+  aaBox(s.x + 0.3, s.y + s.h, s.w - 0.6, 0.04, 14, 16, '#60A5FA');      // windows on the two visible faces
+  aaBox(s.x + s.w, s.y + 0.3, 0.04, s.h - 0.6, 14, 16, '#60A5FA');
+}
+
+// ---------- floor and static scenery ----------
+function drawFloor() {
+  const W = S.MAP_W, H = S.MAP_H, stroke = 'rgba(148,163,184,0.35)';
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const wall = x === 0 || y === 0 || x === W - 1 || y === H - 1;
+    const fill = wall ? '#C3CCD8' : S.isHighway(x, y) ? '#D4DFED' : KFLOOR[S.floorKind(x, y)];
+    poly([P(x, y), P(x + 1, y), P(x + 1, y + 1), P(x, y + 1)], fill, stroke, 0.7);
+  }
+  // one-way lane arrows
+  ctx.strokeStyle = 'rgba(71,85,105,0.55)'; ctx.lineWidth = Math.max(1, 1.6 * cam.zoom); ctx.lineJoin = 'round';
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+    const d = S.laneDir(x, y); if (!d || (x + y) % 3) continue;
+    const c = [x + 0.5, y + 0.5], pp = [-d[1], d[0]];
+    const tip = P(c[0] + d[0] * 0.2, c[1] + d[1] * 0.2), a = P(c[0] - d[0] * 0.1 + pp[0] * 0.15, c[1] - d[1] * 0.1 + pp[1] * 0.15), b = P(c[0] - d[0] * 0.1 - pp[0] * 0.15, c[1] - d[1] * 0.1 - pp[1] * 0.15);
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(tip[0], tip[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+  }
+  // lane centre lines and rack shadows
+  ctx.save(); ctx.setLineDash([8 * cam.zoom, 8 * cam.zoom]); ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = Math.max(1, 1.5 * cam.zoom);
+  S.HWY_Y.map(h => h + 1).forEach(y => { const a = P(1, y), b = P(W - 1, y); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); });
+  { const a = P(5, 1), b = P(5, H - 1); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); }
+  ctx.restore();
+  S.RACKS.forEach(r => poly([P(r.x + 1, r.y), P(r.x + 1.6, r.y + 0.2), P(r.x + 1.6, r.y + 1.2), P(r.x + 1, r.y + 1)], 'rgba(15,23,42,0.09)'));
+  // district outlines
+  S.AREAS.forEach(a => {
+    if (a.kind === 'office') return;
+    ctx.save(); ctx.setLineDash([6 * cam.zoom + 2, 5 * cam.zoom + 2]);
+    poly([P(a.x, a.y), P(a.x + a.w, a.y), P(a.x + a.w, a.y + a.h), P(a.x, a.y + a.h)], null, KOUT[a.kind], Math.max(1.2, 2 * cam.zoom));
+    ctx.restore();
+  });
+  // bay drop pads and charger pads
+  S.BAYS.forEach(b => b.tiles.forEach(t => poly([P(t.x, t.y), P(t.x + 1, t.y), P(t.x + 1, t.y + 1), P(t.x, t.y + 1)], '#BFD3F2', '#3B82F6', 1.5)));
+  S.CHARGERS.forEach(c => {
+    poly([P(c.x, c.y), P(c.x + 1, c.y), P(c.x + 1, c.y + 1), P(c.x, c.y + 1)], '#BBF7D0', '#16A34A', 1.5);
+    const [bx, by] = P(c.x + 0.5, c.y + 0.5); ctx.fillStyle = '#15803D'; ctx.font = `700 ${Math.max(9, 13 * cam.zoom)}px sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('⚡', bx, by);
+  });
+  if (ui.layers.traffic) {
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const h = world.heat[y * W + x] / 14; if (h < 0.05) continue;
+      poly([P(x, y), P(x + 1, y), P(x + 1, y + 1), P(x, y + 1)], `rgba(${h > 0.5 ? 220 : 245},${h > 0.5 ? 38 : 158},${h > 0.5 ? 38 : 11},${Math.min(0.6, h * 0.7)})`);
+    }
+  }
+  // cones' reserved floor and order pickups
+  const now = performance.now();
+  world.orders.forEach(o => {
+    if (o.state === 'picked') return;
+    const s = o.slot, pulse = 0.5 + 0.5 * Math.sin(now / 280 + o.id);
+    const claimer = o.claimant ? world.vehicles.find(v => v.id === o.claimant) : null;
+    const col = claimer ? teamColor(claimer) : o.p0 ? '#F59E0B' : o.card ? '#7C3AED' : '#64748B';
+    poly(circleGrid(s.ax + 0.5, s.ay + 0.5, 0.36 + (claimer ? 0 : 0.06 * pulse)), claimer ? col + '33' : null, col, o.p0 ? 3 : 2);
+  });
+  world.hazards.forEach(h => {
+    const left = Math.max(0, Math.min(1, (h.until - world.t) / 30));
+    poly(circleGrid(h.x + 0.5, h.y + 0.5, 0.42 + 0.08 * left), 'rgba(250,204,21,0.55)', '#CA8A04', 2);
+    poly(circleGrid(h.x + 0.5, h.y + 0.5, 0.22), 'rgba(250,204,21,0.85)', 'rgba(202,138,4,0.5)', 1);
+  });
+  world.markers.forEach(m => {
+    const k = m.kind === 'incident' ? 1 : 0.6, pulse = 0.5 + 0.5 * Math.sin(now / 150);
+    poly(circleGrid(m.x + 0.5, m.y + 0.5, 0.5 + 0.35 * pulse * k), m.kind === 'incident' ? 'rgba(220,38,38,0.28)' : 'rgba(245,158,11,0.3)', m.kind === 'incident' ? '#DC2626' : '#D97706', 2);
+  });
+}
+
+function sceneItems(al, now) {
+  const items = [];
+  S.RACKS.forEach(r => items.push({ d: r.x + r.y + 1, fn: () => drawRack(r) }));
+  S.STRUCTS.forEach(st => items.push({ d: st.x + st.w + st.y + st.h - 1, fn: () => drawStruct(st) }));
+  S.CONVEYORS.forEach(c => items.push({ d: c.x + c.y + 1, fn: () => {
+    aaBox(c.x + 0.1, c.y, 0.8, 1, 0, 7, '#94A3B8', 'rgba(15,23,42,0.2)');
+    aaBox(c.x + 0.2, c.y, 0.6, 1, 7, 1.5, '#475569');
+  } }));
+  // totes riding the conveyor line (positions are a pure function of sim time)
+  const NCV = S.CONVEYORS.length;
+  for (let i = 0; i < 16; i++) {
+    const p = (world.t * 0.6 + i * NCV / 16) % NCV, c = S.CONVEYORS[Math.floor(p)], fy = p - Math.floor(p);
+    items.push({ d: c.x + c.y + fy + 1, fn: () => aaBox(c.x + 0.3, c.y + fy * 0.6, 0.4, 0.4, 8.5, 5, '#E2B77A') });
+  }
+  S.WEST_DOCKS.forEach(dk => items.push({ d: 1 + dk.y + 1, fn: () => {
+    aaBox(0.1, dk.y - 1, 0.8, 3, 0, 18, '#94A3B8', 'rgba(15,23,42,0.2)');
+    aaBox(0.1, dk.y - 0.5, 0.25, 2, 4, 8, '#334155');
+  } }));
+  world.bays.forEach((b, i) => {
+    const bay = S.BAYS[i], away = world.t < b.departUntil;
+    const slide = away ? Math.min(1, (b.departUntil - world.t) / 3) : 0, off = (1 - slide) * 3.2 * (away ? 1 : 0) + (away ? 0 : 0);
+    const dx = away ? (1 - slide) * 5 : 0;
+    items.push({ d: S.MAP_W + bay.y + 2, fn: () => {
+      if (away && dx > 4.5) return;
+      ctx.save(); if (away) ctx.globalAlpha = Math.max(0, 1 - dx / 5);
+      aaBox(S.MAP_W - 0.95 + dx, bay.y - 1, 3.2, 3, 0, 26, '#E2E8F0', 'rgba(15,23,42,0.25)');
+      aaBox(S.MAP_W - 0.95 + dx, bay.y - 1, 3.2, 3, 26, 2, '#CBD5E1');
+      const fill = b.load / b.cap;
+      aaBox(S.MAP_W - 0.8 + dx, bay.y + 1.9, 0.14, 0.14, 28, 6, '#475569');
+      ctx.restore();
+      const [lx, ly] = P(S.MAP_W + 0.4 + dx, bay.y + 0.5, 40);
+      if (!away) { ctx.fillStyle = '#CBD5E1'; ctx.fillRect(lx - 24, ly - 5, 48, 7); ctx.fillStyle = fill > 0.75 ? '#EA580C' : '#2563EB'; ctx.fillRect(lx - 24, ly - 5, 48 * fill, 7); }
+    } });
+  });
+  S.CHARGERS.forEach(c => items.push({ d: c.x + c.y + 0.6, fn: () => { aaBox(c.x + 0.3, c.y + 0.82, 0.4, 0.14, 0, 16, '#16A34A'); } }));
+  world.orders.forEach(o => { if (o.state !== 'picked') items.push({ d: o.slot.ax + o.slot.ay + 1, fn: () => {
+    aaBox(o.slot.ax + 0.28, o.slot.ay + 0.28, 0.44, 0.44, 0, 3, '#C4A06B');
+    aaBox(o.slot.ax + 0.32, o.slot.ay + 0.32, 0.36, 0.36, 3, 8, o.p0 ? '#F59E0B' : o.card ? '#8B5CF6' : '#D9B98A');
+    if (o.p0) { const [sx, sy] = P(o.slot.ax + 0.5, o.slot.ay + 0.5, 26); star(sx, sy, 8 * Math.max(0.8, cam.zoom), '#FBBF24'); }
+  } }); });
+  world.cones.forEach(k => { const [x, y] = k.split(',').map(Number); items.push({ d: x + y + 1, fn: () => {
+    aaBox(x + 0.25, y + 0.25, 0.5, 0.5, 0, 2, '#334155'); aaBox(x + 0.36, y + 0.36, 0.28, 0.28, 2, 9, '#F97316'); aaBox(x + 0.4, y + 0.4, 0.2, 0.2, 7, 2, '#FFF');
+  } }); });
+  world.vehicles.forEach(v => { const p = pose(v, al); items.push({ d: p.x + p.y + 0.5, fn: () => drawVehicle(v, al, now) }); });
+  return items;
+}
+
+function drawRoutes(al) {
+  ctx.save(); ctx.setLineDash([3, 6]); ctx.lineWidth = Math.max(1.5, 2.2 * cam.zoom); ctx.lineCap = 'round';
+  world.vehicles.forEach(v => {
+    if (v.human || !v.path.length) return;
+    if (ui.hl && ui.hl !== S.stratOf(v)) return;
+    const p = pose(v, al), gold = v.orders.some(o => o.p0);
+    ctx.strokeStyle = gold ? '#D97706' : teamColor(v); ctx.globalAlpha = ui.sel === v.id ? 1 : 0.55;
+    ctx.beginPath(); const a = P(p.x, p.y); ctx.moveTo(a[0], a[1]);
+    v.path.forEach(n => { const q = P(n.x + 0.5, n.y + 0.5); ctx.lineTo(q[0], q[1]); }); ctx.stroke();
+  });
+  ctx.restore();
+}
+function drawLabels(al) {
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  if (ui.layers.labels) {
+    ctx.font = '800 13px Inter, sans-serif';
+    if (cam.zoom > 0.45) S.ZONES.forEach(z => { const [sx, sy] = P(z.x + 1, z.y + 3, 38); ctx.fillStyle = z.kind === 'ambient' ? '#1E3A8A' : KOUT[z.kind]; ctx.fillText(z.id, sx, sy - 8); });
+    S.AREAS.forEach(a => { const [sx, sy] = P(a.x + a.w / 2, a.y + 0.2, a.kind === 'office' ? 56 : 0); pill(a.name, sx, sy, KOUT[a.kind]); });
+    S.BAYS.forEach(b => { const [sx, sy] = P(b.dropX + 0.5, b.y + 0.5, 0); pill(b.id, sx - 26 * Math.min(1, cam.zoom + 0.3), sy + 1, '#1D4ED8'); });
+  }
+  world.markers.forEach(m => { if (m.kind === 'incident') { const [sx, sy] = P(m.x + 0.5, m.y + 0.5, 46); pill('Incident', sx, sy, '#DC2626'); } });
+  if (ui.layers.labels && cam.zoom > 1.1) world.vehicles.forEach(v => {
+    const p = pose(v, al), [sx, sy] = P(p.x, p.y, 44);
+    ctx.font = '700 11px Inter, sans-serif'; ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.fillStyle = '#334155';
+    ctx.strokeText(v.id, sx, sy); ctx.fillText(v.id, sx, sy);
+    const bw = 26, bx = sx - bw / 2, by = sy + 7;
+    ctx.fillStyle = 'rgba(15,23,42,0.18)'; ctx.fillRect(bx, by, bw, 4);
+    ctx.fillStyle = v.battery < 20 ? '#DC2626' : v.battery < 40 ? '#D97706' : '#16A34A'; ctx.fillRect(bx, by, bw * Math.max(0, v.battery) / 100, 4);
+  });
+  world.vehicles.forEach(v => {
+    const p = pose(v, al), carryP0 = v.cargo.some(o => o.p0);
+    if (!(v.human || ui.sel === v.id || carryP0)) return;
+    const [sx, sy] = P(p.x, p.y, 60);
+    pill(carryP0 ? `★ ${v.id}` : v.id, sx, sy, carryP0 ? '#D97706' : teamColor(v));
+  });
+}
+function drawGuide(al) {
+  ui.guide = null;
+  const me = world.vehicles.find(v => v.human && v.driver === 'you'); if (!me) return;
+  const g = S.guide(world, me); ui.guide = g; if (!g || g.x == null) return;
+  const col = g.inRange ? '#16A34A' : g.kind === 'pick' ? '#F59E0B' : g.kind === 'drop' ? '#2563EB' : '#16A34A';
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 260), cx = g.x + 0.5, cy = g.y + 0.5, p = pose(me, al);
+  ctx.save();
+  poly(circleGrid(cx, cy, g.inRange ? S.REACH : 0.55 + 0.15 * pulse), col + (g.inRange ? '30' : '40'), col, g.inRange ? 4 : 3);
+  const [bx, by] = P(cx, cy, 0), [, ty] = P(cx, cy, 90);
+  const grd = ctx.createLinearGradient(0, by, 0, ty); grd.addColorStop(0, col + 'AA'); grd.addColorStop(1, col + '00');
+  ctx.fillStyle = grd; ctx.fillRect(bx - 5 * cam.zoom, ty, 10 * cam.zoom, by - ty);
+  ctx.setLineDash([2, 7]); ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.strokeStyle = col; ctx.globalAlpha = 0.7;
+  const a = P(p.x, p.y), b = P(cx, cy); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+  ctx.restore();
+  const label = g.inRange ? 'Press E' : g.kind === 'pick' ? `Pick #${g.order.id}` : g.kind === 'drop' ? `Bay ${g.order.bay}` : g.kind === 'charge' ? 'Charger' : '';
+  if (label) {
+    const off = bx < 40 || bx > VW - 40 || ty < 70 || by > VH - 40;
+    pill(label, off ? Math.max(70, Math.min(VW - 70, bx)) : bx, off ? Math.max(100, Math.min(VH - 120, ty)) : ty - 12, col);
+  }
+}
+function render(al, now) {
+  ctx.fillStyle = '#CBD5E1'; ctx.fillRect(0, 0, VW, VH);
+  drawFloor();
+  if (ui.layers.routes) drawRoutes(al);
+  sceneItems(al, now).sort((a, b) => a.d - b.d).forEach(i => i.fn());
+  drawLabels(al); drawGuide(al);
+}
+</script>
+
+<!-- =====================================================================
+     UI WIRING + MAIN LOOP
+     ===================================================================== -->
+<script id="app">
+'use strict';
+const $ = id => document.getElementById(id);
+const SAVE_KEY = 'warehouse-sim-v4-map2';   // new key: the old save was for the smaller floor
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+// ---------- world (resume from this browser if present) ----------
+function loadWorld() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (e) { console.error('Saved world unreadable:', e); }
+  const w = S.createWorld(saved);
+  S.on(w, onEvent);
+  if (w.resumed) {
+    w.log.push({ t: w.t, type: 'hint', text: 'Resumed from this browser. Day history and stats were restored; in-flight orders and vehicle positions were not.' });
+  }
+  return w;
+}
+function saveWorld() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(S.serialize(world))); } catch (e) { console.error('Save failed:', e); } }
+
+// ---------- toasts ----------
+const TOAST_COLOR = { card: '#7C3AED', shift: '#7C3AED', incident: '#DC2626', poach: '#CA8A04', p0: '#F59E0B', preempt: '#EA580C', retune: '#059669', truck: '#2563EB', day: '#475569', rush: '#EA580C', drive: '#0D9488', hint: '#0D9488', p0done: '#F59E0B', hazard: '#CA8A04', decision: '#0891B2', difficulty: '#475569', expand: '#0891B2', fleet: '#475569' };
+function toast(type, text, extra) {
+  const el = document.createElement('div');
+  el.className = 'toast hud px-3 py-2 text-[12.5px] leading-snug text-slate-800';
+  el.style.borderLeftColor = TOAST_COLOR[type] || '#64748B';
+  el.innerHTML = esc(text) + (extra ? `<div class="text-[11.5px] text-slate-500 mt-1">${esc(extra)}</div>` : '');
+  const box = $('toasts'); box.appendChild(el);
+  while (box.children.length > 4) box.firstChild.remove();
+  setTimeout(() => el.remove(), type === 'retune' ? 9000 : 5500);
+}
+function onEvent(ev) {
+  if (ev.type === 'expand') { fitCamera(); fleetKey = ''; }
+  if (ev.type === 'nearmiss') return;                          // log only
+  if (ev.type === 'decision' && ev.vid !== ui.sel) { if (!$('drawer').classList.contains('closed')) renderDrawer(); return; }   // log only unless that vehicle is selected
+  if (ev.type === 'hint') { const d = world.vehicles.find(v => v.human); if (!d) return; }
+  toast(ev.type, ev.text, ev.type === 'retune' ? 'Rule-based in this mock. Gemini 3.8 Flash makes this call in the server build.' : null);
+  if (!$('drawer').classList.contains('closed')) renderDrawer();
+}
+
+// ---------- HUD ----------
+const fmt = (v, d = 0, suf = '') => (v == null ? '—' : v.toFixed(d) + suf);
+function updateHud() {
+  const w = world, d = w.day;
+  $('clock').textContent = S.clockText(w.t);
+  $('phasePill').textContent = `Shift ${S.shiftName(w.t)} · ${S.phaseText(w)}`;
+  $('kShipped').textContent = d.shipped;
+  $('kOnTime').textContent = d.shipped ? Math.round(100 * d.onTime / d.shipped) + '%' : '—';
+  $('kIncidents').textContent = d.incidents;
+  $('kBacklog').textContent = w.orders.filter(o => o.state === 'open' || o.state === 'claimed').length;
+  $('kLost').textContent = d.lost;
+  $('liveDot').style.background = ui.speed ? '#2563EB' : '#94A3B8';
+  const me = w.vehicles.find(v => v.human && v.driver === 'you');
+  $('presence').textContent = me ? `You (driving ${me.id})` : 'You (spectating)';
+}
+let fleetKey = '';
+function updateFleet() {
+  const w = world, n = w.vehicles.length, humans = w.vehicles.filter(v => v.human).length;
+  const next = S.BASE_FLEET + S.TIER_STEP * w.tier + 1;
+  const key = `${n}|${w.tier}|${humans}`; if (key === fleetKey) return; fleetKey = key;
+  $('fleetInfo').textContent = `${n} vehicles · wing ${w.tier}/${S.MAX_TIER}`;
+  $('fleetInfo').title = `${n - humans} AI agents, ${humans} human-driven. ` + (w.tier < S.MAX_TIER ? `Next wing at ${next} vehicles.` : 'Facility is at full size.');
+  $('fleetUp').disabled = n >= S.FLEET_CAP; $('fleetDown').disabled = !w.vehicles.some(v => v.extra);
+}
+$('fleetUp').onclick = () => { const v = S.addVehicle(world); if (!v) toast('hint', 'No free spot or the fleet is at its limit.'); fleetKey = ''; updateFleet(); };
+$('fleetDown').onclick = () => { if (!S.removeVehicle(world)) toast('hint', 'Added agents can leave only when idle with no cargo.'); fleetKey = ''; updateFleet(); };
+let lastBoardHtml = '';
+function updateBoard() {
+  const rows = S.board(world).sort((a, b) => b.perHr - a.perHr);
+  const html = rows.map(r => {
+    const col = r.strat === 'Human' ? S.HUMAN.color : S.STRATEGIES[r.strat].color;
+    return `<div class="board-row grid grid-cols-[1fr_52px_48px_34px_46px] gap-1 px-2 py-1 items-center num ${ui.hl === r.strat ? 'row-hl' : ''}" data-s="${r.strat}">
+      <span class="flex items-center gap-1.5 font-semibold"><i class="inline-block w-2.5 h-2.5 rounded-sm" style="background:${col}"></i>${r.strat}<span class="text-slate-400 font-normal">×${r.vehicles}</span></span>
+      <span class="text-right font-bold">${fmt(r.perHr, 1)}</span><span class="text-right">${fmt(r.onTimePct, 0, '%')}</span>
+      <span class="text-right ${r.incidents ? 'text-red-600 font-bold' : ''}">${r.incidents}</span><span class="text-right">${fmt(r.kwhPerOrder, 2)}</span></div>`;
+  }).join('');
+  if (html !== lastBoardHtml) { lastBoardHtml = html; $('boardRows').innerHTML = html; }
+}
+function updateInspector() {
+  const el = $('inspector'), w = world, v = w.vehicles.find(x => x.id === ui.sel);
+  if (!v) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  const strat = S.stratOf(v), col = teamColor(v), pol = S.policy(w, v);
+  const drv = v.human;
+  const o = v.orders[0], g = drv ? S.guide(w, v) : null;
+  const contract = o ? `#${o.id}${o.p0 ? ' ★' : ''} → bay ${o.bay} · ${Math.max(0, Math.round(o.due - w.t))} min left${v.orders.length > 1 ? ` (+${v.orders.length - 1})` : ''}` : 'none';
+  const bat = Math.round(v.battery);
+  el.innerHTML = `
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-2"><i class="w-3 h-3 rounded-sm inline-block" style="background:${col}"></i><span class="font-bold text-[14px]">${v.id}</span><span class="text-slate-500">${strat}${drv ? ' · you' : ''}</span></div>
+      <button class="btn" id="inspClose">✕</button>
+    </div>
+    <div class="grid grid-cols-3 gap-2 mt-2 num">
+      <div><div class="label">Battery</div><div class="font-bold ${bat < 20 ? 'text-red-600' : ''}">${bat}%</div></div>
+      <div><div class="label">Speed</div><div class="font-bold">${Math.abs(v.speedNow).toFixed(1)}</div></div>
+      <div><div class="label">${drv ? 'Fork' : 'State'}</div><div class="font-bold">${drv ? Math.round(v.fork * 100) + '%' : v.state}</div></div>
+      <div><div class="label">Shift pts</div><div class="font-bold">${Math.round(v.sPts)}</div></div>
+      <div><div class="label">Incidents</div><div class="font-bold">${v.incidents}</div></div>
+      <div><div class="label">Near-miss</div><div class="font-bold">${v.nearMisses}</div></div>
+    </div>
+    ${g ? `<div class="mt-2 px-2 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 font-semibold">▶ ${esc(g.text)}</div>` : ''}
+    <div class="mt-2 text-slate-700"><span class="label">Contract</span> ${contract}</div>
+    ${v.msg ? `<div class="mt-1 text-amber-700 text-[12px]">${esc(v.msg)}</div>` : ''}
+    ${drv ? '' : `<div class="mt-1 text-[12px] text-slate-500">${esc(S.STRATEGIES[v.strategy].blurb)} Respect ${pol.respect.toFixed(2)}, speed ${pol.speed.toFixed(2)}.</div>`}
+    <div class="mt-2 flex gap-2">
+      ${drv ? `<button class="btn" id="inspRelease">Hand back <span class="kbd">Esc</span></button>`
+            : `<button class="btn drive" id="inspTake">Take the wheel <span class="kbd">T</span></button>`}
+    </div>
+    ${drv ? `<div class="mt-2 text-[12px] text-slate-600"><span class="kbd">W</span><span class="kbd">A</span><span class="kbd">S</span><span class="kbd">D</span> drive · <span class="kbd">E</span> pick / drop / charge · fast hits cause incidents</div>` : ''}`;
+  const c = $('inspClose'); if (c) c.onclick = () => { ui.sel = null; };
+  const t = $('inspTake'); if (t) t.onclick = () => takeSelected();
+  const r = $('inspRelease'); if (r) r.onclick = () => releaseDriven();
+}
+// Re-render the inspector only when something visible changed (keeps buttons clickable).
+let inspKey = '';
+function maybeInspector() {
+  const v = world.vehicles.find(x => x.id === ui.sel);
+  const key = v ? [v.id, v.human, Math.round(v.battery), v.state, v.orders.length, v.deliveries, v.incidents, Math.round(v.speedNow * 5), Math.round(v.fork * 20), v.msg, Math.round(world.t), Math.round(v.sPts), v.human ? S.guide(world, v).text : '', v.human ? Math.round(v.px * 2) + ',' + Math.round(v.py * 2) : ''].join('|') : '';
+  if (key !== inspKey) { inspKey = key; updateInspector(); }
+}
+function takeSelected() { if (!ui.sel) return; const err = S.takeWheel(world, ui.sel, 'you'); if (err) toast('hint', err); inspKey = ''; updateCards(); }
+const driven = () => world.vehicles.find(v => v.human && v.driver === 'you');
+function releaseDriven() { const d = driven(); if (d) { S.release(world, d.id); clearKeys(); inspKey = ''; } }
+
+// ---------- drawer ----------
+let drawerTab = 'days';
+function renderDrawer() {
+  $('tabDays').classList.toggle('on', drawerTab === 'days'); $('tabEvents').classList.toggle('on', drawerTab === 'events');
+  const body = $('drawerBody');
+  if (drawerTab === 'days') {
+    if (!world.history.length) { body.innerHTML = '<div class="text-slate-500">No finished days yet. A day closes at 06:00 game time (about 24 real minutes at 1×).</div>'; return; }
+    body.innerHTML = world.history.slice().reverse().map(h => `
+      <div class="mb-3 pb-3 border-b border-slate-200">
+        <div class="flex justify-between font-bold"><span>Day ${h.day}</span><span class="text-slate-500 font-semibold">Best: ${h.winner}</span></div>
+        <div class="num text-slate-700">${h.shipped} shipped · ${h.onTimePct ?? '—'}% on time · ${h.incidents} incidents · ${h.lost} lost · ${h.poaches} poaches</div>
+        <div class="mt-1 grid grid-cols-[1fr_44px_44px_30px] gap-x-1 text-[12px] num">
+          ${S.STRAT_ORDER.filter(s => h.per[s] && (h.per[s].shipped || s !== 'Human')).map(s => `<span><i class="inline-block w-2 h-2 rounded-sm mr-1" style="background:${s === 'Human' ? S.HUMAN.color : S.STRATEGIES[s].color}"></i>${s}</span><span class="text-right">${h.per[s].shipped}</span><span class="text-right">${h.per[s].onTimePct ?? '—'}%</span><span class="text-right ${h.per[s].incidents ? 'text-red-600' : ''}">${h.per[s].incidents}</span>`).join('')}
+        </div>
+      </div>`).join('');
+  } else {
+    body.innerHTML = world.log.slice(-120).reverse().map(e => `<div class="py-1 border-b border-slate-100"><span class="text-slate-400 num">${S.clockText(e.t).split(' · ')[1]}</span> <span style="color:${TOAST_COLOR[e.type] || '#64748B'}">●</span> ${esc(e.text)}</div>`).join('') || '<div class="text-slate-500">No events yet.</div>';
+  }
+}
+$('historyBtn').onclick = () => { $('drawer').classList.toggle('closed'); renderDrawer(); };
+$('drawerClose').onclick = () => $('drawer').classList.add('closed');
+$('tabDays').onclick = () => { drawerTab = 'days'; renderDrawer(); };
+$('tabEvents').onclick = () => { drawerTab = 'events'; renderDrawer(); };
+$('resetWorld').onclick = () => {
+  if (!confirm('Erase all saved days and restart the warehouse from Day 1?')) return;
+  localStorage.removeItem(SAVE_KEY); world = loadWorld(); ui.sel = null; ui.hl = null; fleetKey = ''; fitCamera(); renderDrawer();
+};
+
+// ---------- buttons ----------
+$('speedBtns').onclick = e => {
+  const b = e.target.closest('[data-speed]'); if (!b) return;
+  ui.speed = +b.dataset.speed;
+  [...$('speedBtns').children].forEach(x => x.classList.toggle('on', x === b));
+};
+function toggleLayer(id, key) { ui.layers[key] = !ui.layers[key]; $(id).classList.toggle('on', ui.layers[key]); }
+$('lyRoutes').onclick = () => toggleLayer('lyRoutes', 'routes');
+$('lyTraffic').onclick = () => toggleLayer('lyTraffic', 'traffic');
+$('lyLabels').onclick = () => toggleLayer('lyLabels', 'labels');
+$('zoomIn').onclick = () => zoomAt(VW / 2, VH / 2, 1.25);
+$('zoomOut').onclick = () => zoomAt(VW / 2, VH / 2, 0.8);
+$('recenter').onclick = fitCamera;
+$('boardToggle').onclick = () => { const b = $('boardBody'); b.classList.toggle('hidden'); $('boardChevron').textContent = b.classList.contains('hidden') ? '▸' : '▾'; };
+$('boardRows').onclick = e => { const r = e.target.closest('[data-s]'); if (!r) return; ui.hl = ui.hl === r.dataset.s ? null : r.dataset.s; updateBoard(); };
+$('cmdRush').onclick = () => S.rushWave(world);
+$('cmdP0').onclick = () => S.postP0(world);
+$('cmdCone').onclick = () => { ui.cone = !ui.cone; $('cmdCone').classList.toggle('on', ui.cone); cv.classList.toggle('cone-mode', ui.cone); };
+
+// ---------- contract cards ----------
+let lastCards = '', lastDeal = '', lastOfferId = null;
+ui.offerSel = new Set();
+function updateCards() {
+  const h = world.hands.you, tray = $('cards'), deal = $('deal');
+  const aiDone = world.totals.aiCardsDone;
+  if (!h || (!h.cards.length && !h.offer)) {
+    const html = `<div class="hud w-[168px] h-[96px] p-2.5 border-dashed" style="border-style:dashed"><div class="label">Contracts</div><div class="text-[12.5px] text-slate-600 mt-1 leading-snug">Take the wheel to be dealt 3 cards each shift. Agents hold cards too (${aiDone} done).</div></div>`;
+    if (html !== lastCards) { lastCards = html; tray.innerHTML = html; }
+    deal.style.display = 'none'; lastDeal = ''; return;
+  }
+  if (h.cards.length) {
+    const cardHtml = h.cards.map(c => {
+      const st = c.status, col = st === 'done' ? '#16A34A' : st === 'active' ? '#7C3AED' : '#94A3B8';
+      const pct = st === 'done' ? 100 : Math.min(100, Math.round(100 * c.progress / c.goal));
+      const mark = st === 'done' ? '✓ ' : st === 'lost' ? '✗ ' : '';
+      return `<div class="hud w-[176px] min-h-[132px] p-2.5 flex flex-col ${st === 'active' || st === 'done' ? '' : 'opacity-60'}" style="border-top:5px solid ${col}">
+        <div class="flex items-center justify-between"><span class="label">${c.type === 'route' ? 'Route' : 'Skill'}</span><span class="num font-bold text-[15px]" style="color:${col}">${mark}+${c.pts}</span></div>
+        <div class="font-bold mt-1 leading-snug text-[13px]">${esc(c.title)}</div>
+        <div class="flex-1"></div>
+        <div class="h-1.5 rounded bg-slate-200 mt-2 overflow-hidden"><div style="width:${pct}%;background:${col};height:100%"></div></div>
+        <div class="text-[11.5px] text-slate-500 mt-0.5 num">${st === 'active' ? c.progress + ' / ' + c.goal : st}</div></div>`;
+    }).join('');
+    const html = cardHtml + `<div class="text-[11.5px] text-slate-500 self-end pb-1 w-[70px] leading-tight">Agents: ${aiDone} cards done</div>`;
+    if (html !== lastCards) { lastCards = html; tray.innerHTML = html; }
+  } else { const html = '<div class="hud px-3 py-2 text-[12.5px] text-slate-600">Choose your contracts above.</div>'; if (html !== lastCards) { lastCards = html; tray.innerHTML = html; } }
+  if (h.offer) {
+    if (lastOfferId !== h.offer[0].id) { lastOfferId = h.offer[0].id; const s = h.offer.find(c => c.starter) || h.offer[0]; ui.offerSel = new Set([s.id]); }
+    const n = ui.offerSel.size;
+    const tiles = h.offer.map(c => `<button data-c="${c.id}" class="text-left rounded-xl p-2.5 w-[200px] border-2 ${ui.offerSel.has(c.id) ? 'border-violet-600 bg-violet-50' : 'border-slate-200 bg-white hover:border-slate-400'}">
+        <div class="flex items-center justify-between"><span class="label">${c.starter ? 'Starter' : c.type === 'route' ? 'Route' : 'Skill'}</span><span class="num font-bold text-violet-700">+${c.pts}</span></div>
+        <div class="font-bold mt-1 leading-snug">${esc(c.title)}</div><div class="text-[12px] text-slate-600 mt-1 leading-snug">${esc(c.desc)}</div></button>`).join('');
+    const html = `<div class="flex items-center justify-between mb-2"><div><span class="font-bold">New contracts</span> <span class="text-slate-500">keep at least one. Bonus points on top of order points. Unfinished cards simply expire.</span></div></div>
+      <div class="flex gap-2">${tiles}</div>
+      <div class="flex justify-end mt-2"><button id="keepBtn" class="btn drive" ${n ? '' : 'disabled'}>Keep ${n} card${n === 1 ? '' : 's'}</button></div>`;
+    deal.style.display = 'block';
+    if (html !== lastDeal) { lastDeal = html; deal.innerHTML = html; }
+  } else { deal.style.display = 'none'; lastDeal = ''; lastOfferId = null; }
+}
+$('deal').onclick = e => {
+  const t = e.target.closest('[data-c]');
+  if (t) { const id = t.dataset.c; ui.offerSel.has(id) ? ui.offerSel.delete(id) : ui.offerSel.add(id); updateCards(); return; }
+  if (e.target.closest('#keepBtn')) { const err = S.keepCards(world, 'you', [...ui.offerSel]); if (err) toast('hint', err); updateCards(); }
+};
+
+// ---------- leaderboard, drive bar, help, quick-drive ----------
+const shiftLeft = () => { const m = 480 - (world.t % 480); return `${Math.floor(m / 60)}:${String(Math.floor(m % 60)).padStart(2, '0')}`; };
+let lastLb = '';
+function updateLb() {
+  const lb = S.leaderboard(world), me = driven(), myIdx = me ? lb.findIndex(r => r.id === me.id) : -1;
+  const row = (r, i) => {
+    const col = r.human ? S.HUMAN.color : S.STRATEGIES[r.strat].color;
+    return `<div class="board-row flex items-center gap-2 px-1.5 py-0.5 num ${r.human ? 'row-hl font-bold' : ''}" data-v="${r.id}"><span class="w-4 text-slate-400">${i + 1}</span><i class="w-2.5 h-2.5 rounded-sm inline-block" style="background:${col}"></i><span class="flex-1">${r.id}${r.human ? ' ★ you' : ''}</span><span class="text-slate-500 text-[11.5px]">${r.strat}</span><span class="w-9 text-right font-bold">${Math.round(r.pts)}</span></div>`;
+  };
+  let rows = lb.slice(0, 5).map(row).join('');
+  if (myIdx >= 5) rows += '<div class="text-center text-slate-400 leading-none">⋯</div>' + row(lb[myIdx], myIdx);
+  const t = world.totals, rec = t.humanShifts ? `Your record: ${t.wins} win${t.wins === 1 ? '' : 's'} in ${t.humanShifts} shift${t.humanShifts === 1 ? '' : 's'}` : '';
+  const diffBtns = Object.entries(S.DIFFICULTY).map(([k, d]) => `<button class="btn ${world.difficulty === k ? 'on' : ''}" data-diff="${k}" title="Demand x${d.demand}, deadlines x${d.due}, ~${d.hazardPerHr} spills/hr, crash risk x${d.crash}, hall score x${d.score}">${d.label}</button>`).join('');
+  const dc = t.decisions, dn = dc.reroute + dc.wait + dc.push;
+  const decisionLine = `<div class="px-1.5 pt-1 text-[11.5px] text-slate-500 num" title="Each agent scores reroute, wait and push-through from its own policy, cargo and deadline slack.">Spills ${t.hazards} · agent calls ${dn}${dn ? ` (reroute ${dc.reroute}, wait ${dc.wait}, push ${dc.push})` : ''}</div>`;
+  const hall = world.hall.length ? `<div class="label px-1.5 pt-2 pb-0.5">Hall of fame</div>` + world.hall.slice(0, 5).map((h, i) =>
+    `<div class="flex items-center gap-2 px-1.5 py-0.5 num ${h.human ? 'row-hl font-bold' : ''}" title="${esc(h.shift)} · ${h.diff} · ${h.pts} raw pts"><span class="w-4 text-slate-400">${i + 1}</span><span class="flex-1">${esc(h.id)}${h.human ? ' ★' : ''} <span class="text-slate-400 text-[11.5px]">${esc(h.strat)} · ${esc(S.DIFFICULTY[h.diff] ? S.DIFFICULTY[h.diff].label : h.diff)}</span></span><span class="w-10 text-right font-bold">${h.scored}</span></div>`).join('') : '';
+  const html = `<div class="flex items-center justify-between px-1.5 pb-1"><span class="label">Win the shift · #1</span><span class="num text-slate-500">ends in ${shiftLeft()}</span></div>${rows}
+    <div class="px-1.5 pt-1.5 text-[11.5px] text-slate-500">+10 per pallet, +40 P0, half if late, −15 per crash.${rec ? '<br>' + rec : ''}</div>
+    <div class="flex items-center gap-1 px-1.5 pt-2"><span class="label mr-1">Mode</span>${diffBtns}</div>${decisionLine}${hall}`;
+  if (html !== lastLb) { lastLb = html; $('lb').innerHTML = html; }
+  const bar = $('driveBar');
+  if (!me) { bar.style.display = 'none'; return; }
+  const g = ui.guide, dist = g && g.x != null ? Math.round(Math.abs(g.x - me.tile.x) + Math.abs(g.y - me.tile.y)) : null;
+  bar.style.display = 'flex';
+  bar.innerHTML = `<span class="${g && g.inRange ? 'text-green-700' : 'text-amber-700'}">${g && g.inRange ? '✓' : '▶'} ${esc(g ? g.text : '…')}</span>${dist != null && !(g && g.inRange) ? `<span class="num text-slate-500">${dist} tiles</span>` : ''}<span class="num text-slate-700">#${myIdx + 1} · ${Math.round(me.sPts)} pts</span>`;
+}
+$('lb').onclick = e => {
+  const d = e.target.closest('[data-diff]');
+  if (d) { const err = S.setDifficulty(world, d.dataset.diff); if (err) toast('hint', err); lastLb = ''; updateLb(); return; }
+  const r = e.target.closest('[data-v]'); if (r) { ui.sel = r.dataset.v; inspKey = ''; }
+};
+ui.vwin = 480;
+let lastVc = '';
+function updateValueChart() {
+  const W = ui.vwin, now = world.t, pts = world.series.filter(p => p.t >= now - W);
+  const base = pts.length ? pts[0] : { you: 0, avg: 0, best: 0 };
+  const rel = k => pts.map(p => ({ t: p.t, v: p[k] - base[k] }));
+  const lines = [['you', '#0D9488', 'You'], ['avg', '#64748B', 'Agent avg'], ['best', '#EA580C', 'Best agent']].map(([k, c, n]) => ({ k, c, n, d: rel(k) }));
+  const last = k => (pts.length ? pts[pts.length - 1][k] - base[k] : 0);
+  const vals = lines.flatMap(l => l.d.map(p => p.v)), max = Math.max(10, ...vals), min = Math.min(0, ...vals);
+  const w = 270, h = 92, x = t => ((t - (now - W)) / W) * w, y = v => h - 4 - ((v - min) / (max - min)) * (h - 10);
+  const path = l => l.d.length > 1 ? 'M' + l.d.map(p => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(' L') : '';
+  const svg = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><line x1="0" x2="${w}" y1="${y(0)}" y2="${y(0)}" stroke="#E2E8F0"/>${lines.map(l => `<path d="${path(l)}" fill="none" stroke="${l.c}" stroke-width="${l.k === 'you' ? 2.6 : 1.8}"/>`).join('')}</svg>`;
+  const wins = [[240, '4h'], [480, '8h'], [1440, '24h']].map(([m, n]) => `<button class="btn ${W === m ? 'on' : ''}" data-vw="${m}" style="padding:2px 7px">${n}</button>`).join('');
+  const legend = lines.map(l => `<span class="num" style="color:${l.c}"><b>${l.n}</b> ${Math.round(last(l.k))}</span>`).join('<span class="text-slate-300"> · </span>');
+  const hasYou = world.vehicles.some(v => v.human) || world.humanValue !== 0;
+  const t = world.totals, me = world.hands.you;
+  const myCards = me ? me.cards.filter(c => c.status === 'done').length : 0;
+  const html = `<div class="flex items-center justify-between px-1.5 pb-1"><span class="label">Value created</span><span class="flex gap-1">${wins}</span></div>
+    ${pts.length > 1 ? svg : '<div class="text-slate-500 px-1.5 py-6">Collecting samples (one every 5 game-min)…</div>'}
+    <div class="px-1.5 pt-1 text-[12px] flex flex-wrap gap-x-1">${legend}</div>
+    <div class="px-1.5 pt-1 text-[11.5px] text-slate-500">${hasYou ? '' : 'Take the wheel to start your line. '}Value = pallet points + card bonuses − crashes. Cards done: you ${t.cardsDone}, agents ${t.aiCardsDone}. Win a shift by finishing #1 in value; contracts are the fastest way to get there.</div>`;
+  if (html !== lastVc) { lastVc = html; $('valueChart').innerHTML = html; }
+}
+$('valueChart').onclick = e => { const b = e.target.closest('[data-vw]'); if (b) { ui.vwin = +b.dataset.vw; lastVc = ''; updateValueChart(); } };
+$('cmdDrive').onclick = () => {
+  if (driven()) return;
+  let v = world.vehicles.find(x => x.id === ui.sel && !x.human);
+  if (!v) {
+    const ok = world.vehicles.filter(x => !x.human && !x.cargo.length && x.battery > 35 && world.t >= x.stunnedUntil);
+    ok.sort((a, b) => (a.state === 'idle' ? 0 : 1) - (b.state === 'idle' ? 0 : 1) || b.battery - a.battery);
+    v = ok[0] || world.vehicles.find(x => !x.human);
+  }
+  if (v) { ui.sel = v.id; takeSelected(); }
+};
+const showHelp = on => { $('help').style.display = on ? 'flex' : 'none'; };
+$('helpBtn').onclick = () => showHelp(true);
+$('helpClose').onclick = () => { showHelp(false); try { localStorage.setItem('warehouse-sim-v4-help', '1'); } catch (e) { /* ignore */ } };
+if (!localStorage.getItem('warehouse-sim-v4-help')) showHelp(true);
+
+// ---------- pointer: pan, zoom, select, cones ----------
+let drag = null;
+cv.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, cx: cam.x, cy: cam.y, moved: false }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 4) { drag.moved = true; cv.classList.add('dragging'); }
+  if (drag.moved) { cam.x = drag.cx + dx; cam.y = drag.cy + dy; }
+});
+cv.addEventListener('pointerup', e => {
+  const d = drag; drag = null; cv.classList.remove('dragging');
+  if (!d || d.moved) return;
+  const g = fromScreen(e.clientX, e.clientY);
+  if (ui.cone) {
+    const err = S.toggleCone(world, Math.floor(g.x), Math.floor(g.y));
+    if (err) toast('hint', err);
+    return;
+  }
+  let best = null, bd = 1.1;
+  const al = alphaNow;
+  world.vehicles.forEach(v => { const p = pose(v, al), dd = Math.hypot(p.x - g.x, p.y - g.y); if (dd < bd) { bd = dd; best = v; } });
+  ui.sel = best ? best.id : null; inspKey = '';
+});
+cv.addEventListener('wheel', e => { e.preventDefault(); zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0015)); }, { passive: false });
+
+// ---------- keyboard ----------
+const KEYMAP = { KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down', KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right' };
+function clearKeys() { world.vehicles.forEach(v => Object.keys(v.input).forEach(k => (v.input[k] = false))); }
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  const me = driven(), driving = !!me;
+  if (KEYMAP[e.code] && driving) { me.input[KEYMAP[e.code]] = true; e.preventDefault(); return; }
+  if (e.code === 'KeyE' && driving) S.humanInteract(world, me.id);
+  else if (e.code === 'KeyT' && ui.sel && !driving) takeSelected();
+  else if (e.code === 'Escape') { if (driving) releaseDriven(); else if (ui.cone) $('cmdCone').click(); else ui.sel = null; }
+});
+addEventListener('keyup', e => { if (KEYMAP[e.code]) world.vehicles.forEach(v => { v.input[KEYMAP[e.code]] = false; }); });
+addEventListener('blur', clearKeys);
+addEventListener('resize', resize);
+addEventListener('beforeunload', saveWorld);
+setInterval(saveWorld, 10000);
+
+// ---------- main loop: fixed 10 Hz sim, 60 fps render with interpolation ----------
+const STEP_MS = 100;
+let acc = 0, last = performance.now(), alphaNow = 1, uiTimer = 0;
+function frame(now) {
+  const dt = Math.min(250, now - last); last = now;
+  if (ui.speed > 0) {
+    acc += dt * ui.speed;
+    let n = 0;
+    while (acc >= STEP_MS && n < 40) {
+      world.vehicles.forEach(v => { v.qx = v.px; v.qy = v.py; v.qa = v.angle; });
+      S.tick(world); acc -= STEP_MS; n++;
+    }
+    if (n >= 40) acc = 0;
+    alphaNow = Math.min(1, acc / STEP_MS);
+    if (ui.speed > 1) alphaNow = 1;
+  } else alphaNow = 1;
+  // follow the driven vehicle
+  const me = driven();
+  if (!me) lastFollow = null;
+  if (me) {
+    if (lastFollow !== me.id) { lastFollow = me.id; if (cam.zoom < 0.9) cam.zoom = 1; }
+    const p = pose(me, alphaNow), tx = VW / 2 - ((p.x - p.y) * TW / 2) * cam.zoom, ty = VH / 2 - ((p.x + p.y) * TH / 2) * cam.zoom;
+    cam.x += (tx - cam.x) * 0.12; cam.y += (ty - cam.y) * 0.12; ui.sel = me.id;
+  }
+  render(alphaNow, now);
+  uiTimer += dt;
+  if (uiTimer > 250) { uiTimer = 0; updateHud(); updateFleet(); updateBoard(); updateLb(); updateCards(); updateValueChart(); }
+  maybeInspector();
+  requestAnimationFrame(frame);
+}
+
+let lastFollow = null;
+world = loadWorld();
+resize(); fitCamera(); updateHud(); updateFleet(); updateBoard(); updateLb(); updateCards(); updateValueChart();
+requestAnimationFrame(frame);
+window.__dbg = { get world() { return world; }, ui, cam };
+</script>
+</body>
+</html>

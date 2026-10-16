@@ -282,9 +282,9 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
       }
     }
 
-    if (report.brainModel !== 'gemini-3.8-flash') {
+    if (report.brainModel !== 'gemini-3.5-flash-lite') {
       report.errors.push(
-        `Expected brainHealth.model === 'gemini-3.8-flash', got '${report.brainModel}'`
+        `Expected brainHealth.model === 'gemini-3.5-flash-lite', got '${report.brainModel}'`
       );
     }
 
@@ -430,7 +430,7 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
     report.deltasReceived > 0 &&
     report.siteHealthOk &&
     report.siteStateOk &&
-    report.brainModel === 'gemini-3.8-flash' &&
+    report.brainModel === 'gemini-3.5-flash-lite' &&
     report.transferVerified &&
     report.errors.length === 0;
 

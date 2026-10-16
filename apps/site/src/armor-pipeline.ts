@@ -267,7 +267,7 @@ export interface NlOrderParserClient {
 }
 
 /**
- * Least-privilege Gemini 3.8 Flash parser for natural-language warehouse orders.
+ * Least-privilege Gemini 3.5 Flash-Lite parser for natural-language warehouse orders.
  * Uses `temperature: 0`, `maxOutputTokens: 120`, `thinkingConfig: { thinkingBudget: 0 }`,
  * zero tools, and strict `NL_ORDER_RESPONSE_SCHEMA`.
  */
@@ -314,7 +314,7 @@ export class VertexNlOrderParser implements NlOrderParserClient {
 
     const text = res.text ?? '';
     if (!text) {
-      throw new Error('Empty response from Gemini 3.8 Flash order parser');
+      throw new Error(`Empty response from ${this.model} order parser`);
     }
 
     return {
@@ -446,7 +446,7 @@ export class NlOrderPipeline {
       );
     }
 
-    // Daily $3.00 nlCommand budget check
+    // Daily $1.50 nlCommand budget check
     const budget = await this.persistence.checkBudget('nlCommand', nowMs);
     if (!budget.allowed) {
       return fail(
@@ -466,7 +466,7 @@ export class NlOrderPipeline {
     }
 
     try {
-      // Layer 3: Nonce-fenced least-privilege Gemini 3.8 Flash parser
+      // Layer 3: Nonce-fenced least-privilege Gemini 3.5 Flash-Lite parser
       const limitsSummary = this.governor.getPlayerLimitsSummary(world, clientId, nowMs);
       const fenced = buildFencedOrderPrompt(cleanText, limitsSummary);
 

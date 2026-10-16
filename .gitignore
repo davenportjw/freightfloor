@@ -42,3 +42,6 @@ terraform.rc
 .idea/
 .vscode/
 *.log
+
+# UI smoke screenshots
+tools/smoke/out/

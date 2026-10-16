@@ -45,6 +45,8 @@ export interface StoredSiteDoc {
   tier: number;
   shipped: number;
   wsUrl?: string;
+  /** Driver cap reported by the site heartbeat (`MAX_DRIVERS`). */
+  maxDrivers?: number;
   updatedAt: number;
 }
 
@@ -214,6 +216,9 @@ export class FirestoreLobbyStore implements LobbyStore {
         tier: typeof data.tier === 'number' ? data.tier : 0,
         shipped: typeof data.shipped === 'number' ? data.shipped : 0,
         wsUrl: rawWsUrl,
+        ...(typeof data.maxDrivers === 'number' && data.maxDrivers > 0
+          ? { maxDrivers: data.maxDrivers }
+          : {}),
         updatedAt: isRecentlyWoken ? Math.max(updatedAt, nowMs) : updatedAt,
       });
     });
@@ -245,6 +250,7 @@ export class FirestoreLobbyStore implements LobbyStore {
           tier: existing?.tier ?? 0,
           shipped: existing?.shipped ?? 0,
           wsUrl: httpUrlToWsUrl(configuredHttpUrl),
+          ...(existing?.maxDrivers !== undefined ? { maxDrivers: existing.maxDrivers } : {}),
           updatedAt: nowMs,
         });
       }
@@ -774,6 +780,7 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
           shipped: 0,
           phase: 'running',
           wsUrl: defaultWsUrlForSite(id),
+          maxDrivers: MAX_DRIVERS_PER_SITE,
           updatedAt: 0,
         };
       }
@@ -800,6 +807,7 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
         shipped: s.shipped,
         phase,
         wsUrl: defaultWsUrlForSite(id, s),
+        maxDrivers: s.maxDrivers ?? MAX_DRIVERS_PER_SITE,
         updatedAt: s.updatedAt,
       };
     });

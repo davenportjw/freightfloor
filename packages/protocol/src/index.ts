@@ -31,6 +31,17 @@ export const MANAGER_OPS = ['rush', 'p0', 'cone', 'fleetAdd', 'fleetRemove'] as 
 export const ManagerOpSchema = z.enum(MANAGER_OPS);
 export type ManagerOp = z.infer<typeof ManagerOpSchema>;
 
+export const DECISION_KINDS = ['contract', 'hazard', 'tactics', 'cards'] as const;
+export const DecisionKindSchema = z.enum(DECISION_KINDS);
+export type DecisionKind = z.infer<typeof DecisionKindSchema>;
+
+export const ALLOWED_GEMINI_MODELS = [
+  'gemini-3.8-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-4-argon',
+] as const;
+export type AllowedGeminiModel = (typeof ALLOWED_GEMINI_MODELS)[number];
+
 /**
  * Normalizes a numeric (1..5) or named difficulty vote into canonical sim difficulty keys.
  */
@@ -100,6 +111,8 @@ export const SiteStatusSchema = z.object({
   phase: PhaseSchema,
   wsUrl: z.string().optional(),
   updatedAt: z.number().optional(),
+  /** Per-site human driver cap, as reported by the site heartbeat (site `MAX_DRIVERS`). */
+  maxDrivers: z.number().int().positive().optional(),
 });
 export const SiteSummarySchema = SiteStatusSchema;
 export type SiteStatus = z.infer<typeof SiteStatusSchema>;
@@ -237,6 +250,16 @@ export const TransferSiteMessageSchema = z.object({
 });
 export type TransferSiteMessage = z.infer<typeof TransferSiteMessageSchema>;
 
+/**
+ * Subscribe (`traffic: true`) or unsubscribe (`traffic: false`) this connection
+ * from the sparse `stats.heat` traffic layer carried on full deltas.
+ */
+export const LayersMessageSchema = z.object({
+  type: z.literal('layers'),
+  traffic: z.boolean(),
+});
+export type LayersMessage = z.infer<typeof LayersMessageSchema>;
+
 export const ClientMessageSchema = z.discriminatedUnion('type', [
   HelloMessageSchema,
   InputMessageSchema,
@@ -248,6 +271,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   VoteDifficultyMessageSchema,
   NlCommandMessageSchema,
   TransferSiteMessageSchema,
+  LayersMessageSchema,
 ]);
 export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 
@@ -262,6 +286,7 @@ export const CLIENT_MESSAGE_TYPES = [
   'voteDifficulty',
   'nlCommand',
   'transferSite',
+  'layers',
 ] as const;
 
 // ============================================================================
@@ -277,6 +302,45 @@ export const PlayerSessionInfoSchema = z.object({
   isBot: z.boolean().optional(),
 });
 export type PlayerSessionInfo = z.infer<typeof PlayerSessionInfoSchema>;
+
+/** Max planned waypoints carried in `QuantisedVehicleDelta.path`. */
+export const MAX_PATH_WAYPOINTS = 12;
+/** Heat tiles with a value below this are omitted from `stats.heat.cells`. */
+export const HEAT_MIN_VALUE = 0.5;
+/** Minimum interval between heat layers sent to one subscribed connection. */
+export const HEAT_INTERVAL_MS = 2_000;
+/** Minimum interval between Strategy Board recomputations. */
+export const BOARD_INTERVAL_MS = 1_000;
+
+/** The sim's per-vehicle `Tactics` object, as stored on the vehicle. */
+export const VehicleTacticsSchema = z
+  .object({
+    speed: z.number(),
+    respect: z.number(),
+    buffer: z.number(),
+    chargeAt: z.number(),
+    batch: z.number(),
+    flatPath: z.boolean(),
+    preemptForP0: z.boolean(),
+    poach: z.boolean(),
+    note: z.string().optional(),
+  })
+  .passthrough();
+export type VehicleTactics = z.infer<typeof VehicleTacticsSchema>;
+
+/**
+ * Metadata recorded from the vehicle's last REAL, successfully applied brain call
+ * (sim `Vehicle.lastDecision`): model id reported by the call, measured wall-clock
+ * latency in ms, decision kind, the decision's reason, and game time `t` it was applied.
+ */
+export const VehicleDecisionSchema = z.object({
+  kind: DecisionKindSchema,
+  model: z.string().min(1),
+  latencyMs: z.number().nonnegative(),
+  reason: z.string(),
+  t: z.number(),
+});
+export type VehicleDecision = z.infer<typeof VehicleDecisionSchema>;
 
 export const QuantisedVehicleDeltaSchema = z.object({
   id: z.string().min(1),
@@ -306,17 +370,190 @@ export const QuantisedVehicleDeltaSchema = z.object({
   lastReason: z.string().nullable().optional(),
   inRange: z.boolean().optional(),
   guide: z.any().optional(),
+  // ---- Inspector detail (FULL deltas only) ----
+  /** Lifetime incident count for this vehicle (sim `Vehicle.incidents`). */
+  incidents: z.number().int().nonnegative().optional(),
+  /** Lifetime near-miss count for this vehicle (sim `Vehicle.nearMisses`). */
+  nearMisses: z.number().int().nonnegative().optional(),
+  /** The sim's per-vehicle `Tactics` object as stored (numbers rounded to 2 dp). */
+  tactics: VehicleTacticsSchema.optional(),
+  /** Next <= 12 planned waypoints flattened `[x0, y0, x1, y1, ...]` in integer tile units. Empty for human-driven vehicles. */
+  path: z.array(z.number().int()).max(MAX_PATH_WAYPOINTS * 2).optional(),
+  /** True when the vehicle was added beyond the base fleet (removable via `fleetRemove`), or is a player vehicle. */
+  extra: z.boolean().optional(),
+  /** Metadata of the vehicle's last REAL applied brain decision. Omitted until one exists. */
+  decision: VehicleDecisionSchema.optional(),
 });
 export const VehicleDeltaSchema = QuantisedVehicleDeltaSchema;
 export type QuantisedVehicleDelta = z.infer<typeof QuantisedVehicleDeltaSchema>;
 export type VehicleDelta = QuantisedVehicleDelta;
 
+/** Real server-side limits, so clients never hardcode caps. */
+export const SiteLimitsSchema = z.object({
+  /** Max concurrent human drivers per site (site `MAX_DRIVERS`). */
+  maxDrivers: z.number().int().positive(),
+  /** Max concurrent driving sockets per clientId (site `MAX_DRIVERS_PER_CLIENT`). */
+  maxDriversPerClient: z.number().int().positive(),
+  /** Absolute fleet cap (sim `FLEET_CAP` = BASE_FLEET + TIER_STEP * MAX_TIER). */
+  fleetCap: z.number().int().positive(),
+  /** Highest facility expansion tier (sim `MAX_TIER`). */
+  maxTier: z.number().int().nonnegative(),
+  /** Fleet size at tier 0 (sim `BASE_FLEET`). */
+  baseFleet: z.number().int().positive(),
+  /** Vehicles per tier step (sim `TIER_STEP`). */
+  tierStep: z.number().int().positive(),
+  /** Governor floor for `fleetRemove` (site `MIN_AUTONOMOUS_AGENTS`). */
+  minAutonomousAgents: z.number().int().nonnegative().optional(),
+  /** Governor ceiling for `fleetAdd` (site `MAX_AUTONOMOUS_AGENTS`). */
+  maxAutonomousAgents: z.number().int().positive().optional(),
+});
+export type SiteLimits = z.infer<typeof SiteLimitsSchema>;
+
 export const WelcomeMessageSchema = z.object({
   type: z.literal('welcome'),
   you: PlayerSessionInfoSchema,
   snapshot: z.any(),
+  limits: SiteLimitsSchema.optional(),
 });
 export type WelcomeMessage = z.infer<typeof WelcomeMessageSchema>;
+
+// ---- Mirrors of @warehouse/sim stats types (kept structurally identical) ----
+
+/** One Strategy Board row = sim `board(world)` output element (trailing 60 game-minutes). */
+export const BoardRowSchema = z.object({
+  strat: z.string(),
+  vehicles: z.number().int().nonnegative(),
+  count: z.number().int().nonnegative(),
+  perHr: z.number(),
+  onTimePct: z.number().nullable(),
+  incidents: z.number().int().nonnegative(),
+  kwhPerOrder: z.number().nullable(),
+});
+export type BoardRow = z.infer<typeof BoardRowSchema>;
+
+/** sim `ValueSample` (sampled every 5 game-minutes). */
+export const ValueSampleSchema = z.object({
+  t: z.number(),
+  you: z.number(),
+  avg: z.number(),
+  best: z.number(),
+});
+export type ValueSample = z.infer<typeof ValueSampleSchema>;
+
+/** sim `DayHistoryEntry` (exported from the sim as `DayRecord`). */
+export const DayRecordSchema = z
+  .object({
+    day: z.number(),
+    shipped: z.number(),
+    onTimePct: z.number().nullable(),
+    incidents: z.number(),
+    nearMisses: z.number(),
+    lost: z.number(),
+    damaged: z.number(),
+    poaches: z.number(),
+    per: z.record(
+      z
+        .object({
+          shipped: z.number(),
+          onTimePct: z.number().nullable(),
+          incidents: z.number(),
+          kwhPerOrder: z.number().nullable(),
+        })
+        .passthrough(),
+    ),
+    winner: z.string(),
+    tuned: z.record(z.unknown()),
+  })
+  .passthrough();
+export type DayRecord = z.infer<typeof DayRecordSchema>;
+
+/** sim `HallEntry` (one per closed shift). */
+export const HallEntrySchema = z.object({
+  shift: z.string(),
+  id: z.string(),
+  strat: z.string(),
+  human: z.boolean(),
+  driver: z.string().nullable(),
+  pts: z.number(),
+  scored: z.number(),
+  diff: z.string(),
+});
+export type HallEntry = z.infer<typeof HallEntrySchema>;
+
+/**
+ * Sparse traffic heat layer. `cells` are `[tileIndex, value]` with
+ * `tileIndex = y * w + x` and `value` = raw sim heat (decayed vehicle-minutes
+ * spent on the tile), rounded to 0.1; tiles below HEAT_MIN_VALUE are omitted.
+ */
+export const HeatLayerSchema = z.object({
+  w: z.number().int().positive(),
+  h: z.number().int().positive(),
+  cells: z.array(z.tuple([z.number().int().nonnegative(), z.number().nonnegative()])),
+});
+export type HeatLayer = z.infer<typeof HeatLayerSchema>;
+
+export const DeltaStatsSchema = z
+  .object({
+    totals: z.any().optional(),
+    day: z.any().optional(),
+    shift: z.any().optional(),
+    shiftTime: z.number().optional(),
+    rushUntil: z.number().optional(),
+    /** sim `board(world)`, recomputed at most once per second. */
+    board: z.array(BoardRowSchema).optional(),
+    /** Value samples newer than the last one sent to THIS connection (append-only). */
+    seriesAppend: z.array(ValueSampleSchema).optional(),
+    /** Last 60 `world.history` entries, only when history changed since last sent to THIS connection. */
+    history: z.array(DayRecordSchema).optional(),
+    /** Full `world.hallOfFame`, only when changed since last sent to THIS connection. */
+    hall: z.array(HallEntrySchema).optional(),
+    /** Sparse heat, ~every 2 s, only to connections that sent `{type:'layers',traffic:true}`. */
+    heat: HeatLayerSchema.optional(),
+  })
+  .passthrough();
+export type DeltaStats = z.infer<typeof DeltaStatsSchema>;
+
+/** Mirrors sim `Card['type']`. */
+export const CARD_TYPES = [
+  'route',
+  'batch',
+  'clean',
+  'ontime',
+  'quick',
+  'charge',
+  'overdrive',
+  'long_reach',
+  'eco_cell',
+  'high_roller',
+] as const;
+
+export const CardSchema = z
+  .object({
+    id: z.string(),
+    type: z.enum(CARD_TYPES),
+    zone: z.string().optional(),
+    bay: z.string().optional(),
+    goal: z.number(),
+    progress: z.number(),
+    status: z.enum(['offer', 'active', 'done', 'lost', 'expired']),
+    starter: z.boolean().optional(),
+    pts: z.number(),
+    title: z.string(),
+    desc: z.string(),
+    modifiers: z.record(z.number()).optional(),
+  })
+  .passthrough();
+export type Card = z.infer<typeof CardSchema>;
+
+export const CardHandSchema = z
+  .object({
+    shift: z.number(),
+    offer: z.array(CardSchema).nullable(),
+    cards: z.array(CardSchema),
+    ai: z.boolean().optional(),
+  })
+  .passthrough();
+export type CardHand = z.infer<typeof CardHandSchema>;
 
 export const DeltaMessageSchema = z.object({
   type: z.literal('delta'),
@@ -328,9 +565,10 @@ export const DeltaMessageSchema = z.object({
   bays: z.array(z.any()).optional(),
   markers: z.array(z.any()).optional(),
   events: z.array(z.any()),
-  stats: z.any().optional(),
+  stats: DeltaStatsSchema.optional(),
   votes: z.any().optional(),
-  hands: z.any().optional(),
+  /** ONLY the recipient's own hand: `{ [recipientClientId]: CardHand }` (empty object when they hold none). */
+  hands: z.record(CardHandSchema).optional(),
   difficulty: z.any().optional(),
   tier: z.number().optional(),
 });
@@ -428,9 +666,7 @@ export const SERVER_MESSAGE_TYPES = [
 // 6. Brain Decision Schemas & Gemini responseSchema Definitions
 // ============================================================================
 
-export const DECISION_KINDS = ['contract', 'hazard', 'tactics', 'cards'] as const;
-export const DecisionKindSchema = z.enum(DECISION_KINDS);
-export type DecisionKind = z.infer<typeof DecisionKindSchema>;
+// DECISION_KINDS / DecisionKindSchema are declared in section 1 (used by vehicle deltas).
 
 export const ContractDecisionSchema = z.object({
   orderIds: z.array(z.string()),

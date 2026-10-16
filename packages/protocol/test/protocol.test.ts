@@ -3,6 +3,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  ALLOWED_GEMINI_MODELS,
   CLIENT_MESSAGE_TYPES,
   ClientMessageSchema,
   ContractDecisionSchema,
@@ -34,6 +35,14 @@ import {
   schemaForDecisionKind,
   signTicket,
   verifyTicket,
+  BOARD_INTERVAL_MS,
+  DeltaMessageSchema,
+  HEAT_INTERVAL_MS,
+  HEAT_MIN_VALUE,
+  HeatLayerSchema,
+  MAX_PATH_WAYPOINTS,
+  SiteLimitsSchema,
+  WelcomeMessageSchema,
 } from '../src/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -43,6 +52,11 @@ describe('@warehouse/protocol', () => {
   describe('Site IDs, Phases, and Difficulty', () => {
     it('validates all canonical site IDs and rejects unknown sites', () => {
       expect(SITE_IDS).toEqual(['den-1', 'slc-2', 'phx-3', 'abq-4']);
+      expect(ALLOWED_GEMINI_MODELS).toEqual([
+        'gemini-3.8-flash',
+        'gemini-3.5-flash-lite',
+        'gemini-4-argon',
+      ]);
       for (const id of SITE_IDS) {
         expect(SiteIdSchema.parse(id)).toBe(id);
       }
@@ -195,6 +209,7 @@ describe('@warehouse/protocol', () => {
       { type: 'voteDifficulty' as const, level: 3 },
       { type: 'nlCommand' as const, text: 'drop a cone at 10, 12' },
       { type: 'transferSite' as const, siteId: 'phx-3' as const },
+      { type: 'layers' as const, traffic: true },
     ];
 
     it('parses every valid ClientMessage variant', () => {
@@ -302,6 +317,139 @@ describe('@warehouse/protocol', () => {
         seenTypes.add(parsed.type);
       }
       expect([...seenTypes].sort()).toEqual([...SERVER_MESSAGE_TYPES].sort());
+    });
+
+    const fullVehicle = {
+      id: 'FL-03',
+      qx: quantiseCoord(4),
+      qy: quantiseCoord(9),
+      angle: 0,
+      incidents: 2,
+      nearMisses: 5,
+      tactics: {
+        speed: 1.1,
+        respect: 0.7,
+        buffer: 2,
+        chargeAt: 25,
+        batch: 2,
+        flatPath: false,
+        preemptForP0: true,
+        poach: false,
+        note: 'Balanced flow',
+      },
+      path: [4, 9, 5, 9, 6, 9],
+      extra: false,
+      decision: {
+        kind: 'tactics' as const,
+        model: 'gemini-3.8-flash',
+        latencyMs: 412,
+        reason: 'Balanced flow',
+        t: 300.4,
+      },
+    };
+
+    it('parses full deltas with typed stats (board/seriesAppend/history/hall/heat), own hand, and inspector vehicle detail', () => {
+      const delta = {
+        type: 'delta' as const,
+        t: 300.5,
+        vehicles: [fullVehicle],
+        events: [],
+        stats: {
+          totals: { shipped: 10 },
+          day: { shipped: 4 },
+          shift: { shipped: 1 },
+          shiftTime: 300.5,
+          rushUntil: 0,
+          board: [
+            { strat: 'Greedy', vehicles: 3, count: 4, perHr: 2.1, onTimePct: 75, incidents: 1, kwhPerOrder: 0.42 },
+            { strat: 'Human', vehicles: 0, count: 0, perHr: 0, onTimePct: null, incidents: 0, kwhPerOrder: null },
+          ],
+          seriesAppend: [{ t: 300, you: 0, avg: 38.5, best: 40 }],
+          history: [
+            {
+              day: 1, shipped: 120, onTimePct: 88, incidents: 3, nearMisses: 7, lost: 0, damaged: 1, poaches: 2,
+              per: { Greedy: { shipped: 40, onTimePct: 90, incidents: 1, kwhPerOrder: 0.4 } },
+              winner: 'Greedy', tuned: {},
+            },
+          ],
+          hall: [
+            { shift: 'Day 1 · Shift A', id: 'FL-03', strat: 'Greedy', human: false, driver: 'FL-03', pts: 40, scored: 40, diff: 'normal' },
+          ],
+          heat: { w: 43, h: 60, cells: [[129, 0.5], [130, 33.2]] },
+        },
+        hands: {
+          'client-1': { shift: 0, offer: null, cards: [] },
+        },
+      };
+      const parsed = DeltaMessageSchema.parse(delta);
+      expect(parsed.vehicles[0].decision?.model).toBe('gemini-3.8-flash');
+      expect(parsed.stats?.heat?.cells).toHaveLength(2);
+      expect(parsed.stats?.board?.[1].onTimePct).toBeNull();
+      expect(parsed.hands?.['client-1']).toBeDefined();
+      expect(ServerMessageSchema.safeParse(delta).success).toBe(true);
+    });
+
+    it('rejects malformed detail fields', () => {
+      const base = { type: 'delta' as const, t: 1, vehicles: [fullVehicle], events: [] };
+      const withVehicle = (patch: Record<string, unknown>) => ({
+        ...base,
+        vehicles: [{ ...fullVehicle, ...patch }],
+      });
+      expect(DeltaMessageSchema.safeParse(base).success).toBe(true);
+      expect(
+        DeltaMessageSchema.safeParse(withVehicle({ path: Array(MAX_PATH_WAYPOINTS * 2 + 2).fill(1) })).success,
+      ).toBe(false);
+      expect(DeltaMessageSchema.safeParse(withVehicle({ path: [1.5, 2] })).success).toBe(false);
+      expect(
+        DeltaMessageSchema.safeParse(withVehicle({ decision: { ...fullVehicle.decision, kind: 'vibes' } })).success,
+      ).toBe(false);
+      expect(
+        DeltaMessageSchema.safeParse(withVehicle({ decision: { ...fullVehicle.decision, model: '' } })).success,
+      ).toBe(false);
+      expect(
+        DeltaMessageSchema.safeParse(withVehicle({ decision: { ...fullVehicle.decision, latencyMs: -1 } })).success,
+      ).toBe(false);
+      expect(
+        DeltaMessageSchema.safeParse({ ...base, stats: { heat: { w: 2, h: 2, cells: [[0.5, 1]] } } }).success,
+      ).toBe(false);
+      expect(HeatLayerSchema.safeParse({ w: 2, h: 2, cells: [[3, 1.2]] }).success).toBe(true);
+    });
+
+    it('parses welcome.limits and SiteStatus.maxDrivers', () => {
+      const limits = {
+        maxDrivers: 32,
+        maxDriversPerClient: 2,
+        fleetCap: 28,
+        maxTier: 3,
+        baseFleet: 14,
+        tierStep: 4,
+        minAutonomousAgents: 8,
+        maxAutonomousAgents: 28,
+      };
+      expect(SiteLimitsSchema.parse(limits)).toEqual(limits);
+      expect(SiteLimitsSchema.safeParse({ ...limits, maxDrivers: 0 }).success).toBe(false);
+      const welcome = {
+        type: 'welcome' as const,
+        you: { clientId: 'c', playerId: 'P1', name: 'A', vid: null, siteId: 'den-1' as const, isBot: false },
+        snapshot: { v: 5 },
+        limits,
+      };
+      expect(WelcomeMessageSchema.parse(welcome).limits).toEqual(limits);
+
+      const site = {
+        id: 'den-1' as const,
+        state: 'live' as const,
+        drivers: 1,
+        spectators: 0,
+        tier: 0,
+        shipped: 0,
+        phase: 'running' as const,
+        wsUrl: 'wss://x/ws',
+        updatedAt: 1,
+        maxDrivers: 32,
+      };
+      expect(SiteStatusSchema.parse(site).maxDrivers).toBe(32);
+      expect(SiteStatusSchema.safeParse({ ...site, maxDrivers: 1.5 }).success).toBe(false);
     });
   });
 
@@ -418,6 +566,38 @@ describe('@warehouse/protocol', () => {
       for (const op of MANAGER_OPS) {
         expect(doc).toContain(`'${op}'`);
       }
+
+      // UI-parity additions are documented
+      for (const field of [
+        'seriesAppend',
+        'history',
+        'hall',
+        'heat',
+        'board',
+        'limits',
+        'maxDrivers',
+        'decision',
+        'tactics',
+        'path',
+        'incidents',
+        'nearMisses',
+        'extra',
+        'hands',
+        'SiteLimitsSchema',
+        'DeltaStatsSchema',
+        'HeatLayerSchema',
+        'VehicleDecisionSchema',
+        'VehicleTacticsSchema',
+      ]) {
+        expect(doc).toContain(field);
+      }
+      for (const c of ['MAX_PATH_WAYPOINTS', 'HEAT_MIN_VALUE', 'HEAT_INTERVAL_MS', 'BOARD_INTERVAL_MS']) {
+        expect(doc).toContain(c);
+      }
+      expect(doc).toContain(`HEAT_INTERVAL_MS = ${HEAT_INTERVAL_MS}`);
+      expect(doc).toContain(`BOARD_INTERVAL_MS = ${BOARD_INTERVAL_MS}`);
+      expect(doc).toContain(`MAX_PATH_WAYPOINTS = ${MAX_PATH_WAYPOINTS}`);
+      expect(doc).toContain(`HEAT_MIN_VALUE = ${HEAT_MIN_VALUE}`);
     });
   });
 });

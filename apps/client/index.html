@@ -3,294 +3,43 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Warehouse Network — Multi-Agent Fulfillment Simulator</title>
+    <title>Warehouse — Live Floor</title>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <div class="app-shell">
-      <!-- Top Bar -->
-      <header class="topbar">
-        <div class="topbar-left">
-          <div class="brand-title">
-            <span id="siteBadge" class="intent-pill indigo">DEN-1 · Tier 0</span>
-            <span>Warehouse Fulfillment Lab</span>
-          </div>
-          <span id="clockPill" class="intent-pill">Day 1 · 06:00 · Morning Shift</span>
-          <span id="difficultyPill" class="intent-pill">Difficulty: Normal</span>
-        </div>
-
-        <div class="topbar-center">
-          <span id="brainHealthPill" class="intent-pill live" title="Gemini 3.8 Flash Brain Telemetry">
-            <span class="pill-dot"></span>
-            <span id="brainHealthText">Brain: gemini-3.8-flash · p50 —ms</span>
-          </span>
-          <span id="phasePill" class="intent-pill live">
-            <span class="pill-dot"></span>
-            <span id="phaseText">Running</span>
-          </span>
-          <span id="reconnectPill" class="intent-pill warn hidden">
-            <span class="pill-dot"></span>
-            <span id="reconnectText">Reconnecting…</span>
-          </span>
-        </div>
-
-        <div class="topbar-right">
-          <form id="joinForm" style="display: flex; align-items: center; gap: 6px; margin: 0">
-            <input
-              id="displayNameInput"
-              class="text-input"
-              type="text"
-              maxlength="18"
-              placeholder="Operator Name"
-              aria-label="Operator Display Name"
-              style="width: 145px"
-            />
-            <button id="joinBtn" type="submit" class="btn btn-primary">Set Name / Join</button>
-          </form>
-          <span id="nameErrorBadge" class="intent-pill danger hidden"></span>
-          <button id="toggleDrawerBtn" type="button" class="btn" title="Toggle Telemetry Drawer">
-            Telemetry Drawer
-          </button>
-        </div>
-      </header>
-
-      <!-- Main 3-Panel Workspace -->
-      <main id="workspaceGrid" class="workspace-grid">
-        <!-- Left Panel: Strategy & Manager Controls + Network Tab -->
-        <aside class="side-panel">
-          <div class="panel-tabs">
-            <button id="tabStrategyBtn" type="button" class="tab-btn active">
-              1. Strategy &amp; Floor Ops
-            </button>
-            <button id="tabNetworkBtn" type="button" class="tab-btn">
-              2. Network &amp; Transfers
-            </button>
-          </div>
-
-          <!-- Tab 1: Strategy & Manager Controls -->
-          <div id="tabStrategyContent" class="panel-scroll">
-            <section class="card-section">
-              <div class="section-header">
-                <span class="section-title">Fleet Strategy Benchmark</span>
-                <span id="shiftTotalsSub" class="section-sub">0 shipped · 100% on-time</span>
-              </div>
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>Strategy</th>
-                    <th>Fleet</th>
-                    <th>Ship</th>
-                    <th>On-Time</th>
-                    <th>Crash</th>
-                    <th>Pts</th>
-                  </tr>
-                </thead>
-                <tbody id="strategyTableBody"></tbody>
-              </table>
-            </section>
-
-            <section class="card-section">
-              <div class="section-header">
-                <span class="section-title">Floor Manager Controls</span>
-                <span class="section-sub">Direct Dispatch</span>
-              </div>
-              <div style="display: flex; flex-wrap: wrap; gap: 6px">
-                <button id="opRushBtn" type="button" class="btn">+6 Rush Orders</button>
-                <button id="opP0Btn" type="button" class="btn btn-danger">+2 P0 Critical</button>
-                <button id="opConeModeBtn" type="button" class="btn">Cone Tool (Click Tile)</button>
-                <button id="opFleetAddBtn" type="button" class="btn">+1 Forklift</button>
-                <button id="opFleetRemoveBtn" type="button" class="btn">-1 Forklift</button>
-              </div>
-            </section>
-
-            <section class="card-section">
-              <div class="section-header">
-                <span class="section-title">Shift Difficulty Vote</span>
-                <span id="voteTallySub" class="section-sub">Cast vote for next shift</span>
-              </div>
-              <div style="display: flex; gap: 6px">
-                <button id="voteEasyBtn" type="button" class="btn" style="flex: 1">
-                  1 · Calm
-                </button>
-                <button id="voteNormalBtn" type="button" class="btn" style="flex: 1">
-                  2 · Normal
-                </button>
-                <button id="voteHardBtn" type="button" class="btn" style="flex: 1">
-                  3 · Surge
-                </button>
-              </div>
-            </section>
-
-            <section class="card-section">
-              <div class="section-header">
-                <span class="section-title">Natural-Language Floor Order</span>
-                <span class="section-sub">Model Armor Screened</span>
-              </div>
-              <form id="nlCommandForm" style="display: flex; gap: 6px; margin-bottom: 8px">
-                <input
-                  id="nlCommandInput"
-                  class="text-input"
-                  type="text"
-                  maxlength="160"
-                  placeholder="e.g. drop a cone at 20, 12 or spawn rush orders"
-                  style="flex: 1"
-                />
-                <button id="nlCommandSubmitBtn" type="submit" class="btn btn-primary">
-                  Dispatch
-                </button>
-              </form>
-              <div id="commandEchoBox" class="event-item">
-                Type a natural-language floor command above. Screened by Model Armor &amp; parsed by Gemini 3.8 Flash.
-              </div>
-            </section>
-          </div>
-
-          <!-- Tab 2: 4-Site Regional Network & Leaderboard -->
-          <div id="tabNetworkContent" class="panel-scroll hidden">
-            <section class="card-section">
-              <div class="section-header">
-                <span class="section-title">Regional Fulfillment Sites</span>
-                <button id="refreshNetworkBtn" type="button" class="btn">Refresh</button>
-              </div>
-              <div id="networkSitesList" style="display: flex; flex-direction: column; gap: 8px"></div>
-            </section>
-
-            <section class="card-section">
-              <div class="section-header">
-                <span class="section-title">Network Human Leaderboard</span>
-                <span class="section-sub">Top 10 Operators (Bots Excluded)</span>
-              </div>
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Operator</th>
-                    <th>Site</th>
-                    <th>Shipped</th>
-                    <th>Points</th>
-                  </tr>
-                </thead>
-                <tbody id="networkLeaderboardBody"></tbody>
-              </table>
-            </section>
-          </div>
-        </aside>
-
-        <!-- Center Stage: PixiJS / Atlas Canvas + HUD Overlays -->
-        <section class="center-stage">
-          <div class="stage-toolbar">
-            <button id="zoomInBtn" type="button" class="btn">Zoom +</button>
-            <button id="zoomOutBtn" type="button" class="btn">Zoom −</button>
-            <button id="fitViewBtn" type="button" class="btn">Fit Floor</button>
-            <button id="followCamBtn" type="button" class="btn active-mode">Follow Active</button>
-            <span id="rendererBadge" class="intent-pill">Atlas 48px · Y-Sorted</span>
-          </div>
-
-          <div id="canvasWrap">
-            <canvas id="view"></canvas>
-          </div>
-
-          <!-- Bottom-Left Drive / Agent Inspector HUD -->
-          <div id="inspectorHud" class="hud-bottom-left">
-            <div class="section-header">
-              <div>
-                <span id="hudVehicleTitle" class="section-title">Forklift v1 · Human</span>
-                <span id="hudVehicleBadges" style="margin-left: 6px"></span>
-              </div>
-              <div style="display: flex; gap: 6px">
-                <button id="takeWheelBtn" type="button" class="btn btn-primary">
-                  Take the Wheel
-                </button>
-                <button id="releaseWheelBtn" type="button" class="btn hidden">
-                  Release (AI)
-                </button>
-              </div>
-            </div>
-
-            <div id="hudStatusRow" style="font-size: 12.5px; color: var(--ink-2); margin-bottom: 6px"></div>
-            <div id="hudGuideBox" class="event-item ev-transfer" style="margin-bottom: 8px"></div>
-
-            <!-- Gemini Brain Reason / Error Inspector -->
-            <div id="hudBrainBox" class="event-item ev-decision" style="margin-bottom: 8px"></div>
-
-            <div style="display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--muted)">
-              <span>
-                Drive: <span class="kbd-key">WASD</span> / <span class="kbd-key">Arrows</span> ·
-                Pick/Drop/Charge: <span class="kbd-key">E</span>
-              </span>
-              <button id="interactBtn" type="button" class="btn">Interact (E)</button>
-            </div>
-          </div>
-
-          <!-- Bottom-Right Skill Cards HUD -->
-          <div id="cardsHud" class="hud-bottom-right">
-            <div class="section-header">
-              <span class="section-title">Active Skill Cards</span>
-              <span id="cardsOwnerSub" class="section-sub">v1</span>
-            </div>
-            <div id="activeCardsList" style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px"></div>
-            <div id="cardOfferBox" class="hidden" style="border-top: 1px solid var(--border); padding-top: 8px">
-              <div style="font-size: 12px; font-weight: 700; color: var(--amber); margin-bottom: 6px">
-                Milestone Card Offer — Select 1 Card to Keep:
-              </div>
-              <div id="cardOfferOptions" style="display: flex; flex-direction: column; gap: 6px"></div>
-            </div>
-          </div>
-        </section>
-
-        <!-- Right Expandable Drawer: Shift Leaderboard, Presence, Sparkline, Event & Decision Log -->
-        <aside id="rightDrawer" class="right-drawer">
-          <div class="panel-scroll">
-            <section class="card-section">
-              <div class="section-header">
-                <span class="section-title">Site Shift Leaderboard</span>
-                <span id="presenceCountSub" class="section-sub">1 connected</span>
-              </div>
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>Unit</th>
-                    <th>Driver / Persona</th>
-                    <th>Ship</th>
-                    <th>Pts</th>
-                  </tr>
-                </thead>
-                <tbody id="shiftLeaderboardBody"></tbody>
-              </table>
-            </section>
-
-            <section class="card-section">
-              <div class="section-header">
-                <span class="section-title">Connected Operators</span>
-                <span class="section-sub">Live Presence</span>
-              </div>
-              <div id="presenceList" style="display: flex; flex-wrap: wrap; gap: 6px"></div>
-            </section>
-
-            <section class="card-section">
-              <div class="section-header">
-                <span class="section-title">Cumulative Value Trajectory</span>
-                <span class="section-sub">Net Points by Strategy</span>
-              </div>
-              <canvas
-                id="sparklineCanvas"
-                width="290"
-                height="110"
-                style="width: 100%; height: 110px; display: block; border-radius: 6px; background: var(--panel-alt)"
-              ></canvas>
-            </section>
-
-            <section class="card-section" style="flex: 1; display: flex; flex-direction: column; min-height: 220px">
-              <div class="section-header">
-                <span class="section-title">Live Floor &amp; Gemini Brain Log</span>
-                <span class="section-sub">Real-time Events</span>
-              </div>
-              <div id="eventLogList" class="event-list"></div>
-            </section>
-          </div>
-        </aside>
-      </main>
+    <!-- Full-bleed world canvas. The renderer sizes it from this container. -->
+    <div id="stage">
+      <canvas id="world" aria-label="Warehouse floor. Drag to pan, scroll to zoom, click a vehicle to inspect it."></canvas>
     </div>
+
+    <!-- HUD zones: modules in src/ui/ mount into these. Tab hides all of them. -->
+    <div id="zoneLeft" class="zone zone-left"></div>
+    <div id="zoneInspector" class="zone zone-inspector"></div>
+    <div id="zoneRight" class="zone zone-right"></div>
+    <div id="zoneBottom" class="zone zone-bottom"></div>
+    <div id="zoneCorner" class="zone zone-corner">
+      <div id="toasts" class="toasts" aria-live="polite"></div>
+      <div id="cardsTray"></div>
+    </div>
+
+    <div id="hudHiddenHint" class="hud hud-hidden-hint" hidden>Panels hidden · press <span class="kbd">Tab</span> to show</div>
+
+    <aside id="drawer" class="hud drawer closed" aria-label="History drawer"></aside>
+
+    <div id="help" class="overlay" hidden></div>
+
+    <!-- Shown only when no display name is saved yet; nothing connects until a name is chosen. -->
+    <div id="joinOverlay" class="overlay" hidden>
+      <form id="joinForm" class="hud join-card" aria-labelledby="joinTitle">
+        <h2 id="joinTitle">Join the warehouse</h2>
+        <p class="muted">Pick a display name. Other players see it on the leaderboard.</p>
+        <label class="label" for="joinName">Display name</label>
+        <input id="joinName" class="text-input" maxlength="18" autocomplete="nickname" required />
+        <div id="joinError" class="form-error" role="alert"></div>
+        <button class="btn drive" type="submit">Join</button>
+      </form>
+    </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

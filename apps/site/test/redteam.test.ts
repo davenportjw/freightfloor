@@ -33,7 +33,7 @@ interface RedTeamEntry {
 const runLive = process.env.RUN_LIVE === '1' || process.env.RUN_LIVE === 'true';
 
 describe.skipIf(!runLive)(
-  'M3 redteam Prompt-Armor Corpus (64 entries via Cloud Model Armor + Gemini 3.8 Flash)',
+  'M3 redteam Prompt-Armor Corpus (64 entries via Cloud Model Armor + Gemini 3.5 Flash-Lite)',
   () => {
     it(
       'blocks/refuses all 52 adversarial entries and executes all 12 benign warehouse orders',

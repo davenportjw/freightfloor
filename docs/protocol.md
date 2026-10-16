@@ -32,7 +32,7 @@ Returns aggregated live status for all four warehouse shards (from Firestore hea
 **Response Body (`NetworkResponseSchema`)**
 | Field | Type | Description |
 |---|---|---|
-| `sites` | `SiteStatus[]` | Array of shard statuses: `{ id: SiteId, state: 'live' \| 'online' \| 'break' \| 'offline', drivers: number, spectators: number, tier: number, shipped: number, phase: Phase, wsUrl?: string, updatedAt?: number }`. |
+| `sites` | `SiteStatus[]` | Array of shard statuses: `{ id: SiteId, state: 'live' \| 'online' \| 'break' \| 'offline', drivers: number, spectators: number, tier: number, shipped: number, phase: Phase, wsUrl?: string, updatedAt?: number, maxDrivers?: number }`. `maxDrivers` is the per-site driver cap reported by the site heartbeat (site `MAX_DRIVERS`), falling back to the lobby's `MAX_DRIVERS_PER_SITE` (32) when the heartbeat has not reported one. |
 | `leaderboard` | `LeaderboardEntry[]` | Top players across the distribution network: `{ clientId: string, name: string, siteId?: SiteId, points?: number, lifetimePoints?: number, deliveries: number, isBot?: boolean }`. |
 
 ---
@@ -52,7 +52,8 @@ type ClientMessage =
   | { type: 'keepCards'; ids: string[] }
   | { type: 'voteDifficulty'; level: DifficultyLevel }
   | { type: 'nlCommand'; text: string }
-  | { type: 'transferSite'; siteId: SiteId };
+  | { type: 'transferSite'; siteId: SiteId }
+  | { type: 'layers'; traffic: boolean };
 ```
 
 | `type` | Fields | Description |
@@ -67,6 +68,7 @@ type ClientMessage =
 | `voteDifficulty` | `level: DifficultyLevel` | Casts or updates the driver's vote for the next shift's difficulty level (`1..5` or `'easy' \| 'normal' \| 'hard' \| 'calm' \| 'surge' \| 'crisis'`). |
 | `nlCommand` | `text: string` | Submits a natural-language manager order (`<= 200` chars) through the 7-layer Prompt Armor + Gemini parser pipeline. |
 | `transferSite` | `siteId: SiteId` | Requests a clean handoff to another shard (`'den-1' \| 'slc-2' \| 'phx-3' \| 'abq-4'`), releasing the current vehicle lease and persisting player stats. |
+| `layers` | `traffic: boolean` | Opt-in overlay subscription. `traffic: true` subscribes this connection to the sparse heat layer (`stats.heat`, see §3.2); `false` unsubscribes. Default is unsubscribed on every (re)connect. |
 
 ---
 
@@ -76,8 +78,8 @@ All WebSocket frames sent from the site server to connected clients match the di
 
 ```ts
 type ServerMessage =
-  | { type: 'welcome'; you: PlayerSessionInfo; snapshot: WorldSnapshot }
-  | { type: 'delta'; t: number; vehicles: QuantisedVehicleDelta[]; orders?: OrderDelta[]; hazards?: HazardDelta[]; events: SimEvent[] }
+  | { type: 'welcome'; you: PlayerSessionInfo; snapshot: WorldSnapshot; limits?: SiteLimits }
+  | { type: 'delta'; t: number; vehicles: QuantisedVehicleDelta[]; orders?: OrderDelta[]; hazards?: HazardDelta[]; events: SimEvent[]; stats?: DeltaStats; hands?: Record<string, CardHand> }
   | { type: 'ack'; seq: number; x?: number; y?: number; vx?: number; vy?: number }
   | { type: 'presence'; players: PresenceEntry[] }
   | { type: 'brainHealth'; ok: boolean; model?: string; errors1m: number; p50ms: number; budgetLeftUsd: number; armorBlocks1h?: number }
@@ -88,14 +90,57 @@ type ServerMessage =
 
 | `type` | Fields | Description |
 |---|---|---|
-| `welcome` | `you: { clientId, playerId?, name, vid, siteId, isBot? }`, `snapshot: WorldSnapshot` | Sent immediately after a valid `hello`. Contains the player's assigned opaque ID (`P1`, etc.), leased vehicle ID, and full v5 world snapshot. |
-| `delta` | `t: number`, `vehicles: QuantisedVehicleDelta[]`, `orders?: OrderDelta[]`, `hazards?: HazardDelta[]`, `events: SimEvent[]` | Broadcast at 10 Hz. Vehicle coordinates are quantized to `1/32` of a tile and only changed fields are sent to keep bandwidth under `6 KB/s` per client at 60 vehicles. |
+| `welcome` | `you: { clientId, playerId?, name, vid, siteId, isBot? }`, `snapshot: WorldSnapshot`, `limits?: SiteLimits` | Sent immediately after a valid `hello`. Contains the player's assigned opaque ID (`P1`, etc.), leased vehicle ID, full v5 world snapshot, and the real server/sim caps (§3.1). `snapshot.cards` contains only agent hands (`ai: true`) plus the recipient's own hand. |
+| `delta` | `t: number`, `vehicles: QuantisedVehicleDelta[]`, `orders?: OrderDelta[]`, `hazards?: HazardDelta[]`, `events: SimEvent[]`, `stats?: DeltaStats`, `hands?: Record<string, CardHand>` | Broadcast at 10 Hz. Vehicle coordinates are quantized to `1/32` of a tile. Light deltas (9 of every 10 background ticks) carry only pose/cargo fields; full deltas (1 Hz) add orders, stats, hands and inspector detail (§3.2). |
 | `ack` | `seq: number`, `x?: number`, `y?: number`, `vx?: number`, `vy?: number` | Acknowledges the latest processed `input.seq` for the client's vehicle so client-side `stepHuman` prediction can reconcile smoothly. |
 | `presence` | `players: Array<{ clientId?: string; playerId?: string; name: string; vid: string \| null; points?: number; score?: number; role?: 'driver' \| 'spectator'; isBot?: boolean }>` | Broadcast when players join, leave, or change vehicle leases. |
-| `brainHealth` | `ok: boolean`, `model?: string`, `errors1m: number`, `p50ms: number`, `budgetLeftUsd: number`, `armorBlocks1h?: number` | Periodic telemetry update for the HUD brain-health pill showing Gemini decision health, p50 latency, remaining daily budget (`$25/day` cap), and recent armor blocks. |
+| `brainHealth` | `ok: boolean`, `model?: string`, `errors1m: number`, `p50ms: number`, `budgetLeftUsd: number`, `armorBlocks1h?: number` | Periodic telemetry update for the HUD brain-health pill showing Gemini decision health, p50 latency, remaining daily budget (`$12.50/day` cap), and recent armor blocks. |
 | `phase` | `phase: 'running' \| 'winding_down' \| 'break' \| 'resuming'`, `resumesAt?: number`, `reason?: string` | Notifies clients when the site transitions between active shift and factory break states (`resumesAt` epoch ms included during `resuming`). |
 | `error` | `code: string`, `message: string` | Surfaces explicit protocol, governance, brain, or prompt-armor errors (`ArmorReasonCode` or protocol error code) directly to the client UI. |
 | `commandEcho` | `text: string`, `parsed: unknown`, `executed: boolean`, `reason?: string` | Structured feedback for `nlCommand` showing the sanitized parse result and whether it was executed or refused/clamped. |
+
+
+### 3.1 `welcome.limits` (`SiteLimitsSchema`)
+
+Populated from real constants (never hardcoded on the client):
+
+| Field | Source | Meaning |
+|---|---|---|
+| `maxDrivers` | site `MAX_DRIVERS` | Driver cap per site (extra joiners spectate). |
+| `maxDriversPerClient` | site `MAX_DRIVERS_PER_CLIENT` | Concurrent driven vehicles per `clientId`. |
+| `fleetCap` | sim `FLEET_CAP` | Hard cap on vehicles on the floor. |
+| `maxTier` | sim `MAX_TIER` | Highest facility expansion tier. |
+| `baseFleet` | sim `BASE_FLEET` | Fleet size at tier 0. |
+| `tierStep` | sim `TIER_STEP` | Vehicles added per tier. |
+| `minAutonomousAgents?` / `maxAutonomousAgents?` | site governance `MIN_AUTONOMOUS_AGENTS` / `MAX_AUTONOMOUS_AGENTS` | Bounds enforced on `fleetAdd` / `fleetRemove`. |
+
+### 3.2 Full-delta additions
+
+**Cadence constants:** `BOARD_INTERVAL_MS = 1000`, `HEAT_INTERVAL_MS = 2000`, `HEAT_MIN_VALUE = 0.5`, `MAX_PATH_WAYPOINTS = 12`.
+
+**`stats` (`DeltaStatsSchema`, passthrough).** Shared fields `totals`, `day`, `shift`, `shiftTime`, `rushUntil`, plus:
+
+| Field | Shape | Semantics |
+|---|---|---|
+| `board` | `BoardRow[]` (`BoardRowSchema`) = `{ strat, vehicles, count, perHr, onTimePct: number \| null, incidents, kwhPerOrder: number \| null }[]` | Strategy Board (sim `board(world)`), recomputed at most once per `BOARD_INTERVAL_MS`; present on every full delta. |
+| `seriesAppend` | `ValueSample[]` = `{ t, you, avg, best }[]` | Per-connection, append-only: the `world.valueSeries` samples with `t` strictly greater than the newest sample already delivered to this connection (the welcome snapshot's `valueSeries` counts as delivered). Omitted when there is nothing new. Clients append and trim to their own cap (sim keeps 300). |
+| `history` | `DayRecord[]` (sim `DayHistoryEntry`) | Last 60 day records; sent only when `world.history` changed since this connection last received it (welcome counts). Replace, don't append. |
+| `hall` | `HallEntry[]` = `{ shift, id, strat, human, driver, pts, scored, diff }[]` | Hall of Fame (≤ 10, sorted); sent only when it changed since this connection last received it. Replace, don't append. |
+| `heat` | `HeatLayer` (`HeatLayerSchema`) = `{ w, h, cells: [index, value][] }` | Only for connections subscribed via `{ type: 'layers', traffic: true }`, at most every `HEAT_INTERVAL_MS`. `index = y * w + x`; `value` is raw sim heat rounded to 0.1. Cells below `HEAT_MIN_VALUE` are omitted. Raw heat grows `+0.1`/tick on occupied tiles and decays ×0.997/tick, so values range from 0.5 up to ≈33 (steady state for one parked vehicle). |
+
+**`hands`** (`Record<string, CardHand>`): sent on every full delta and contains **only the recipient's own hand**, keyed by its `clientId` (`{}` when it has none). Other players' hands are never sent. Agent hands (keyed by vehicle id, `ai: true`) are visible in the welcome snapshot only.
+
+**Vehicle inspector detail** (full deltas only, never light):
+
+| Field | Shape | Semantics |
+|---|---|---|
+| `incidents` / `nearMisses` | `number` | Lifetime counters from the sim vehicle. |
+| `tactics` | `VehicleTacticsSchema` = `{ speed, respect, buffer, chargeAt, batch: number; flatPath, preemptForP0, poach: boolean; note?: string }` | Current tuned tactics (numbers rounded to 2 dp). |
+| `path` | `number[]` (ints) | Flattened `[x0, y0, x1, y1, …]` of the first `MAX_PATH_WAYPOINTS` planned waypoints. |
+| `extra` | `boolean` | Vehicle was added above the base fleet. |
+| `decision?` | `VehicleDecisionSchema` = `{ kind: 'contract' \| 'hazard' \| 'tactics' \| 'cards'; model: string; latencyMs: number; reason: string; t: number }` | The last **applied** Gemini decision for this agent: real model id and measured call latency (ms, including the one retry if it happened). Absent until a real decision has been applied; never synthesised. |
+
+Measured cost of these additions per full delta (1 Hz, 14 agents, seed 42): vehicle detail ≈ 177 B/vehicle (≈ 2.5 KB total), `board` ≈ 0.5 KB, own `hands` ≈ 0.8 KB with a 3-card offer (`{}` = 2 B otherwise); `seriesAppend` ≈ 33 B per sample (one per 50 ticks); `heat` ≈ 10 B per hot cell (≈ 0.2 KB with 14 hot cells), every 2 s, subscribers only; `history`/`hall` only on change. Light deltas are unchanged.
 
 ---
 

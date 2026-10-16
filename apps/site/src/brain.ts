@@ -1,6 +1,8 @@
 import { GoogleGenAI } from '@google/genai';
 import { assertNoUntrustedText, sanitiseOutputText } from '@warehouse/armor';
 import {
+  ALLOWED_GEMINI_MODELS,
+  type AllowedGeminiModel,
   CardsDecisionSchema,
   ContractDecisionSchema,
   GEMINI_RESPONSE_SCHEMAS,
@@ -29,7 +31,8 @@ import {
   type PersistenceStore,
 } from './persistence.js';
 
-export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
+export { ALLOWED_GEMINI_MODELS, type AllowedGeminiModel };
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
 export const DEFAULT_GEMINI_LOCATION = 'global';
 export const DEFAULT_GCP_PROJECT = 'davenport-boutique';
 export const MAX_CONCURRENT_BRAIN_CALLS = 8;
@@ -90,7 +93,7 @@ export interface BrainModelClient {
 export type GeminiBrainClient = BrainModelClient;
 
 /**
- * Production Vertex AI Gemini 3.8 Flash client using Application Default Credentials (ADC).
+ * Production Vertex AI Gemini 3.5 Flash-Lite client using Application Default Credentials (ADC).
  * Never reads or checks GEMINI_API_KEY.
  */
 export class VertexGeminiBrainClient implements BrainModelClient {
@@ -129,7 +132,7 @@ export class VertexGeminiBrainClient implements BrainModelClient {
 
     const text = res.text ?? '';
     if (!text) {
-      throw new Error('Empty response text from Gemini 3.8 Flash');
+      throw new Error(`Empty response text from ${this.model}`);
     }
 
     const tokensIn = res.usageMetadata?.promptTokenCount ?? 0;
@@ -160,7 +163,7 @@ export function renderDecisionPrompt(
 ): { systemInstruction: string; prompt: string } {
   const ctx = req.context;
   const systemInstruction = [
-    `You are the onboard Gemini 3.8 Flash brain for autonomous warehouse vehicle ${ctx.agentId}.`,
+    `You are the onboard Gemini 3.5 Flash-Lite brain for autonomous warehouse vehicle ${ctx.agentId}.`,
     `Persona archetype: ${ctx.persona}. Vehicle type: ${ctx.vehicleType}.`,
     `Choose strictly from the provided options and return compact JSON matching the requested format.`,
     `Keep reason/note under 90 characters, plain ASCII, no URLs or markdown.`,
@@ -181,17 +184,23 @@ export function renderDecisionPrompt(
       `Output JSON format: {"orderIds":["${opts[0]?.orderId ?? 1000}"],"reason":"short reason"}`,
     ].join('\n');
   } else if (req.kind === 'hazard') {
-    const opts = req.options as HazardOption[];
+    const rawOpts = req.options as HazardOption[];
+    const validOpts = rawOpts.filter(
+      (o) => !(o.choice === 'reroute' && o.detourLen === null),
+    );
+    const opts = validOpts.length > 0 ? validOpts : rawOpts;
     const lines = opts.map(
       (o) =>
         `- choice="${o.choice}" detourLen=${o.detourLen ?? 'none'} spillClearsInMin=${o.timeLeft} skidRisk=${o.skidRisk}`,
     );
+    const choiceUnion =
+      opts.map((o) => `"${o.choice}"`).join('|') || '"reroute"|"wait"|"push"';
     body = [
       `Decision: hazard`,
       `Agent: ${ctx.agentId} (${ctx.persona}) at (${ctx.tile.x},${ctx.tile.y}) battery=${Math.round(ctx.battery)}% cargo=${ctx.cargoCount} slackMin=${ctx.slack ?? 'none'}`,
       `Spill #${ctx.hazardId ?? 0} ahead at (${ctx.hazardTile?.x ?? 0},${ctx.hazardTile?.y ?? 0}). Allowed choices:`,
       ...lines,
-      `Output JSON format: {"choice":"reroute"|"wait"|"push","reason":"short reason"}`,
+      `Output JSON format: {"choice":${choiceUnion},"reason":"short reason"}`,
     ].join('\n');
   } else if (req.kind === 'tactics') {
     const opts = req.options as TacticsOption[];

@@ -1,0 +1,1038 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Daylight 2.5D Warehouse SimCity Traffic & Logistics Mockup</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #CBD5E1;
+      color: #0F172A;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      overflow: hidden;
+      user-select: none;
+    }
+    .frosted-hud {
+      background: rgba(255, 255, 255, 0.88);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(148, 163, 184, 0.45);
+      box-shadow: 0 8px 24px -4px rgba(15, 23, 42, 0.12), 0 2px 6px -1px rgba(15, 23, 42, 0.06);
+    }
+    .hud-btn {
+      background: #F8FAFC;
+      border: 1px solid #CBD5E1;
+      color: #334155;
+      transition: all 0.14s ease;
+    }
+    .hud-btn:hover {
+      background: #EFF6FF;
+      border-color: #3B82F6;
+      color: #1D4ED8;
+    }
+    .hud-btn.active {
+      background: #2563EB;
+      border-color: #1D4ED8;
+      color: #FFFFFF;
+      box-shadow: 0 2px 8px rgba(37, 99, 235, 0.28);
+    }
+    .hud-btn.priority {
+      background: #FFF7ED;
+      border-color: #F97316;
+      color: #C2410C;
+    }
+    .hud-btn.priority:hover {
+      background: #EA580C;
+      color: #FFFFFF;
+    }
+  </style>
+</head>
+<body class="w-screen h-screen relative">
+
+  <!-- FULL-BLEED PAN-ABLE & ZOOMABLE 2.5D ISOMETRIC WORLD -->
+  <canvas id="world" class="w-full h-full block cursor-grab active:cursor-grabbing"></canvas>
+
+  <!-- TOP-LEFT: COMPACT SIMCITY TELEMETRY BAR -->
+  <div class="fixed top-4 left-4 z-20 frosted-hud rounded-2xl px-4 py-2.5 flex items-center gap-5 text-xs">
+    <div class="flex items-center gap-2">
+      <span class="w-2.5 h-2.5 rounded-full bg-blue-600 animate-pulse"></span>
+      <span class="font-bold tracking-tight text-slate-800">SECTOR 07 DISTRIBUTION HUB</span>
+      <span class="px-2 py-0.5 rounded bg-slate-100 border border-slate-300 text-slate-600 font-mono">36×24 GRID</span>
+    </div>
+    <div class="h-4 w-px bg-slate-300"></div>
+    <div class="flex items-center gap-4 text-slate-600">
+      <div>FLOW <strong id="stat-flow" class="text-blue-700 font-mono ml-1">118 pallets/hr</strong></div>
+      <div>FLEET <strong class="text-slate-800 font-mono ml-1">10 UNITS</strong></div>
+      <div>PRIORITY <strong id="stat-p0" class="text-orange-600 font-mono ml-1">1 RUSH</strong></div>
+    </div>
+  </div>
+
+  <!-- TOP-RIGHT: SIMCITY DATA LAYERS & CAMERA CONTROLS -->
+  <div class="fixed top-4 right-4 z-20 frosted-hud rounded-2xl p-1.5 flex items-center gap-1.5 text-xs">
+    <button id="btn-routes" onclick="toggleLayer('routes')" class="hud-btn active px-3 py-1.5 rounded-xl font-medium">
+      Routes
+    </button>
+    <button id="btn-heatmap" onclick="toggleLayer('heatmap')" class="hud-btn px-3 py-1.5 rounded-xl font-medium">
+      Traffic Density
+    </button>
+    <button id="btn-markings" onclick="toggleLayer('markings')" class="hud-btn active px-3 py-1.5 rounded-xl font-medium">
+      Floor Lanes
+    </button>
+    <div class="h-4 w-px bg-slate-300 mx-0.5"></div>
+    <button onclick="adjustZoom(1.15)" class="hud-btn px-2.5 py-1.5 rounded-xl font-bold" title="Zoom In">+</button>
+    <button onclick="adjustZoom(0.87)" class="hud-btn px-2.5 py-1.5 rounded-xl font-bold" title="Zoom Out">−</button>
+    <button onclick="resetCamera()" class="hud-btn px-2.5 py-1.5 rounded-xl font-medium" title="Center Map">Center</button>
+  </div>
+
+  <!-- BOTTOM-LEFT: SELECTED VEHICLE / OPERATOR CARD -->
+  <div class="fixed bottom-4 left-4 z-20 frosted-hud rounded-2xl px-4 py-3 w-80 text-xs">
+    <div class="flex items-center justify-between mb-1">
+      <div class="flex items-center gap-2">
+        <span id="sel-dot" class="w-2.5 h-2.5 rounded-full bg-teal-600"></span>
+        <span id="sel-title" class="font-bold text-slate-900 text-sm">FL-00 (Your Forklift)</span>
+      </div>
+      <span id="sel-badge" class="px-2 py-0.5 rounded-md bg-teal-50 text-teal-800 border border-teal-300 font-mono font-semibold">PLAYER RIG</span>
+    </div>
+    <div id="sel-task" class="text-slate-600 mb-2.5 leading-relaxed">
+      Drag map to pan, scroll to zoom. Click any aisle or press <kbd class="px-1.5 py-0.5 bg-slate-100 rounded border border-slate-300 font-mono text-slate-800">WASD</kbd> to drive.
+    </div>
+    <div class="flex items-center justify-between text-slate-500 border-t border-slate-200 pt-2">
+      <span>Cargo: <strong id="sel-load" class="text-slate-800">Euro-Pallet #204</strong></span>
+      <span>Forks: <strong id="sel-forks" class="text-slate-800">Lowered (Travel)</strong></span>
+    </div>
+  </div>
+
+  <!-- BOTTOM-CENTER: TASK INJECTION & TRAFFIC INTERVENTION BAR -->
+  <div class="fixed bottom-4 left-1/2 -translate-x-1/2 z-20 frosted-hud rounded-2xl p-2 flex items-center gap-2 text-xs">
+    <button onclick="dispatchPriorityOrder()" class="hud-btn priority px-3.5 py-2 rounded-xl font-semibold flex items-center gap-1.5">
+      <span>⚡</span> Rush Priority Order (Preempt Forklift)
+    </button>
+    <button id="btn-block" onclick="toggleBlockTool()" class="hud-btn px-3.5 py-2 rounded-xl font-medium flex items-center gap-1.5">
+      <span>🚧</span> Cone / Barrier Tool
+    </button>
+    <div class="h-5 w-px bg-slate-300 mx-0.5"></div>
+    <input id="cmd-input" type="text" placeholder="Inject priority task (e.g. 'Expedite Rack C2 to Dock E1')..."
+      class="bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-800 placeholder-slate-400 w-64 focus:outline-none focus:border-blue-600"
+      onkeydown="if(event.key==='Enter') injectTextTask()" />
+    <button onclick="injectTextTask()" class="hud-btn active px-3.5 py-2 rounded-xl font-semibold">
+      Dispatch
+    </button>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('world');
+    const ctx = canvas.getContext('2d');
+
+    // Large 36 x 24 Industrial Distribution Center Grid
+    const MAP_W = 36;
+    const MAP_H = 24;
+    let zoom = 1.0;
+    const BASE_TW = 58;
+    const BASE_TH = 29;
+
+    let camX = 0;
+    let camY = 0;
+    let isDragging = false;
+    let clickMoved = false;
+    let dragStart = { x: 0, y: 0 };
+
+    let layers = { routes: true, heatmap: false, markings: true };
+    let blockTool = false;
+    let p0Count = 1;
+    let palletsMoved = 118;
+
+    const trafficHeat = Array.from({ length: MAP_W }, () => Array(MAP_H).fill(0));
+    const barriers = new Set(['15,11']);
+
+    // Build High-Density Steel Pallet Rack Blocks (North Reserve & South Fulfillment)
+    // Leaves clear 2-lane arterial highways at y=2..3, y=11..12, y=20..21 and x=4..5, x=11, x=17, x=23, x=29
+    const racks = [];
+    const rackBlocks = [
+      { zone: 'A', cols: [7, 8], rows: [5, 6, 7, 8, 9] },
+      { zone: 'B', cols: [12, 13], rows: [5, 6, 7, 8, 9] },
+      { zone: 'C', cols: [17, 18], rows: [5, 6, 7, 8, 9] },
+      { zone: 'D', cols: [22, 23], rows: [5, 6, 7, 8, 9] },
+      { zone: 'E', cols: [7, 8], rows: [14, 15, 16, 17, 18] },
+      { zone: 'F', cols: [12, 13], rows: [14, 15, 16, 17, 18] },
+      { zone: 'G', cols: [17, 18], rows: [14, 15, 16, 17, 18] },
+      { zone: 'H', cols: [22, 23], rows: [14, 15, 16, 17, 18] },
+    ];
+    rackBlocks.forEach(b => {
+      b.cols.forEach((gx, ci) => {
+        b.rows.forEach((gy, ri) => {
+          racks.push({
+            id: `${b.zone}${ri + 1}`,
+            x: gx,
+            y: gy,
+            fill: ((gx * 3 + gy) % 3) + 1,
+            boxTone: (gx + gy) % 2 === 0 ? 'blue' : 'slate'
+          });
+        });
+      });
+    });
+
+    // Automated Roller Conveyor Sorter Hub (x=27..29, y=6..17)
+    const conveyors = [];
+    for (let y = 6; y <= 16; y++) {
+      if (y === 11 || y === 12) continue; // Keep central cross-highway open!
+      conveyors.push({ x: 28, y });
+    }
+
+    // West Receiving Docks & East Outbound Shipping Bays (with 53ft Semi-Trailers)
+    const docks = [
+      { id: 'W1', label: 'RECEIVING W1', x: 0, y: 4, side: 'west', color: '#475569' },
+      { id: 'W2', label: 'RECEIVING W2', x: 0, y: 9, side: 'west', color: '#475569' },
+      { id: 'W3', label: 'RECEIVING W3', x: 0, y: 14, side: 'west', color: '#475569' },
+      { id: 'W4', label: 'RECEIVING W4', x: 0, y: 19, side: 'west', color: '#475569' },
+      { id: 'E1', label: 'SHIPPING BAY E1', x: 35, y: 4, side: 'east', color: '#2563EB' },
+      { id: 'E2', label: 'SHIPPING BAY E2', x: 35, y: 9, side: 'east', color: '#2563EB' },
+      { id: 'E3', label: 'SHIPPING BAY E3', x: 35, y: 14, side: 'east', color: '#2563EB' },
+      { id: 'E4', label: 'SHIPPING BAY E4', x: 35, y: 19, side: 'east', color: '#2563EB' },
+    ];
+
+    const blockedLookup = new Set();
+    function rebuildBlocked() {
+      blockedLookup.clear();
+      racks.forEach(r => blockedLookup.add(`${r.x},${r.y}`));
+      conveyors.forEach(c => blockedLookup.add(`${c.x},${c.y}`));
+      barriers.forEach(k => blockedLookup.add(k));
+    }
+    rebuildBlocked();
+
+    function isBlocked(gx, gy) {
+      if (gx < 1 || gx >= MAP_W - 1 || gy < 1 || gy >= MAP_H - 1) return true;
+      return blockedLookup.has(`${gx},${gy}`);
+    }
+
+    function isHighwayTile(gx, gy) {
+      return (
+        gy === 2 || gy === 3 ||
+        gy === 11 || gy === 12 ||
+        gy === 20 || gy === 21 ||
+        gx === 4 || gx === 5 ||
+        gx === 10 || gx === 15 || gx === 20 || gx === 25 || gx === 31
+      );
+    }
+
+    // Highway-Preferring A* Pathfinder (vehicles naturally prefer painted traffic lanes)
+    function findPath(sx, sy, ex, ey) {
+      sx = Math.round(sx); sy = Math.round(sy);
+      ex = Math.round(ex); ey = Math.round(ey);
+      if (isBlocked(ex, ey)) return [];
+
+      const open = [{ x: sx, y: sy, g: 0, f: Math.abs(ex - sx) + Math.abs(ey - sy), path: [] }];
+      const visited = new Set([`${sx},${sy}`]);
+
+      while (open.length > 0) {
+        open.sort((a, b) => a.f - b.f);
+        const cur = open.shift();
+        if (cur.x === ex && cur.y === ey) return cur.path;
+        if (cur.path.length > 64) continue;
+
+        const dirs = [[1,0], [-1,0], [0,1], [0,-1]];
+        for (const [dx, dy] of dirs) {
+          const nx = cur.x + dx;
+          const ny = cur.y + dy;
+          const key = `${nx},${ny}`;
+          if (!visited.has(key) && (!isBlocked(nx, ny) || (nx === ex && ny === ey))) {
+            visited.add(key);
+            const stepCost = isHighwayTile(nx, ny) ? 0.85 : 1.15;
+            const g = cur.g + stepCost;
+            const h = Math.abs(ex - nx) + Math.abs(ey - ny);
+            open.push({ x: nx, y: ny, g, f: g + h, path: [...cur.path, { x: nx, y: ny }] });
+          }
+        }
+      }
+      return [{ x: ex, y: ey }];
+    }
+
+    // 10 Realistic Industrial Vehicles (Counterbalance Forklifts, Reach Trucks, Low-Profile AGVs)
+    const vehicles = [
+      {
+        id: 'FL-00 (YOU)', type: 'forklift', isPlayer: true,
+        x: 10, y: 11, angle: 0, speed: 4.2,
+        bodyColor: '#0D9488', bodyDark: '#0F766E',
+        hasPallet: true, boxColor: '#38BDF8', forkHeight: 4,
+        priority: false, yielding: false, path: [],
+        taskName: 'Manual Operator Control — Click any aisle or use WASD'
+      },
+      {
+        id: 'FL-01', type: 'forklift', isPlayer: false,
+        x: 6, y: 3, angle: 0, speed: 3.1,
+        bodyColor: '#EA580C', bodyDark: '#C2410C',
+        hasPallet: true, boxColor: '#FBBF24', forkHeight: 5,
+        priority: true, yielding: false, path: [],
+        goals: [{x: 34, y: 4, hasPallet: false}, {x: 2, y: 4, hasPallet: true}, {x: 14, y: 6, hasPallet: true}],
+        goalIdx: 0,
+        taskName: '⚡ P0 OVERRIDE: Expediting Pallet to Outbound Bay E1'
+      },
+      {
+        id: 'FL-02', type: 'forklift', isPlayer: false,
+        x: 15, y: 8, angle: 0, speed: 2.4,
+        bodyColor: '#2563EB', bodyDark: '#1D4ED8',
+        hasPallet: true, boxColor: '#93C5FD', forkHeight: 4,
+        priority: false, yielding: false, path: [],
+        goals: [{x: 34, y: 9, hasPallet: false}, {x: 16, y: 7, hasPallet: true}, {x: 2, y: 9, hasPallet: true}],
+        goalIdx: 0,
+        taskName: 'Hauling Zone C Pallet -> Shipping Bay E2'
+      },
+      {
+        id: 'FL-03', type: 'forklift', isPlayer: false,
+        x: 4, y: 16, angle: 0, speed: 2.4,
+        bodyColor: '#2563EB', bodyDark: '#1D4ED8',
+        hasPallet: true, boxColor: '#CBD5E1', forkHeight: 4,
+        priority: false, yielding: false, path: [],
+        goals: [{x: 9, y: 16, hasPallet: false}, {x: 2, y: 14, hasPallet: true}, {x: 19, y: 16, hasPallet: false}],
+        goalIdx: 0,
+        taskName: 'Inbound Dock W3 -> Replenishing Rack E3'
+      },
+      {
+        id: 'FL-04', type: 'reach', isPlayer: false,
+        x: 20, y: 6, angle: 0, speed: 2.3,
+        bodyColor: '#475569', bodyDark: '#334155',
+        hasPallet: true, boxColor: '#60A5FA', forkHeight: 14,
+        priority: false, yielding: false, path: [],
+        goals: [{x: 26, y: 8, hasPallet: false}, {x: 21, y: 6, hasPallet: true}, {x: 11, y: 6, hasPallet: true}],
+        goalIdx: 0,
+        taskName: 'High-Reach Picker: Zone D -> Conveyor Induction'
+      },
+      {
+        id: 'FL-05', type: 'reach', isPlayer: false,
+        x: 11, y: 17, angle: 0, speed: 2.3,
+        bodyColor: '#475569', bodyDark: '#334155',
+        hasPallet: false, boxColor: '#CBD5E1', forkHeight: 12,
+        priority: false, yielding: false, path: [],
+        goals: [{x: 14, y: 16, hasPallet: true}, {x: 34, y: 14, hasPallet: false}, {x: 6, y: 17, hasPallet: true}],
+        goalIdx: 0,
+        taskName: 'High-Reach Picker: Zone F -> Shipping Bay E3'
+      },
+      {
+        id: 'FL-06', type: 'forklift', isPlayer: false,
+        x: 25, y: 19, angle: 0, speed: 2.5,
+        bodyColor: '#2563EB', bodyDark: '#1D4ED8',
+        hasPallet: true, boxColor: '#93C5FD', forkHeight: 4,
+        priority: false, yielding: false, path: [],
+        goals: [{x: 34, y: 19, hasPallet: false}, {x: 2, y: 19, hasPallet: true}, {x: 24, y: 15, hasPallet: true}],
+        goalIdx: 0,
+        taskName: 'South Arterial Freight Loop -> Bay E4'
+      },
+      {
+        id: 'AGV-01', type: 'agv', isPlayer: false,
+        x: 26, y: 12, angle: 0, speed: 2.7,
+        bodyColor: '#0284C7', bodyDark: '#0369A1',
+        hasPallet: true, boxColor: '#E2E8F0', forkHeight: 2,
+        priority: false, yielding: false, path: [],
+        goals: [{x: 34, y: 9, hasPallet: false}, {x: 27, y: 9, hasPallet: true}, {x: 19, y: 11, hasPallet: true}],
+        goalIdx: 0,
+        taskName: 'Conveyor Sorter -> Outbound Dock Transfer'
+      },
+      {
+        id: 'AGV-02', type: 'agv', isPlayer: false,
+        x: 16, y: 12, angle: 0, speed: 2.7,
+        bodyColor: '#0284C7', bodyDark: '#0369A1',
+        hasPallet: true, boxColor: '#93C5FD', forkHeight: 2,
+        priority: false, yielding: false, path: [],
+        goals: [{x: 27, y: 14, hasPallet: false}, {x: 9, y: 8, hasPallet: true}, {x: 20, y: 12, hasPallet: true}],
+        goalIdx: 0,
+        taskName: 'Cross-Town Boulevard Tote Shuttle'
+      },
+      {
+        id: 'AGV-03', type: 'agv', isPlayer: false,
+        x: 5, y: 8, angle: 0, speed: 2.7,
+        bodyColor: '#0284C7', bodyDark: '#0369A1',
+        hasPallet: false, boxColor: '#E2E8F0', forkHeight: 2,
+        priority: false, yielding: false, path: [],
+        goals: [{x: 2, y: 9, hasPallet: true}, {x: 27, y: 7, hasPallet: false}, {x: 10, y: 3, hasPallet: true}],
+        goalIdx: 0,
+        taskName: 'West Receiving Dock Shuttle'
+      }
+    ];
+
+    let selectedUnit = vehicles[0];
+
+    function resetCamera() {
+      zoom = 1.0;
+      camX = canvas.width * 0.50;
+      camY = canvas.height * 0.06;
+    }
+
+    function adjustZoom(factor) {
+      zoom = Math.max(0.55, Math.min(1.75, zoom * factor));
+    }
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      if (camX === 0 && camY === 0) resetCamera();
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    function toIso(gx, gy, gz = 0) {
+      const tw = BASE_TW * zoom;
+      const th = BASE_TH * zoom;
+      return {
+        x: camX + (gx - gy) * (tw / 2),
+        y: camY + (gx + gy) * (th / 2) - gz * zoom
+      };
+    }
+
+    function fromIso(sx, sy) {
+      const tw = BASE_TW * zoom;
+      const th = BASE_TH * zoom;
+      const dx = sx - camX;
+      const dy = sy - camY;
+      const gx = (dx / (tw / 2) + dy / (th / 2)) / 2;
+      const gy = (dy / (th / 2) - dx / (tw / 2)) / 2;
+      return { x: Math.round(gx), y: Math.round(gy) };
+    }
+
+    // Draw flat isometric tile
+    function drawTile(gx, gy, fill, stroke = null, lw = 1) {
+      const p0 = toIso(gx, gy);
+      const p1 = toIso(gx + 1, gy);
+      const p2 = toIso(gx + 1, gy + 1);
+      const p3 = toIso(gx, gy + 1);
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.lineTo(p3.x, p3.y);
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+      if (stroke) {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = lw;
+        ctx.stroke();
+      }
+    }
+
+    // Draw axis-aligned 3D isometric box
+    function drawBox(gx, gy, zBase, wTiles, dTiles, hPx, topCol, leftCol, rightCol, strokeCol = null) {
+      const p00 = toIso(gx - wTiles/2, gy - dTiles/2, zBase);
+      const p10 = toIso(gx + wTiles/2, gy - dTiles/2, zBase);
+      const p11 = toIso(gx + wTiles/2, gy + dTiles/2, zBase);
+      const p01 = toIso(gx - wTiles/2, gy + dTiles/2, zBase);
+      const h = hPx * zoom;
+
+      // Left face
+      ctx.beginPath();
+      ctx.moveTo(p01.x, p01.y - h);
+      ctx.lineTo(p11.x, p11.y - h);
+      ctx.lineTo(p11.x, p11.y);
+      ctx.lineTo(p01.x, p01.y);
+      ctx.closePath();
+      ctx.fillStyle = leftCol;
+      ctx.fill();
+      if (strokeCol) { ctx.strokeStyle = strokeCol; ctx.lineWidth = 0.7; ctx.stroke(); }
+
+      // Right face
+      ctx.beginPath();
+      ctx.moveTo(p10.x, p10.y - h);
+      ctx.lineTo(p11.x, p11.y - h);
+      ctx.lineTo(p11.x, p11.y);
+      ctx.lineTo(p10.x, p10.y);
+      ctx.closePath();
+      ctx.fillStyle = rightCol;
+      ctx.fill();
+      if (strokeCol) { ctx.stroke(); }
+
+      // Top face
+      ctx.beginPath();
+      ctx.moveTo(p00.x, p00.y - h);
+      ctx.lineTo(p10.x, p10.y - h);
+      ctx.lineTo(p11.x, p11.y - h);
+      ctx.lineTo(p01.x, p01.y - h);
+      ctx.closePath();
+      ctx.fillStyle = topCol;
+      ctx.fill();
+      if (strokeCol) { ctx.stroke(); }
+    }
+
+    // Draw a Rotated 3D Oriented Box in Grid Coordinates (for directional vehicles, forks, wheels, pallets!)
+    function drawOrientedBox(cx, cy, zBase, length, width, heightPx, angleRad, topCol, sideColA, sideColB) {
+      const cos = Math.cos(angleRad);
+      const sin = Math.sin(angleRad);
+      const hl = length / 2;
+      const hw = width / 2;
+
+      const localCorners = [
+        [-hl, -hw],
+        [ hl, -hw],
+        [ hl,  hw],
+        [-hl,  hw]
+      ];
+
+      const basePts = localCorners.map(([lx, ly]) => {
+        const wx = cx + lx * cos - ly * sin;
+        const wy = cy + lx * sin + ly * cos;
+        return toIso(wx, wy, zBase);
+      });
+      const topPts = localCorners.map(([lx, ly]) => {
+        const wx = cx + lx * cos - ly * sin;
+        const wy = cy + lx * sin + ly * cos;
+        return toIso(wx, wy, zBase + heightPx);
+      });
+
+      // Draw visible side faces (faces whose screen bottom edge has positive winding or higher y)
+      for (let i = 0; i < 4; i++) {
+        const next = (i + 1) % 4;
+        const b0 = basePts[i];
+        const b1 = basePts[next];
+        const t1 = topPts[next];
+        const t0 = topPts[i];
+        // Draw back-to-front or check screen normal
+        if (b0.y + b1.y >= basePts[(i+2)%4].y + basePts[(i+3)%4].y - 10) {
+          ctx.beginPath();
+          ctx.moveTo(t0.x, t0.y);
+          ctx.lineTo(t1.x, t1.y);
+          ctx.lineTo(b1.x, b1.y);
+          ctx.lineTo(b0.x, b0.y);
+          ctx.closePath();
+          ctx.fillStyle = (i % 2 === 0) ? sideColA : sideColB;
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(15, 23, 42, 0.25)';
+          ctx.lineWidth = 0.8 * zoom;
+          ctx.stroke();
+        }
+      }
+
+      // Top face
+      ctx.beginPath();
+      ctx.moveTo(topPts[0].x, topPts[0].y);
+      ctx.lineTo(topPts[1].x, topPts[1].y);
+      ctx.lineTo(topPts[2].x, topPts[2].y);
+      ctx.lineTo(topPts[3].x, topPts[3].y);
+      ctx.closePath();
+      ctx.fillStyle = topCol;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(15, 23, 42, 0.28)';
+      ctx.lineWidth = 0.8 * zoom;
+      ctx.stroke();
+    }
+
+    // Draw Detailed Slatted Wooden Euro-Pallet + Stretch-Wrapped Cargo Boxes
+    function drawPalletLoad(cx, cy, zBase, angleRad, boxColor) {
+      // 1. Slatted Wooden Euro-Pallet Base
+      drawOrientedBox(cx, cy, zBase, 0.38, 0.40, 2.5, angleRad, '#D6B386', '#B89263', '#967247');
+      // 2. Twin Stacked Cargo Cartons with stretch-wrap band
+      const isBlue = boxColor === '#38BDF8' || boxColor === '#93C5FD' || boxColor === '#60A5FA';
+      const topC = isBlue ? '#EFF6FF' : (boxColor === '#FBBF24' ? '#FEF3C7' : '#F8FAFC');
+      const sideA = isBlue ? '#93C5FD' : (boxColor === '#FBBF24' ? '#F59E0B' : '#CBD5E1');
+      const sideB = isBlue ? '#60A5FA' : (boxColor === '#FBBF24' ? '#D97706' : '#94A3B8');
+      drawOrientedBox(cx, cy, zBase + 2.5, 0.34, 0.36, 9.5, angleRad, topC, sideA, sideB);
+    }
+
+    // Draw High-Detail Industrial Steel Pallet Rack
+    function drawPalletRack(r) {
+      const gx = r.x + 0.5;
+      const gy = r.y + 0.5;
+
+      // Recessed concrete pad shadow
+      drawTile(r.x, r.y, '#DDE3EA', '#CBD5E1');
+
+      // 4 Heavy Steel Upright Posts + Diagonal Bracing
+      const posts = [[-0.40, -0.40], [0.40, -0.40], [0.40, 0.40], [-0.40, 0.40]];
+      posts.forEach(([ox, oy]) => {
+        const b = toIso(gx + ox, gy + oy, 0);
+        const t = toIso(gx + ox, gy + oy, 48);
+        ctx.strokeStyle = '#1D4ED8';
+        ctx.lineWidth = 2.4 * zoom;
+        ctx.beginPath();
+        ctx.moveTo(b.x, b.y);
+        ctx.lineTo(t.x, t.y);
+        ctx.stroke();
+      });
+
+      // 3 Tier Levels (Steel Crossbeams + Slatted Pallets + Cargo Cartons)
+      const tiers = [3, 19, 35];
+      tiers.forEach((z, idx) => {
+        // Steel load beam
+        drawBox(gx, gy, z, 0.84, 0.84, 2.5, '#64748B', '#475569', '#334155');
+
+        if (idx < r.fill) {
+          // Two side-by-side Euro-Pallets per bay
+          [-0.19, 0.19].forEach(offset => {
+            // Wooden pallet base
+            drawBox(gx + offset, gy, z + 2.5, 0.34, 0.68, 2, '#D6B386', '#B89263', '#967247');
+            // Cargo boxes on pallet
+            const topC = r.boxTone === 'blue' ? '#DBEAFE' : '#F1F5F9';
+            const leftC = r.boxTone === 'blue' ? '#93C5FD' : '#CBD5E1';
+            const rightC = r.boxTone === 'blue' ? '#60A5FA' : '#94A3B8';
+            drawBox(gx + offset, gy, z + 4.5, 0.31, 0.62, 9.5, topC, leftC, rightC, 'rgba(51,65,85,0.25)');
+          });
+        }
+      });
+    }
+
+    // Draw High-Detail Multi-Part 2.5D Industrial Forklift / Reach Truck / AGV
+    function drawVehicle(v, now) {
+      const cx = v.x + 0.5;
+      const cy = v.y + 0.5;
+      const p = toIso(cx, cy, 0);
+      const cos = Math.cos(v.angle);
+      const sin = Math.sin(v.angle);
+
+      // 1. Directional Ground Shadow & Subtle Safety Floor Spotlight
+      ctx.save();
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y + 2 * zoom, 19 * zoom, 10 * zoom, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.16)';
+      ctx.fill();
+
+      // Safety Blue/Amber Floor Projection Beam Ahead of Forklift
+      const beamPt = toIso(cx + cos * 0.55, cy + sin * 0.55, 0);
+      const beamGrad = ctx.createRadialGradient(beamPt.x, beamPt.y, 1, beamPt.x, beamPt.y, 22 * zoom);
+      if (v.priority) {
+        beamGrad.addColorStop(0, 'rgba(234, 88, 12, 0.30)');
+        beamGrad.addColorStop(1, 'rgba(234, 88, 12, 0)');
+      } else {
+        beamGrad.addColorStop(0, 'rgba(37, 99, 235, 0.22)');
+        beamGrad.addColorStop(1, 'rgba(37, 99, 235, 0)');
+      }
+      ctx.fillStyle = beamGrad;
+      ctx.beginPath();
+      ctx.ellipse(beamPt.x, beamPt.y, 22 * zoom, 11 * zoom, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // 2. Selection / Operator / Yield Floor Ring
+      if (v === selectedUnit || v.isPlayer || v.priority || v.yielding) {
+        ctx.beginPath();
+        ctx.ellipse(p.x, p.y, 22 * zoom, 11 * zoom, 0, 0, Math.PI * 2);
+        ctx.strokeStyle = v.yielding ? '#DC2626' : (v.priority ? '#EA580C' : (v.isPlayer ? '#0D9488' : '#2563EB'));
+        ctx.lineWidth = (v === selectedUnit ? 2.4 : 1.6) * zoom;
+        ctx.stroke();
+      }
+
+      if (v.type === 'forklift' || v.type === 'reach') {
+        // --- 4 PNEUMATIC RUBBER TIRES ---
+        const wheelOffsets = [
+          [ 0.18, -0.21], [ 0.18,  0.21],
+          [-0.18, -0.19], [-0.18,  0.19]
+        ];
+        wheelOffsets.forEach(([lx, ly]) => {
+          const wx = cx + lx * cos - ly * sin;
+          const wy = cy + lx * sin + ly * cos;
+          drawOrientedBox(wx, wy, 0, 0.16, 0.08, 4.5, v.angle, '#1E293B', '#0F172A', '#020617');
+        });
+
+        // --- SCULPTED REAR COUNTERWEIGHT & LOWER CHASSIS ---
+        const mainTop = v.priority ? '#F97316' : v.bodyColor;
+        const mainSideA = v.priority ? '#EA580C' : v.bodyDark;
+        const mainSideB = v.priority ? '#C2410C' : '#1E293B';
+        drawOrientedBox(cx - cos * 0.05, cy - sin * 0.05, 3, 0.50, 0.40, 8.5, v.angle, mainTop, mainSideA, mainSideB);
+
+        // Rear Cast-Iron Counterweight Bumper Cap
+        drawOrientedBox(cx - cos * 0.24, cy - sin * 0.24, 3.5, 0.14, 0.38, 7.5, v.angle, '#334155', '#1E293B', '#0F172A');
+
+        // --- OPERATOR SEAT & 4-POST OVERHEAD GUARD ROLL CAGE ---
+        // Operator seat & console
+        drawOrientedBox(cx - cos * 0.02, cy - sin * 0.02, 11.5, 0.20, 0.22, 5, v.angle, '#1E293B', '#0F172A', '#0F172A');
+
+        // 4 Roll-Cage Steel Pillars
+        const cageCorners = [[-0.18, -0.16], [0.12, -0.16], [0.12, 0.16], [-0.18, 0.16]];
+        cageCorners.forEach(([lx, ly]) => {
+          const px = cx + lx * cos - ly * sin;
+          const py = cy + lx * sin + ly * cos;
+          const bPt = toIso(px, py, 11);
+          const tPt = toIso(px, py, 24);
+          ctx.strokeStyle = '#1E293B';
+          ctx.lineWidth = 2.0 * zoom;
+          ctx.beginPath();
+          ctx.moveTo(bPt.x, bPt.y);
+          ctx.lineTo(tPt.x, tPt.y);
+          ctx.stroke();
+        });
+
+        // Overhead Guard Roof Canopy
+        drawOrientedBox(cx - cos * 0.03, cy - sin * 0.03, 24, 0.32, 0.34, 2.0, v.angle, '#334155', '#1E293B', '#0F172A');
+
+        // --- TWIN VERTICAL HYDRAULIC LIFT MAST RAILS ---
+        const mastH = v.type === 'reach' ? 32 : 27;
+        [-0.12, 0.12].forEach(ly => {
+          const mx = cx + 0.24 * cos - ly * sin;
+          const my = cy + 0.24 * sin + ly * cos;
+          const bPt = toIso(mx, my, 2);
+          const tPt = toIso(mx, my, mastH);
+          ctx.strokeStyle = '#475569';
+          ctx.lineWidth = 2.8 * zoom;
+          ctx.beginPath();
+          ctx.moveTo(bPt.x, bPt.y);
+          ctx.lineTo(tPt.x, tPt.y);
+          ctx.stroke();
+        });
+
+        // --- L-SHAPED STEEL FORKS & CARRIAGE BACKREST ---
+        const fz = v.forkHeight || 4;
+        [-0.11, 0.11].forEach(ly => {
+          const fx = cx + 0.42 * cos - ly * sin;
+          const fy = cy + 0.42 * sin + ly * cos;
+          drawOrientedBox(fx, fy, fz, 0.34, 0.05, 1.5, v.angle, '#94A3B8', '#64748B', '#475569');
+        });
+
+        // --- CARRIED SLATTED PALLET & CARGO ON FORKS ---
+        if (v.hasPallet) {
+          const px = cx + 0.46 * cos;
+          const py = cy + 0.46 * sin;
+          drawPalletLoad(px, py, fz + 1.5, v.angle, v.boxColor);
+        }
+
+        // --- ROOF BEACON STROBE & BRAKE TAIL LIGHTS ---
+        const roofPt = toIso(cx - cos * 0.03, cy - sin * 0.03, 27.5);
+        ctx.fillStyle = v.yielding ? '#EF4444' : (v.priority ? '#F59E0B' : (v.isPlayer ? '#14B8A6' : '#3B82F6'));
+        ctx.beginPath();
+        ctx.arc(roofPt.x, roofPt.y, 3.2 * zoom, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        // --- SLEEK LOW-PROFILE AUTONOMOUS DECK AGV ---
+        drawOrientedBox(cx, cy, 0.5, 0.56, 0.48, 5.5, v.angle, '#0284C7', '#0369A1', '#1E3A8A');
+        // Perimeter Cyan Safety LED Strip
+        drawOrientedBox(cx, cy, 6.0, 0.50, 0.42, 1.5, v.angle, '#E0F2FE', '#38BDF8', '#0284C7');
+        // Dark LiDAR Sensor Dome on Front Nose
+        drawOrientedBox(cx + cos * 0.22, cy + sin * 0.22, 2.0, 0.12, 0.24, 3.5, v.angle, '#0F172A', '#0F172A', '#020617');
+        if (v.hasPallet) {
+          drawPalletLoad(cx, cy, 7.5, v.angle, v.boxColor);
+        }
+      }
+
+      // Clean Minimal Tag ONLY for Player, P0 Priority, or Active Braking/Yielding
+      if (v.isPlayer || v.priority || v.yielding) {
+        const label = v.yielding ? 'YIELD' : (v.priority ? '⚡ P0 RUSH' : 'YOU (FL-00)');
+        const tagPt = toIso(cx, cy, 35);
+        ctx.font = `bold ${Math.max(9, Math.round(10 * zoom))}px Inter, sans-serif`;
+        ctx.textAlign = 'center';
+        const tw = ctx.measureText(label).width + 10 * zoom;
+        const th = 15 * zoom;
+        ctx.fillStyle = v.yielding ? '#DC2626' : (v.priority ? '#EA580C' : '#0D9488');
+        ctx.beginPath();
+        ctx.roundRect(tagPt.x - tw/2, tagPt.y - th/2, tw, th, 4 * zoom);
+        ctx.fill();
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillText(label, tagPt.x, tagPt.y + 3.5 * zoom);
+      }
+    }
+
+    // Draw Docked 53ft Semi-Trailer at West/East Loading Aprons
+    function drawDockedTrailer(d) {
+      const isEast = d.side === 'east';
+      const tx = isEast ? d.x + 1.1 : d.x - 1.1;
+      const ty = d.y + 0.5;
+
+      // Loading dock apron plate
+      drawTile(d.x, d.y, isEast ? '#DBEAFE' : '#E2E8F0', isEast ? '#3B82F6' : '#64748B', 1.5);
+
+      // Trailer dark rubber wheels
+      drawBox(tx + (isEast ? 0.4 : -0.4), ty, 0, 0.45, 0.82, 5, '#1E293B', '#0F172A', '#020617');
+      // 53ft White/Aluminum Ribbed Semi-Trailer Box
+      drawBox(tx, ty, 5, 1.65, 0.88, 24, '#F8FAFC', '#E2E8F0', '#CBD5E1', 'rgba(100,116,139,0.4)');
+      // Blue Logistics Stripe along trailer side
+      drawBox(tx, ty, 15, 1.66, 0.89, 4, '#2563EB', '#1D4ED8', '#1E40AF');
+    }
+
+    // Update Simulation & Traffic Rules
+    function updateSim(dt) {
+      vehicles.forEach(v => {
+        const rx = Math.max(0, Math.min(MAP_W - 1, Math.round(v.x)));
+        const ry = Math.max(0, Math.min(MAP_H - 1, Math.round(v.y)));
+        trafficHeat[rx][ry] = Math.min(1.0, trafficHeat[rx][ry] + dt * 0.22);
+
+        if (v.isPlayer) {
+          if (v.path.length > 0) {
+            const next = v.path[0];
+            const dx = next.x - v.x;
+            const dy = next.y - v.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist < 0.09) {
+              v.x = next.x; v.y = next.y;
+              v.path.shift();
+            } else {
+              v.angle = Math.atan2(dy, dx);
+              v.x += (dx / dist) * v.speed * dt;
+              v.y += (dy / dist) * v.speed * dt;
+            }
+          }
+          return;
+        }
+
+        // Intersection Traffic Right-of-Way Yielding
+        v.yielding = false;
+        for (const other of vehicles) {
+          if (other === v) continue;
+          const dist = Math.hypot(other.x - v.x, other.y - v.y);
+          const otherPriority = other.isPlayer || (other.priority && !v.priority);
+          if (dist < 1.85 && otherPriority) {
+            v.yielding = true;
+            return;
+          }
+        }
+
+        if (v.path.length === 0) {
+          const g = v.goals[v.goalIdx];
+          v.hasPallet = g.hasPallet;
+          v.path = findPath(v.x, v.y, g.x, g.y);
+          v.goalIdx = (v.goalIdx + 1) % v.goals.length;
+          if (g.x >= 33) {
+            palletsMoved++;
+            document.getElementById('stat-flow').textContent = `${palletsMoved} pallets/hr`;
+          }
+        } else {
+          const next = v.path[0];
+          if (barriers.has(`${next.x},${next.y}`)) {
+            const g = v.goals[v.goalIdx];
+            v.path = findPath(v.x, v.y, g.x, g.y);
+            return;
+          }
+          const dx = next.x - v.x;
+          const dy = next.y - v.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist < 0.09) {
+            v.x = next.x; v.y = next.y;
+            v.path.shift();
+          } else {
+            v.angle = Math.atan2(dy, dx);
+            v.x += (dx / dist) * v.speed * dt;
+            v.y += (dy / dist) * v.speed * dt;
+          }
+        }
+      });
+
+      for (let x = 0; x < MAP_W; x++) {
+        for (let y = 0; y < MAP_H; y++) {
+          trafficHeat[x][y] *= 0.995;
+        }
+      }
+    }
+
+    // Main Render Loop
+    let lastTime = performance.now();
+    function render(now) {
+      const dt = Math.min(0.05, (now - lastTime) / 1000);
+      lastTime = now;
+      updateSim(dt);
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // 1. Draw Sunlit Polished Concrete Floor & Painted Collector Highway Lanes
+      for (let gx = 0; gx < MAP_W; gx++) {
+        for (let gy = 0; gy < MAP_H; gy++) {
+          const isEdge = gx === 0 || gx === MAP_W - 1 || gy === 0 || gy === MAP_H - 1;
+          const isHwy = isHighwayTile(gx, gy);
+
+          let fill = '#EAECEF'; // Daylight smooth concrete
+          if (isEdge) fill = '#CBD5E1';
+          else if (layers.markings && isHwy) fill = '#DCE5F2'; // Cool steel-blue traffic lane
+
+          drawTile(gx, gy, fill, '#D5DBE3', 0.8);
+
+          // SimCity Traffic Density Heatmap Layer
+          if (layers.heatmap && trafficHeat[gx][gy] > 0.04) {
+            const h = trafficHeat[gx][gy];
+            const heatCol = h > 0.5
+              ? `rgba(234, 88, 12, ${Math.min(0.55, h * 0.6)})`
+              : `rgba(37, 99, 235, ${Math.min(0.45, h * 0.5)})`;
+            drawTile(gx, gy, heatCol, null);
+          }
+
+          // Crisp Highway Lane Centerline Dashes
+          if (layers.markings && isHwy && !isEdge && (gx + gy) % 2 === 0) {
+            const c = toIso(gx + 0.5, gy + 0.5);
+            ctx.fillStyle = 'rgba(59, 130, 246, 0.35)';
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, 1.6 * zoom, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+
+      // 2. Draw Active A* Route Vectors on Floor
+      if (layers.routes) {
+        vehicles.forEach(v => {
+          if (v.path.length === 0) return;
+          ctx.save();
+          ctx.beginPath();
+          const start = toIso(v.x + 0.5, v.y + 0.5, 1);
+          ctx.moveTo(start.x, start.y);
+          v.path.forEach(pt => {
+            const s = toIso(pt.x + 0.5, pt.y + 0.5, 1);
+            ctx.lineTo(s.x, s.y);
+          });
+          ctx.strokeStyle = v.priority
+            ? 'rgba(234, 88, 12, 0.85)'
+            : (v.isPlayer ? 'rgba(13, 148, 136, 0.9)' : 'rgba(37, 99, 235, 0.32)');
+          ctx.lineWidth = ((v.priority || v.isPlayer) ? 3.0 : 1.5) * zoom;
+          ctx.setLineDash((v.priority || v.isPlayer) ? [] : [5 * zoom, 4 * zoom]);
+          ctx.stroke();
+          ctx.restore();
+        });
+      }
+
+      // 3. Depth-Sorted 2.5D Structures, Docked Semi-Trailers, Conveyors, and Vehicles
+      const renderList = [];
+
+      docks.forEach(d => {
+        renderList.push({ depth: d.x + d.y, draw: () => drawDockedTrailer(d) });
+      });
+
+      racks.forEach(r => {
+        renderList.push({ depth: r.x + r.y, draw: () => drawPalletRack(r) });
+      });
+
+      conveyors.forEach((c, idx) => {
+        renderList.push({
+          depth: c.x + c.y,
+          draw: () => {
+            drawBox(c.x + 0.5, c.y + 0.5, 0, 0.85, 0.85, 8, '#94A3B8', '#64748B', '#475569');
+            // Moving parcel tote on roller conveyor
+            const shift = ((now * 0.002 + idx * 0.35) % 1) - 0.5;
+            drawBox(c.x + 0.5, c.y + 0.5 + shift * 0.4, 8, 0.38, 0.38, 7, '#3B82F6', '#2563EB', '#1D4ED8');
+          }
+        });
+      });
+
+      barriers.forEach(key => {
+        const [bx, by] = key.split(',').map(Number);
+        renderList.push({
+          depth: bx + by,
+          draw: () => {
+            drawTile(bx, by, 'rgba(254, 226, 226, 0.85)', '#EF4444', 1.5);
+            drawBox(bx + 0.5, by + 0.5, 0, 0.52, 0.52, 13, '#F97316', '#EA580C', '#C2410C');
+          }
+        });
+      });
+
+      vehicles.forEach(v => {
+        renderList.push({ depth: v.x + v.y + 0.25, draw: () => drawVehicle(v, now) });
+      });
+
+      renderList.sort((a, b) => a.depth - b.depth);
+      renderList.forEach(item => item.draw());
+
+      requestAnimationFrame(render);
+    }
+
+    // Mouse Pan, Wheel Zoom, and Click-to-Drive / Select
+    canvas.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      clickMoved = false;
+      dragStart = { x: e.clientX - camX, y: e.clientY - camY };
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      const nx = e.clientX - dragStart.x;
+      const ny = e.clientY - dragStart.y;
+      if (Math.hypot(nx - camX, ny - camY) > 5) clickMoved = true;
+      camX = nx;
+      camY = ny;
+    });
+
+    window.addEventListener('mouseup', (e) => {
+      if (!isDragging) return;
+      isDragging = false;
+      if (clickMoved) return;
+
+      const g = fromIso(e.clientX, e.clientY);
+
+      // Select any vehicle if clicked nearby
+      for (const v of vehicles) {
+        if (Math.hypot(v.x - g.x, v.y - g.y) < 1.2) {
+          selectVehicle(v);
+          return;
+        }
+      }
+
+      if (blockTool) {
+        const key = `${g.x},${g.y}`;
+        if (barriers.has(key)) barriers.delete(key);
+        else if (!isBlocked(g.x, g.y)) barriers.add(key);
+        rebuildBlocked();
+        return;
+      }
+
+      // Drive FL-00 (Player Forklift) to clicked floor coordinate
+      if (!isBlocked(g.x, g.y)) {
+        const player = vehicles[0];
+        player.path = findPath(player.x, player.y, g.x, g.y);
+        player.taskName = `Driving to Aisle (${g.x}, ${g.y})`;
+        selectVehicle(player);
+      }
+    });
+
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      adjustZoom(e.deltaY < 0 ? 1.08 : 0.92);
+    }, { passive: false });
+
+    window.addEventListener('keydown', (e) => {
+      if (document.activeElement.tagName === 'INPUT') return;
+      const p = vehicles[0];
+      let tx = Math.round(p.x);
+      let ty = Math.round(p.y);
+      if (e.key === 'w' || e.key === 'ArrowUp') ty -= 1;
+      else if (e.key === 's' || e.key === 'ArrowDown') ty += 1;
+      else if (e.key === 'a' || e.key === 'ArrowLeft') tx -= 1;
+      else if (e.key === 'd' || e.key === 'ArrowRight') tx += 1;
+      else return;
+
+      if (!isBlocked(tx, ty)) {
+        p.path = [{ x: tx, y: ty }];
+        selectVehicle(p);
+      }
+    });
+
+    function selectVehicle(v) {
+      selectedUnit = v;
+      document.getElementById('sel-title').textContent = v.id;
+      document.getElementById('sel-dot').style.backgroundColor = v.priority ? '#EA580C' : v.bodyColor;
+      document.getElementById('sel-badge').textContent = v.isPlayer ? 'PLAYER RIG' : (v.priority ? '⚡ P0 OVERRIDE' : v.type.toUpperCase());
+      document.getElementById('sel-task').textContent = v.taskName;
+      document.getElementById('sel-load').textContent = v.hasPallet ? 'Loaded Euro-Pallet' : 'Empty Forks';
+      document.getElementById('sel-forks').textContent = v.forkHeight > 8 ? 'Elevated (High-Bay)' : 'Lowered (Travel)';
+    }
+
+    function toggleLayer(name) {
+      layers[name] = !layers[name];
+      document.getElementById('btn-' + name).classList.toggle('active', layers[name]);
+    }
+
+    function toggleBlockTool() {
+      blockTool = !blockTool;
+      document.getElementById('btn-block').classList.toggle('active', blockTool);
+    }
+
+    function dispatchPriorityOrder() {
+      p0Count++;
+      document.getElementById('stat-p0').textContent = `${p0Count} RUSH`;
+      const target = vehicles[p0Count % (vehicles.length - 1) + 1];
+      target.priority = true;
+      target.speed = 3.3;
+      target.hasPallet = true;
+      target.boxColor = '#FBBF24';
+      target.path = findPath(target.x, target.y, 34, 9);
+      target.taskName = '⚡ PREEMPTED: Expediting Priority Pallet -> Shipping Bay E2';
+      selectVehicle(target);
+    }
+
+    function injectTextTask() {
+      const input = document.getElementById('cmd-input');
+      const text = input.value.trim() || 'Expedite Rack C2 to Dock E1';
+      p0Count++;
+      document.getElementById('stat-p0').textContent = `${p0Count} RUSH`;
+      const target = vehicles[2];
+      target.priority = true;
+      target.speed = 3.4;
+      target.hasPallet = true;
+      target.boxColor = '#FBBF24';
+      target.path = findPath(target.x, target.y, 34, 4);
+      target.taskName = `⚡ P0 DIRECTIVE: "${text}"`;
+      input.value = '';
+      selectVehicle(target);
+    }
+
+    requestAnimationFrame(render);
+  </script>
+</body>
+</html>
