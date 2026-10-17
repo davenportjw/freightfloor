@@ -19,6 +19,72 @@ export const REACH = INTERACT_REACH;
 export const SITES = ['den-1', 'slc-2', 'phx-3', 'abq-4'] as const;
 export type SiteId = (typeof SITES)[number] | string;
 
+export interface SiteTheme {
+  id: 'den-1' | 'slc-2' | 'phx-3' | 'abq-4';
+  name: string;
+  shortName: string;
+  city: string;
+  cargoStyle: 'boxes' | 'plants' | 'tech' | 'artisan';
+  cargoLabel: string;
+  skuPrefix: string;
+  skuItems: string[];
+  accentColor: string;
+}
+
+export const SITE_THEMES: Record<'den-1' | 'slc-2' | 'phx-3' | 'abq-4', SiteTheme> = {
+  'den-1': {
+    id: 'den-1',
+    name: 'Denver Fulfillment Hub',
+    shortName: 'Logistics Hub',
+    city: 'Denver, CO',
+    cargoStyle: 'boxes',
+    cargoLabel: 'Cardboard & Cold Pallets',
+    skuPrefix: 'SKU',
+    skuItems: ['CARTON', 'CRATE', 'PALLET', 'PARCEL', 'TOTE', 'CASE'],
+    accentColor: '#d97706',
+  },
+  'slc-2': {
+    id: 'slc-2',
+    name: 'Salt Lake Botanical Conservatory',
+    shortName: 'Botanical Nursery',
+    city: 'Salt Lake City, UT',
+    cargoStyle: 'plants',
+    cargoLabel: 'Potted Trees & Terrariums',
+    skuPrefix: 'PLT',
+    skuItems: ['MONSTERA', 'FICUS', 'ORCHID', 'BONSAI', 'SUCCULENT', 'FERN'],
+    accentColor: '#16a34a',
+  },
+  'phx-3': {
+    id: 'phx-3',
+    name: 'Phoenix Silicon Cleanroom',
+    shortName: 'Silicon Fab',
+    city: 'Phoenix, AZ',
+    cargoStyle: 'tech',
+    cargoLabel: 'Wafer FOUPs & Server Blades',
+    skuPrefix: 'FAB',
+    skuItems: ['FOUP-300', 'WAFER-5N', 'GPU-RACK', 'CRYO-CELL', 'OPTIC-MOD', 'LITHO-KIT'],
+    accentColor: '#0284c7',
+  },
+  'abq-4': {
+    id: 'abq-4',
+    name: 'Albuquerque Artisan Roastery',
+    shortName: 'Artisan Roastery',
+    city: 'Albuquerque, NM',
+    cargoStyle: 'artisan',
+    cargoLabel: 'Oak Barrels & Burlap Sacks',
+    skuPrefix: 'ART',
+    skuItems: ['CASK-OAK', 'BURLAP-60', 'COPPER-URN', 'CLAY-AMPH', 'ROAST-LOT', 'SPICE-BAL'],
+    accentColor: '#c2410c',
+  },
+};
+
+export function getSiteTheme(siteId?: string): SiteTheme {
+  if (siteId && siteId in SITE_THEMES) {
+    return SITE_THEMES[siteId as keyof typeof SITE_THEMES];
+  }
+  return SITE_THEMES['den-1'];
+}
+
 export type Phase = 'running' | 'winding_down' | 'break' | 'resuming';
 
 export type Archetype = 'Sprinter' | 'Steady' | 'Batcher' | 'Opportunist' | 'Strategist';
@@ -43,12 +109,20 @@ export type DistrictKind =
   | 'office'
   | 'charging';
 
-export type DifficultyKey = 'calm' | 'normal' | 'surge' | 'crisis' | 'easy' | 'hard';
-export type DifficultyInput = DifficultyKey | 1 | 2 | 3 | 4;
+export type DifficultyKey =
+  | 'calm'
+  | 'normal'
+  | 'medium'
+  | 'surge'
+  | 'crisis'
+  | 'easy'
+  | 'hard'
+  | 'turbo';
+export type DifficultyInput = DifficultyKey | 1 | 2 | 3 | 4 | 5;
 
 export interface DifficultyConfig {
   key: DifficultyKey;
-  level: 1 | 2 | 3 | 4;
+  level: 1 | 2 | 3 | 4 | 5;
   label: string;
   demand: number;
   due: number;
@@ -56,6 +130,7 @@ export interface DifficultyConfig {
   hazardTtl: [number, number];
   crash: number;
   score: number;
+  speed?: number;
 }
 
 export interface Tactics {
@@ -141,6 +216,7 @@ export interface DockConfig {
 }
 
 export interface WorldMap {
+  siteId?: SiteId;
   tier: number;
   w: number;
   h: number;
@@ -187,6 +263,32 @@ export interface Order {
   destSite?: string | null;
   fromSite?: string | null;
   transferId?: string | null;
+  zone?: string;
+  special?: string;
+  /** Par time (game-min) for the loaded leg, set at pickup from the planner's route. */
+  parLoaded?: number;
+  /** Hand key (player / agent id) that owns this route-card pallet during the reservation window. */
+  reservedFor?: string | null;
+  /** Game time when the contract reservation opens to other drivers. */
+  reservedUntil?: number;
+}
+
+/** Speed rating for one fare (delivered pallet). */
+export type FareRating = 'speedy' | 'normal' | 'slow';
+
+/** One rated trip, kept in `Vehicle.fareLog` and emitted as a `fare` SimEvent. */
+export interface FareResult {
+  t: number;
+  orderId: number;
+  rating: FareRating;
+  /** Loaded-leg time in game-min (pickup → delivery). */
+  actual: number;
+  /** Par time in game-min, or null when the pallet had no par (e.g. injected cargo). */
+  par: number | null;
+  /** Combo multiplier applied to this trip. */
+  combo: number;
+  /** Trip points awarded (value × rating × combo, plus flat bonuses). */
+  pts: number;
 }
 
 export interface Hazard {
@@ -209,6 +311,7 @@ export interface DriverInput {
   down: boolean;
   left: boolean;
   right: boolean;
+  boost?: boolean;
   seq?: number;
 }
 
@@ -220,12 +323,27 @@ export interface VehicleTarget {
   bay?: string;
 }
 
+export type RunMode = 'blitz' | 'freerange';
+export const BLITZ_DURATION_MIN = 300; // 300 sim-min = 300 real seconds (5 real min) at 10 Hz (0.1 sim-min/tick)
+export const RUN_CARD_GRACE_MIN = 15; // informational card-pick window (runGraceUntil); the Blitz clock itself starts only on first input, keepCards, or Co-Pilot
+
 export interface CardModifiers {
   speedMul: number;
   reachBonus: number;
   batteryDrainMul: number;
   payoutBonus: number;
+  ptsBonus?: number;
+  p0Bonus?: number;
+  chargeBonus?: number;
+  drainMul?: number;
+  /** Fork lift/lower speed multiplier (Crazy Stop perk), capped at 1.5×. */
+  forkLiftMul?: number;
+  /** Combo step that a reset falls back to (Combo King perk: 1 = 1.2×). */
+  comboFloor?: number;
 }
+
+/** Perk granted by a card once it is completed (`status === 'done'`). */
+export type CardPerk = Partial<CardModifiers>;
 
 export interface LastDecisionRecord {
   id: string;
@@ -238,11 +356,75 @@ export interface LastDecisionRecord {
   t: number;
 }
 
+export type AgentPriority =
+  | 'balanced'
+  | 'normal'
+  | 'p0_first'
+  | 'high_value'
+  | 'nearest'
+  | 'transfers'
+  | 'transfers_first'
+  | 'zone_focus'
+  | 'bay_focus';
+export type ImmediateTaskKind =
+  | 'auto'
+  | 'charge'
+  | 'charge_now'
+  | 'return_home'
+  | 'deliver_cargo'
+  | 'pick_p0'
+  | 'pick_hazmat'
+  | 'clear_spill'
+  | 'zone'
+  | 'bay'
+  | 'order';
+
+export interface PartialVehicleTactics {
+  speed?: number;
+  respect?: number;
+  buffer?: number;
+  chargeAt?: number;
+  batch?: number;
+  flatPath?: number | boolean;
+  preemptForP0?: boolean;
+  poach?: boolean;
+  note?: string;
+}
+
+export interface AgentDirective {
+  autopilot?: boolean;
+  strategy?: Archetype;
+  persona?: Archetype;
+  tactics?: PartialVehicleTactics;
+  focusZones?: string[];
+  focusBays?: string[];
+  preferredZone?: string;
+  preferredBay?: string;
+  preferredZones?: string[];
+  preferredBays?: string[];
+  avoidZones?: string[];
+  priority?: AgentPriority;
+  immediateTask?:
+    | ImmediateTaskKind
+    | {
+        kind: ImmediateTaskKind;
+        target?: string;
+        orderId?: number | null;
+        zone?: string | null;
+        bay?: string | null;
+      }
+    | null;
+  summary?: string;
+  updatedAt?: number;
+}
+
 export interface Vehicle {
   id: string;
   type: VehicleType;
   strategy: Archetype;
   human: boolean;
+  autopilot?: boolean;
+  directive?: AgentDirective | null;
   extra: boolean;
   isPlayerVehicle?: boolean;
   ownerClientId?: string | null;
@@ -272,6 +454,8 @@ export interface Vehicle {
   deliveries: number;
   incidents: number;
   nearMisses: number;
+  skids?: number;
+  palletDrops?: number;
   chargerIdx: number;
   speedNow: number;
   braking: boolean;
@@ -281,6 +465,17 @@ export interface Vehicle {
   input: DriverInput;
   sPts: number;
   sShipped: number;
+  runMode: RunMode;
+  runStartedAt: number | null;
+  runEndsAt: number | null;
+  runGraceUntil: number | null;
+  runPts: number;
+  runDeliveries: number;
+  runOnTime: number;
+  runIncidents: number;
+  streak: number;
+  bestStreak: number;
+  runFinished: boolean;
   hzSeen: Set<number>;
   hold: number | null;
   pushing: number | null;
@@ -291,8 +486,31 @@ export interface Vehicle {
   tactics: Tactics;
   brainError: string | null;
   lastDecision: LastDecisionRecord | null;
+  lastBrainDecision?: {
+    kind: string;
+    reason: string;
+    model: string;
+    latencyMs: number;
+    at: number;
+  } | null;
   lastTacticsReqAt: number;
   target: VehicleTarget | null;
+  /** Combo step index into COMBO_STEPS (0 = 1.0×, 3 = 2.0× cap). Optional for old snapshots. */
+  comboStep?: number;
+  /** Current combo multiplier (mirrors COMBO_STEPS[comboStep]). */
+  combo?: number;
+  /** Best combo multiplier reached this run. */
+  comboBest?: number;
+  /** Rated trips this run. */
+  fareTrips?: number;
+  /** Speedy-rated trips this run. */
+  speedyTrips?: number;
+  /** Last ≤ 10 rated trips (newest last). */
+  fareLog?: FareResult[];
+  /** Speed when the driver started braking (precision-stop detection). */
+  brakeFrom?: number | null;
+  /** Set when the driver braked from > 4.0 to < 0.8; consumed by the next interact. */
+  precisionArmed?: { x: number; y: number; t: number } | null;
 }
 
 export interface ContractOption {
@@ -334,6 +552,8 @@ export interface CardOption {
   title: string;
   desc: string;
   modifiers?: Partial<CardModifiers>;
+  rarity?: CardRarity;
+  perk?: CardPerk;
 }
 
 export type DecisionOption = ContractOption | HazardOption | TacticsOption | CardOption;
@@ -439,19 +659,53 @@ export interface Transfer {
 
 export type TransferOut = Transfer;
 
+/** Every card type. Phase-3 types (long_haul, local_hero, poacher, rival_grudge, ghost_hunter) are typed but not dealt yet. */
+export const CARD_TYPE_IDS = [
+  'route',
+  'batch',
+  'clean',
+  'ontime',
+  'quick',
+  'charge',
+  'overdrive',
+  'long_reach',
+  'eco_cell',
+  'high_roller',
+  'long_haul',
+  'local_hero',
+  'beat_planner',
+  'poacher',
+  'trailer_closer',
+  'crazy_stop',
+  'combo_king',
+  'double_nothing',
+  'rival_grudge',
+  'ghost_hunter',
+  'last_call',
+] as const;
+export type CardType = (typeof CARD_TYPE_IDS)[number];
+export type CardRarity = 'common' | 'wild';
+
 export interface Card {
   id: string;
-  type: 'route' | 'batch' | 'clean' | 'ontime' | 'quick' | 'charge' | 'overdrive' | 'long_reach' | 'eco_cell' | 'high_roller';
+  type: CardType;
   zone?: string;
   bay?: string;
   goal: number;
   progress: number;
   status: 'offer' | 'active' | 'done' | 'lost' | 'expired';
+  completedAt?: number;
   starter?: boolean;
   pts: number;
   title: string;
   desc: string;
+  /** Legacy mirror of `perk` (kept for older clients/snapshots). */
   modifiers?: Partial<CardModifiers>;
+  rarity?: CardRarity;
+  /** Never dealt to AI agents (cards built around beating the planner). */
+  humanOnly?: boolean;
+  /** Perk granted once the card is completed. */
+  perk?: CardPerk;
 }
 
 export interface CardHand {
@@ -459,6 +713,8 @@ export interface CardHand {
   offer: Card[] | null;
   cards: Card[];
   ai?: boolean;
+  /** Max cards that may be kept from the current offer (1 for replacement draws). */
+  pick?: number;
 }
 
 export interface ValueSample {
@@ -615,6 +871,8 @@ export interface World {
     cardsDone: number;
     aiCardsDone: number;
     hazards: number;
+    skids?: number;
+    palletDrops?: number;
     transfersOut: number;
     transfersIn: number;
     decisions: { reroute: number; wait: number; push: number };
@@ -633,6 +891,8 @@ export interface World {
   decisions: DecisionJournalEntry[]; // Alias to decisionJournal
   players: Map<string, PlayerSession>;
 }
+
+export type WorldState = World;
 
 export interface WorldSnapshotV5 {
   version: 5;
@@ -681,3 +941,54 @@ export interface WorldSnapshotV5 {
   players: Array<[string, PlayerSession]>;
   heat: number[];
 }
+
+export type DispatchSourceZone =
+  | 'haz'
+  | 'cold'
+  | 'bulk'
+  | 'high'
+  | 'general'
+  | 'any'
+  | 'A'
+  | 'B'
+  | 'C'
+  | 'D'
+  | 'E'
+  | 'U'
+  | 'W'
+  | 'X'
+  | 'Z';
+
+export type DispatchTargetBay =
+  | 'RET'
+  | 'E1'
+  | 'E2'
+  | 'E3'
+  | 'E4'
+  | 'E5'
+  | 'E6'
+  | 'E7'
+  | 'E8'
+  | 'auto';
+
+export type DispatchPriority = 'p0' | 'urgent' | 'standard';
+export type DispatchMode = 'reroute_and_spawn' | 'reroute_only' | 'spawn_only';
+
+export interface DispatchParams {
+  sourceZone: DispatchSourceZone;
+  targetBay: DispatchTargetBay;
+  priority?: DispatchPriority;
+  count?: number;
+  mode?: DispatchMode;
+}
+
+export interface DispatchResult {
+  sourceZone: DispatchSourceZone;
+  targetBay: string;
+  priority: DispatchPriority;
+  rerouted: number;
+  spawned: number;
+  orderIds: number[];
+  summary: string;
+}
+

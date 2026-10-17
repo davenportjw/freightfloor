@@ -224,6 +224,10 @@ resource "google_cloud_run_v2_service" "site" {
         value = "projects/${var.project_id}/locations/${var.region}/templates/warehouse-orders${var.suffix}"
       }
       env {
+        name  = "REQUIRE_PROXY_AUTH"
+        value = "1"
+      }
+      env {
         name = "TICKET_HMAC_KEY"
         value_source {
           secret_key_ref {
@@ -249,14 +253,14 @@ resource "google_cloud_run_v2_service" "site" {
   ]
 }
 
-# Public Invoker IAM for Site Services
-resource "google_cloud_run_v2_service_iam_member" "site_public_invoker" {
+# Lobby Gateway Invoker IAM for Site Services (No public allUsers access on backend engines)
+resource "google_cloud_run_v2_service_iam_member" "site_lobby_invoker" {
   for_each = google_cloud_run_v2_service.site
   project  = var.project_id
   location = var.region
   name     = each.value.name
   role     = "roles/run.invoker"
-  member   = "allUsers"
+  member   = "serviceAccount:${google_service_account.lobby.email}"
 }
 
 # Pub/Sub Push Invoker IAM for Site Services
@@ -297,7 +301,7 @@ resource "google_pubsub_subscription" "site_transfer_push" {
   }
 }
 
-# 8. Cloud Run v2 Service: Warehouse Lobby
+# 8. Cloud Run v2 Service: Warehouse Lobby (Only Publicly Exposed Service)
 resource "google_cloud_run_v2_service" "lobby" {
   project             = var.project_id
   name                = "warehouse-lobby${var.suffix}"
@@ -307,22 +311,22 @@ resource "google_cloud_run_v2_service" "lobby" {
 
   template {
     service_account                  = google_service_account.lobby.email
-    timeout                          = "60s"
-    max_instance_request_concurrency = 100
+    timeout                          = "3600s"
+    max_instance_request_concurrency = 300
 
     scaling {
       min_instance_count = 0
-      max_instance_count = 1
+      max_instance_count = 2
     }
 
     containers {
       image = var.lobby_image
 
       resources {
-        cpu_idle = true
+        cpu_idle = false
         limits = {
           cpu    = "1"
-          memory = "512Mi"
+          memory = "1Gi"
         }
       }
 

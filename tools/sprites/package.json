@@ -4,9 +4,40 @@
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
-    "build": "tsc -b",
-    "generate": "tsc -b && node dist/index.js",
-    "test": "vitest run"
+    "build": "wireit",
+    "generate": "wireit",
+    "test": "wireit"
+  },
+  "wireit": {
+    "build": {
+      "command": "tsc",
+      "files": [
+        "src/**",
+        "tsconfig.json",
+        "../../tsconfig.base.json"
+      ],
+      "output": [
+        "dist/**"
+      ],
+      "clean": "if-file-deleted"
+    },
+    "generate": {
+      "dependencies": [
+        "../../:sprites"
+      ]
+    },
+    "test": {
+      "command": "vitest run",
+      "dependencies": [
+        "build"
+      ],
+      "files": [
+        "test/**",
+        "src/**",
+        "tsconfig.json"
+      ],
+      "output": []
+    }
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.68"

@@ -6,9 +6,11 @@ import { BASE_FLEET, FLEET_CAP, MAX_TIER, TIER_STEP, type Vehicle } from '@wareh
 import type { UiCtx, UiModule } from './context.js';
 import { button, el } from './dom.js';
 import { DASH } from './format.js';
+import { createPanel, type PanelHandle } from './panel.js';
 
 export interface FleetView {
   text: string;
+  detail: string;
   title: string;
   canAdd: boolean;
   canRemove: boolean;
@@ -27,7 +29,15 @@ export function fleetView(
   welcomed: boolean,
 ): FleetView {
   if (!welcomed) {
-    return { text: DASH, title: 'Waiting for the site.', canAdd: false, canRemove: false, addTitle: '', removeTitle: '' };
+    return {
+      text: DASH,
+      detail: 'Waiting for the site…',
+      title: 'Waiting for the site.',
+      canAdd: false,
+      canRemove: false,
+      addTitle: '',
+      removeTitle: '',
+    };
   }
   const cap = limits?.fleetCap ?? FLEET_CAP;
   const maxTier = limits?.maxTier ?? MAX_TIER;
@@ -44,6 +54,7 @@ export function fleetView(
   const canRemove = removable > 0 && agents > minAgents;
   return {
     text: `${n} vehicles · wing ${tier}/${maxTier}`,
+    detail: `${agents} AI agents · ${humans} human drivers · Wing ${tier}/${maxTier}`,
     title:
       `${agents} AI agents, ${humans} human-driven. ` +
       (tier < maxTier ? `Next wing at ${next} vehicles.` : 'Facility is at full size.'),
@@ -62,22 +73,45 @@ export function fleetView(
   };
 }
 
-export function mountFleet(zone: HTMLElement, ctx: UiCtx): UiModule {
+export function mountFleet(zone: HTMLElement, ctx: UiCtx): UiModule & { panel: PanelHandle } {
   const info = el('span', { class: 'num fleet-info' });
   const down = button('−', 'btn', () => ctx.actions.manager('fleetRemove'));
   const up = button('+ Agent', 'btn', () => ctx.actions.manager('fleetAdd'));
-  const root = el('div', { class: 'hud pill-row fleet' }, [el('span', { class: 'label', text: 'Fleet' }), info, down, up]);
-  zone.append(root);
+  const detail = el('div', { class: 'fleet-detail muted num' });
+  const hint = el('div', {
+    class: 'hint',
+    text: 'Add AI forklifts to boost floor throughput. Every +6 vehicles past the base fleet unlocks a new warehouse wing (up to Tier 4), expanding racks and bays.',
+  });
+  const body = el('div', { class: 'fleet-body' }, [
+    el('div', { class: 'pill-row fleet-controls' }, [info, down, up]),
+    detail,
+    hint,
+  ]);
+  const panel = createPanel(
+    {
+      id: 'fleet',
+      title: 'Fleet',
+      zone: 'right',
+      defaultState: 'collapsed',
+      summary: () => fleetView(ctx.store.world.vehicles, ctx.store.world.tier, ctx.store.limits, ctx.store.welcomed).text,
+    },
+    body,
+  );
+  zone.append(panel.root);
   return {
+    panel,
     update() {
       const s = ctx.store;
       const v = fleetView(s.world.vehicles, s.world.tier, s.limits, s.welcomed);
       info.textContent = v.text;
       info.title = v.title;
+      detail.textContent = v.detail;
       up.disabled = !v.canAdd;
       up.title = v.addTitle;
       down.disabled = !v.canRemove;
       down.title = v.removeTitle;
+      panel.refreshSummary();
     },
   };
 }
+

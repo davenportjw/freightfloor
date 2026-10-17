@@ -4,11 +4,56 @@
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
-    "build": "tsc -b",
+    "build": "wireit",
     "start": "node dist/index.js",
-    "test": "vitest run",
-    "test:live": "vitest run -t live",
-    "test:redteam": "vitest run -t redteam"
+    "test": "wireit",
+    "test:live": "wireit",
+    "test:redteam": "wireit"
+  },
+  "wireit": {
+    "build": {
+      "command": "tsc",
+      "dependencies": [
+        "../../packages/protocol:build",
+        "../../packages/armor:build",
+        "../../packages/sim:build"
+      ],
+      "files": [
+        "src/**",
+        "tsconfig.json",
+        "../../tsconfig.base.json"
+      ],
+      "output": [
+        "dist/**"
+      ],
+      "clean": "if-file-deleted"
+    },
+    "test": {
+      "command": "vitest run",
+      "dependencies": [
+        "build"
+      ],
+      "files": [
+        "test/**",
+        "src/**",
+        "tsconfig.json"
+      ],
+      "output": []
+    },
+    "test:live": {
+      "command": "vitest run -t live",
+      "dependencies": [
+        "build"
+      ],
+      "files": []
+    },
+    "test:redteam": {
+      "command": "vitest run -t redteam",
+      "dependencies": [
+        "build"
+      ],
+      "files": []
+    }
   },
   "dependencies": {
     "@google-cloud/firestore": "^7.11.0",

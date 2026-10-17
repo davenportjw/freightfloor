@@ -1,10 +1,10 @@
 /** 3D vehicle models (AGV / counterbalance / reach) ported from the mock's vehicleParts/drawVehicle. */
-import type { Vehicle } from '@warehouse/sim';
+import { getSiteTheme, type Vehicle } from '@warehouse/sim';
 import type { Pose } from './motion.js';
 import type { Painter } from './painter.js';
 import { teamColor } from './scenery.js';
 
-interface Part {
+export interface Part {
   cx: number;
   cy: number;
   len: number;
@@ -23,10 +23,11 @@ export function modelOf(type: string | undefined): ModelKind {
   return 'counterbalance';
 }
 
-function vehicleParts(v: Vehicle, p: Pose, nowMs: number): Part[] {
+export function vehicleParts(v: Vehicle, p: Pose, nowMs: number, siteId = 'den-1'): Part[] {
   const ca = Math.cos(p.a);
   const sa = Math.sin(p.a);
   const team = teamColor(v);
+  const theme = getSiteTheme(siteId);
   const parts: Part[] = [];
   const model = modelOf(v.type);
   const add = (ox: number, oy: number, len: number, wid: number, z0: number, h: number, hex: string) =>
@@ -37,8 +38,22 @@ function vehicleParts(v: Vehicle, p: Pose, nowMs: number): Part[] {
   const cargoAt = (ox: number, z: number) =>
     cargo.forEach((o, i) => {
       const zz = z + i * 13;
-      add(ox, 0, 0.42, 0.4, zz, 3, '#C4A06B');
-      add(ox, 0, 0.36, 0.34, zz + 3, 9, o.p0 ? '#F59E0B' : '#D9B98A');
+      if (theme.cargoStyle === 'plants') {
+        add(ox, 0, 0.42, 0.4, zz, 2.5, '#A16207');
+        add(ox, 0, 0.3, 0.3, zz + 2.5, 4.5, o.p0 ? '#DC2626' : '#C2410C');
+        add(ox, 0, 0.38, 0.38, zz + 7.0, 5.5, '#16A34A');
+      } else if (theme.cargoStyle === 'tech') {
+        add(ox, 0, 0.42, 0.4, zz, 2.5, '#94A3B8');
+        add(ox, 0, 0.36, 0.34, zz + 2.5, 8.5, o.p0 ? '#991B1B' : '#1E293B');
+        add(ox, 0, 0.38, 0.36, zz + 6.5, 1.8, o.p0 ? '#F87171' : '#38BDF8');
+      } else if (theme.cargoStyle === 'artisan') {
+        add(ox, 0, 0.42, 0.4, zz, 2.5, '#A16207');
+        add(ox, 0, 0.34, 0.34, zz + 2.5, 9.0, o.p0 ? '#DC2626' : '#78350F');
+        add(ox, 0, 0.36, 0.36, zz + 6.2, 1.6, '#FBBF24');
+      } else {
+        add(ox, 0, 0.42, 0.4, zz, 3, '#C4A06B');
+        add(ox, 0, 0.36, 0.34, zz + 3, 9, o.p0 ? '#F59E0B' : '#D9B98A');
+      }
     });
   if (model === 'agv') {
     add(0, 0, 0.9, 0.52, 1.5, 6, '#E2E8F0');
@@ -77,6 +92,58 @@ function vehicleParts(v: Vehicle, p: Pose, nowMs: number): Part[] {
   return parts;
 }
 
+export const CHARGE_RATE_PER_MIN = 5;
+export const CHARGE_CUE_PERIOD_MS = 1200;
+
+export interface ChargeCueFrame {
+  active: boolean;
+  label: string;
+  zOffset: number;
+  alpha: number;
+  ringRadius: number;
+  ringZ: number;
+}
+
+/** True when an AI or human-driven vehicle is actively charging on a charger pad. */
+export function isVehicleCharging(
+  v: Pick<Vehicle, 'state' | 'humanCharging' | 'battery'>,
+): boolean {
+  return v.state === 'charging' || Boolean(v.humanCharging);
+}
+
+/**
+ * Computes the floating "+5" charge visual cue animation state (rising label offset,
+ * fade alpha, and ascending isometric energy ring) for a vehicle at `nowMs`.
+ */
+export function computeChargeVisualCue(
+  v: Pick<Vehicle, 'state' | 'humanCharging' | 'battery'>,
+  nowMs: number,
+  reducedMotion = false,
+): ChargeCueFrame {
+  if (!isVehicleCharging(v)) {
+    return { active: false, label: '', zOffset: 0, alpha: 0, ringRadius: 0, ringZ: 0 };
+  }
+  const label = `⚡ +${CHARGE_RATE_PER_MIN}`;
+  if (reducedMotion) {
+    return {
+      active: true,
+      label,
+      zOffset: 10,
+      alpha: 0.95,
+      ringRadius: 0.64,
+      ringZ: 14,
+    };
+  }
+  const phase =
+    (((nowMs % CHARGE_CUE_PERIOD_MS) + CHARGE_CUE_PERIOD_MS) % CHARGE_CUE_PERIOD_MS) /
+    CHARGE_CUE_PERIOD_MS;
+  const zOffset = phase * 22;
+  const alpha = Math.max(0.15, Math.sin(phase * Math.PI));
+  const ringZ = 4 + phase * 26;
+  const ringRadius = 0.56 + 0.14 * Math.sin(phase * Math.PI);
+  return { active: true, label, zOffset, alpha, ringRadius, ringZ };
+}
+
 export interface VehicleDrawState {
   worldT: number;
   dim: boolean;
@@ -84,9 +151,17 @@ export interface VehicleDrawState {
   brainError: boolean;
   pulse: (periodMs: number, phase?: number) => number; // 0..1 (constant when reduced motion)
   nowMs: number;
+  reducedMotion?: boolean;
+  siteId?: string;
 }
 
-export function drawVehicle(pt: Painter, v: Vehicle, p: Pose, s: VehicleDrawState): void {
+export function drawVehicle(
+  pt: Painter,
+  v: Vehicle,
+  p: Pose,
+  s: VehicleDrawState,
+  siteId = s.siteId ?? 'den-1',
+): void {
   const ctx = pt.ctx;
   const team = teamColor(v);
   ctx.save();
@@ -95,6 +170,16 @@ export function drawVehicle(pt: Painter, v: Vehicle, p: Pose, s: VehicleDrawStat
   pt.poly(pt.circleGrid(p.x, p.y, 0.72), null, team, s.emphasised ? 3 : 1.5); // team ring
   const speed = v.speedNow ?? 0;
   const stunned = s.worldT < (v.stunnedUntil ?? 0);
+  const boosting = (Boolean(v.input?.boost) || (v.human && Math.abs(speed) > 3.05)) && !stunned;
+  if (boosting) {
+    const hasCargo = (v.cargo?.length ?? 0) > 0;
+    pt.poly(
+      pt.circleGrid(p.x, p.y, 0.84),
+      hasCargo ? 'rgba(239,68,68,0.18)' : 'rgba(245,158,11,0.18)',
+      hasCargo ? '#EF4444' : '#F59E0B',
+      2.2,
+    );
+  }
   if (Math.abs(speed) > 0.3 && !stunned) {
     const ca = Math.cos(p.a);
     const sa = Math.sin(p.a);
@@ -111,11 +196,24 @@ export function drawVehicle(pt: Painter, v: Vehicle, p: Pose, s: VehicleDrawStat
       'rgba(253,230,138,0.22)',
     ); // headlight pool
   }
-  if (v.state === 'charging' || v.humanCharging) {
+  const cue = computeChargeVisualCue(v, s.nowMs, Boolean(s.reducedMotion));
+  if (cue.active) {
     const k = s.pulse(1257) * 2 - 1; // sin(now/200)
     pt.poly(pt.circleGrid(p.x, p.y, 0.8 + 0.08 * k), 'rgba(34,197,94,0.22)', '#16A34A', 2);
   }
-  for (const q of vehicleParts(v, p, s.nowMs)) pt.oBox(q.cx, q.cy, q.len, q.wid, p.a, q.z0, q.h, q.hex, 'rgba(15,23,42,0.28)');
+  for (const q of vehicleParts(v, p, s.nowMs, siteId))
+    pt.oBox(q.cx, q.cy, q.len, q.wid, p.a, q.z0, q.h, q.hex, 'rgba(15,23,42,0.28)');
+  if (cue.active) {
+    const ringPts: [number, number][] = [];
+    for (let i = 0; i < 16; i++) {
+      const a = (i / 16) * Math.PI * 2;
+      ringPts.push(pt.P(p.x + Math.cos(a) * cue.ringRadius, p.y + Math.sin(a) * cue.ringRadius, cue.ringZ));
+    }
+    ctx.save();
+    ctx.globalAlpha = (s.dim ? 0.4 : 1) * cue.alpha;
+    pt.poly(ringPts, null, '#22C55E', 1.8);
+    ctx.restore();
+  }
   if (stunned) {
     ctx.setLineDash([5, 4]);
     pt.poly(pt.circleGrid(p.x, p.y, 0.85), null, '#DC2626', 2.5);

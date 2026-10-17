@@ -17,7 +17,16 @@ export const PHASES = ['running', 'winding_down', 'break', 'resuming'] as const;
 export const PhaseSchema = z.enum(PHASES);
 export type Phase = z.infer<typeof PhaseSchema>;
 
-export const DIFFICULTY_NAMES = ['easy', 'normal', 'hard', 'calm', 'surge', 'crisis'] as const;
+export const DIFFICULTY_NAMES = [
+  'easy',
+  'normal',
+  'medium',
+  'hard',
+  'turbo',
+  'calm',
+  'surge',
+  'crisis',
+] as const;
 export const DifficultyNameSchema = z.enum(DIFFICULTY_NAMES);
 export type DifficultyName = z.infer<typeof DifficultyNameSchema>;
 
@@ -27,9 +36,61 @@ export const DifficultyLevelSchema = z.union([
 ]);
 export type DifficultyLevel = z.infer<typeof DifficultyLevelSchema>;
 
-export const MANAGER_OPS = ['rush', 'p0', 'cone', 'fleetAdd', 'fleetRemove'] as const;
+export const MANAGER_OPS = ['rush', 'p0', 'cone', 'fleetAdd', 'fleetRemove', 'dispatch'] as const;
 export const ManagerOpSchema = z.enum(MANAGER_OPS);
 export type ManagerOp = z.infer<typeof ManagerOpSchema>;
+
+export const DISPATCH_SOURCE_ZONES = [
+  'haz',
+  'cold',
+  'bulk',
+  'high',
+  'general',
+  'any',
+  'A',
+  'B',
+  'C',
+  'D',
+  'E',
+  'U',
+  'W',
+  'X',
+  'Z',
+] as const;
+export const DispatchSourceZoneSchema = z.enum(DISPATCH_SOURCE_ZONES);
+export type DispatchSourceZone = z.infer<typeof DispatchSourceZoneSchema>;
+
+export const DISPATCH_TARGET_BAYS = [
+  'RET',
+  'E1',
+  'E2',
+  'E3',
+  'E4',
+  'E5',
+  'E6',
+  'E7',
+  'E8',
+  'auto',
+] as const;
+export const DispatchTargetBaySchema = z.enum(DISPATCH_TARGET_BAYS);
+export type DispatchTargetBay = z.infer<typeof DispatchTargetBaySchema>;
+
+export const DISPATCH_PRIORITIES = ['p0', 'urgent', 'standard'] as const;
+export const DispatchPrioritySchema = z.enum(DISPATCH_PRIORITIES);
+export type DispatchPriority = z.infer<typeof DispatchPrioritySchema>;
+
+export const DISPATCH_MODES = ['reroute_and_spawn', 'reroute_only', 'spawn_only'] as const;
+export const DispatchModeSchema = z.enum(DISPATCH_MODES);
+export type DispatchMode = z.infer<typeof DispatchModeSchema>;
+
+export const DispatchParamsSchema = z.object({
+  sourceZone: DispatchSourceZoneSchema,
+  targetBay: DispatchTargetBaySchema,
+  priority: DispatchPrioritySchema.optional(),
+  count: z.number().int().min(1).max(8).optional(),
+  mode: DispatchModeSchema.optional(),
+});
+export type DispatchParams = z.infer<typeof DispatchParamsSchema>;
 
 export const DECISION_KINDS = ['contract', 'hazard', 'tactics', 'cards'] as const;
 export const DecisionKindSchema = z.enum(DECISION_KINDS);
@@ -45,22 +106,28 @@ export type AllowedGeminiModel = (typeof ALLOWED_GEMINI_MODELS)[number];
 /**
  * Normalizes a numeric (1..5) or named difficulty vote into canonical sim difficulty keys.
  */
-export function normaliseDifficultyKey(level: DifficultyLevel): 'easy' | 'normal' | 'hard' {
+export function normaliseDifficultyKey(
+  level: DifficultyLevel,
+): 'easy' | 'normal' | 'hard' | 'turbo' {
   if (typeof level === 'number') {
     if (level <= 1) return 'easy';
     if (level === 2) return 'normal';
-    return 'hard';
+    if (level === 3 || level === 4) return 'hard';
+    return 'turbo';
   }
   switch (level) {
     case 'easy':
     case 'calm':
       return 'easy';
     case 'normal':
+    case 'medium':
       return 'normal';
     case 'hard':
     case 'surge':
     case 'crisis':
       return 'hard';
+    case 'turbo':
+      return 'turbo';
   }
 }
 
@@ -83,10 +150,20 @@ export const dequantizeCoord = dequantiseCoord;
 // 3. Lobby HTTP Schemas & HMAC Ticket Helpers
 // ============================================================================
 
+export const RUN_MODES = ['blitz', 'freerange'] as const;
+export const RunModeSchema = z.enum(RUN_MODES);
+export type RunMode = z.infer<typeof RunModeSchema>;
+
+export const FREE_RANGE_SOFT_CAP = 26;
+export const FREE_RANGE_HARD_CAP = 30;
+export const RELOCATION_BONUS_PTS = 75;
+
 export const JoinRequestSchema = z.object({
-  name: z.string().min(1).max(64),
+  name: z.string().min(1).max(64).optional(),
   clientId: z.string().min(1).max(128),
   prefer: SiteIdSchema.optional(),
+  resume: z.string().min(2).max(64).optional(),
+  mode: RunModeSchema.optional(),
 });
 export type JoinRequest = z.infer<typeof JoinRequestSchema>;
 
@@ -95,6 +172,8 @@ export const JoinResponseSchema = z.object({
   wsUrl: z.string().min(1),
   ticket: z.string().min(1),
   expiresAt: z.number().int().nonnegative(),
+  name: z.string().min(2).max(20).optional(),
+  clientId: z.string().min(1).max(128).optional(),
 });
 export type JoinResponse = z.infer<typeof JoinResponseSchema>;
 
@@ -124,10 +203,13 @@ export const LeaderboardEntrySchema = z.object({
   siteId: SiteIdSchema.optional(),
   points: z.number().optional(),
   lifetimePoints: z.number().optional(),
+  bestBlitzPts: z.number().int().min(0).optional(),
   deliveries: z.number().int().nonnegative(),
   isBot: z.boolean().optional(),
 });
+export const PlayerLeaderboardEntrySchema = LeaderboardEntrySchema;
 export type LeaderboardEntry = z.infer<typeof LeaderboardEntrySchema>;
+export type PlayerLeaderboardEntry = LeaderboardEntry;
 
 export const NetworkResponseSchema = z.object({
   sites: z.array(SiteStatusSchema),
@@ -141,8 +223,16 @@ export const TicketPayloadSchema = z.object({
   siteId: SiteIdSchema,
   isBot: z.boolean(),
   exp: z.number().int().nonnegative(),
+  runMode: RunModeSchema.optional(),
+  carryPts: z.number().int().min(0).optional(),
+  carryDeliveries: z.number().int().min(0).optional(),
+  carryStreak: z.number().int().min(0).optional(),
+  carryCards: z.array(z.string()).max(6).optional(),
+  relocationBonus: z.number().int().min(0).optional(),
 });
+export const JoinTicketPayloadSchema = TicketPayloadSchema;
 export type TicketPayload = z.infer<typeof TicketPayloadSchema>;
+export type JoinTicketPayload = TicketPayload;
 
 export function signTicket(payload: TicketPayload, secret: string): string {
   const validated = TicketPayloadSchema.parse(payload);
@@ -182,6 +272,65 @@ export function verifyTicket(
   }
 }
 
+export const PROXY_HEADER_NAME = 'x-warehouse-proxy';
+
+export const ProxyHeaderPayloadSchema = z.object({
+  siteId: SiteIdSchema,
+  exp: z.number().int().nonnegative(),
+});
+export type ProxyHeaderPayload = z.infer<typeof ProxyHeaderPayloadSchema>;
+
+/**
+ * Signs a short-lived, domain-separated HMAC token proving a WebSocket upgrade
+ * or internal HTTP request was forwarded by the trusted frontend lobby gateway.
+ */
+export function signProxyHeader(
+  siteId: SiteId,
+  secret: string,
+  nowMs: number = Date.now(),
+  ttlMs: number = 60_000,
+): string {
+  const payload: ProxyHeaderPayload = ProxyHeaderPayloadSchema.parse({
+    siteId,
+    exp: nowMs + ttlMs,
+  });
+  const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const sig = createHmac('sha256', secret).update(`proxy:${body}`).digest('base64url');
+  return `${body}.${sig}`;
+}
+
+/**
+ * Verifies the `x-warehouse-proxy` HMAC token attached by the lobby gateway.
+ */
+export function verifyProxyHeader(
+  headerValue: string | undefined,
+  expectedSiteId: SiteId,
+  secret: string,
+  nowMs: number = Date.now(),
+): boolean {
+  if (!headerValue || typeof headerValue !== 'string') return false;
+  const parts = headerValue.trim().split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return false;
+  const [body, sig] = parts;
+  const expectedSig = createHmac('sha256', secret).update(`proxy:${body}`).digest('base64url');
+  const sigBuf = Buffer.from(sig, 'utf8');
+  const expectedBuf = Buffer.from(expectedSig, 'utf8');
+  if (sigBuf.length !== expectedBuf.length || !timingSafeEqual(sigBuf, expectedBuf)) {
+    return false;
+  }
+  try {
+    const raw = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    const parsed = ProxyHeaderPayloadSchema.safeParse(raw);
+    if (!parsed.success) return false;
+    if (parsed.data.siteId !== expectedSiteId) return false;
+    if (parsed.data.exp <= nowMs) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+
 // ============================================================================
 // 4. Client -> Site WebSocket Schemas
 // ============================================================================
@@ -198,6 +347,7 @@ export const InputMessageSchema = z.object({
   down: z.boolean(),
   left: z.boolean(),
   right: z.boolean(),
+  boost: z.boolean().optional(),
   seq: z.number().int().nonnegative(),
 });
 export type InputMessage = z.infer<typeof InputMessageSchema>;
@@ -223,8 +373,18 @@ export const ManagerMessageSchema = z.object({
   op: ManagerOpSchema,
   x: z.number().int().optional(),
   y: z.number().int().optional(),
+  dispatch: DispatchParamsSchema.optional(),
 });
 export type ManagerMessage = z.infer<typeof ManagerMessageSchema>;
+
+export const A2uiActionMessageSchema = z.object({
+  type: z.literal('a2uiAction'),
+  screenId: z.string().min(1),
+  actionId: z.string().min(1),
+  dispatch: DispatchParamsSchema.optional(),
+  managerOp: ManagerOpSchema.optional(),
+});
+export type A2uiActionMessage = z.infer<typeof A2uiActionMessageSchema>;
 
 export const KeepCardsMessageSchema = z.object({
   type: z.literal('keepCards'),
@@ -244,6 +404,97 @@ export const NlCommandMessageSchema = z.object({
 });
 export type NlCommandMessage = z.infer<typeof NlCommandMessageSchema>;
 
+export const VehicleIdSchema = z.string().min(1).max(32);
+export type VehicleId = z.infer<typeof VehicleIdSchema>;
+
+export const AgentPrioritySchema = z.enum([
+  'balanced',
+  'normal',
+  'p0_first',
+  'high_value',
+  'nearest',
+  'transfers',
+  'transfers_first',
+  'zone_focus',
+  'bay_focus',
+]);
+export type AgentPriority = z.infer<typeof AgentPrioritySchema>;
+
+export const ImmediateTaskKindSchema = z.enum([
+  'auto',
+  'charge',
+  'charge_now',
+  'return_home',
+  'deliver_cargo',
+  'pick_p0',
+  'pick_hazmat',
+  'clear_spill',
+  'zone',
+  'bay',
+  'order',
+]);
+export type ImmediateTaskKind = z.infer<typeof ImmediateTaskKindSchema>;
+
+export const PartialVehicleTacticsSchema = z.object({
+  speed: z.number().min(0.6).max(1.4).optional(),
+  respect: z.number().min(0.3).max(1.0).optional(),
+  buffer: z.number().int().min(1).max(4).optional(),
+  chargeAt: z.number().min(8).max(40).optional(),
+  batch: z.number().int().min(1).max(3).optional(),
+  flatPath: z.union([z.number().min(0.4).max(1.5), z.boolean()]).optional(),
+  preemptForP0: z.boolean().optional(),
+  poach: z.boolean().optional(),
+  note: z.string().max(120).optional(),
+});
+export type PartialVehicleTactics = z.infer<typeof PartialVehicleTacticsSchema>;
+
+export const AgentDirectiveSchema = z.object({
+  autopilot: z.boolean().optional(),
+  strategy: z.enum(['Sprinter', 'Batcher', 'Steady', 'Opportunist', 'Strategist']).optional(),
+  persona: z.enum(['Sprinter', 'Batcher', 'Steady', 'Opportunist', 'Strategist']).optional(),
+  tactics: PartialVehicleTacticsSchema.optional(),
+  focusZones: z.array(z.string().regex(/^[A-Z]$/)).max(6).optional(),
+  focusBays: z.array(z.string().regex(/^(?:B\d+|E\d+|RET)$/)).max(12).optional(),
+  preferredZone: z.string().regex(/^[A-Z]$/).optional(),
+  preferredBay: z.string().regex(/^(?:B\d+|E\d+|RET)$/).optional(),
+  preferredZones: z.array(z.string()).max(6).optional(),
+  preferredBays: z.array(z.string()).max(12).optional(),
+  avoidZones: z.array(z.string()).max(6).optional(),
+  priority: AgentPrioritySchema.optional(),
+  immediateTask: z
+    .union([
+      ImmediateTaskKindSchema,
+      z.object({
+        kind: ImmediateTaskKindSchema,
+        target: z.string().max(24).optional(),
+        orderId: z.number().int().nullable().optional(),
+        zone: z.string().nullable().optional(),
+        bay: z.string().nullable().optional(),
+      }),
+    ])
+    .nullable()
+    .optional(),
+  summary: z.string().max(120).optional(),
+  updatedAt: z.number().optional(),
+});
+export type AgentDirective = z.infer<typeof AgentDirectiveSchema>;
+
+const AgentCommandBaseSchema = z.object({
+  type: z.literal('agentCommand'),
+  vid: VehicleIdSchema.optional(),
+  text: z.string().min(1).max(200).optional(),
+  mode: z.enum(['autopilot', 'manual']).optional(),
+  directive: AgentDirectiveSchema.optional(),
+});
+
+export const AgentCommandMessageSchema = AgentCommandBaseSchema.refine(
+  (m) => Boolean(m.text && m.text.trim().length > 0) || Boolean(m.directive) || Boolean(m.mode),
+  {
+    message: 'agentCommand requires text, directive, or mode',
+  },
+);
+export type AgentCommandMessage = z.infer<typeof AgentCommandMessageSchema>;
+
 export const TransferSiteMessageSchema = z.object({
   type: z.literal('transferSite'),
   siteId: SiteIdSchema,
@@ -260,19 +511,48 @@ export const LayersMessageSchema = z.object({
 });
 export type LayersMessage = z.infer<typeof LayersMessageSchema>;
 
-export const ClientMessageSchema = z.discriminatedUnion('type', [
-  HelloMessageSchema,
-  InputMessageSchema,
-  InteractMessageSchema,
-  TakeWheelMessageSchema,
-  ReleaseMessageSchema,
-  ManagerMessageSchema,
-  KeepCardsMessageSchema,
-  VoteDifficultyMessageSchema,
-  NlCommandMessageSchema,
-  TransferSiteMessageSchema,
-  LayersMessageSchema,
-]);
+export const SetRunModeMessageSchema = z.object({
+  type: z.literal('setRunMode'),
+  mode: RunModeSchema,
+});
+export type SetRunModeMessage = z.infer<typeof SetRunModeMessageSchema>;
+
+export const AcceptRelocationMessageSchema = z.object({
+  type: z.literal('acceptRelocation'),
+  toSite: SiteIdSchema.optional(),
+  targetSite: SiteIdSchema.optional(),
+});
+export type AcceptRelocationMessage = z.infer<typeof AcceptRelocationMessageSchema>;
+
+export const ClientMessageSchema = z
+  .discriminatedUnion('type', [
+    HelloMessageSchema,
+    InputMessageSchema,
+    InteractMessageSchema,
+    TakeWheelMessageSchema,
+    ReleaseMessageSchema,
+    ManagerMessageSchema,
+    KeepCardsMessageSchema,
+    VoteDifficultyMessageSchema,
+    NlCommandMessageSchema,
+    AgentCommandBaseSchema,
+    TransferSiteMessageSchema,
+    LayersMessageSchema,
+    A2uiActionMessageSchema,
+    SetRunModeMessageSchema,
+    AcceptRelocationMessageSchema,
+  ])
+  .superRefine((m, ctx) => {
+    if (
+      m.type === 'agentCommand' &&
+      !(Boolean(m.text && m.text.trim().length > 0) || Boolean(m.directive) || Boolean(m.mode))
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'agentCommand requires text, directive, or mode',
+      });
+    }
+  });
 export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 
 export const CLIENT_MESSAGE_TYPES = [
@@ -285,8 +565,12 @@ export const CLIENT_MESSAGE_TYPES = [
   'keepCards',
   'voteDifficulty',
   'nlCommand',
+  'agentCommand',
   'transferSite',
   'layers',
+  'a2uiAction',
+  'setRunMode',
+  'acceptRelocation',
 ] as const;
 
 // ============================================================================
@@ -298,6 +582,7 @@ export const PlayerSessionInfoSchema = z.object({
   playerId: z.string().optional(),
   name: z.string().min(1),
   vid: z.string().nullable(),
+  role: z.enum(['driver', 'spectator']).optional(),
   siteId: SiteIdSchema,
   isBot: z.boolean().optional(),
 });
@@ -358,12 +643,35 @@ export const QuantisedVehicleDeltaSchema = z.object({
   orders: z.array(z.any()).optional(),
   driver: z.string().nullable().optional(),
   human: z.boolean().optional(),
+  humanCharging: z.boolean().optional(),
   strategy: z.string().optional(),
   type: z.string().optional(),
   braking: z.boolean().optional(),
   stunnedUntil: z.number().optional(),
   sPts: z.number().optional(),
   sShipped: z.number().optional(),
+  runMode: RunModeSchema.optional(),
+  runStartedAt: z.number().nullable().optional(),
+  runEndsAt: z.number().nullable().optional(),
+  runGraceUntil: z.number().nullable().optional(),
+  runTimeLeft: z.number().optional(),
+  runPts: z.number().optional(),
+  runDeliveries: z.number().int().optional(),
+  runOnTime: z.number().int().optional(),
+  runIncidents: z.number().int().optional(),
+  streak: z.number().int().optional(),
+  bestStreak: z.number().int().optional(),
+  /** Current fare combo multiplier (1.0 / 1.2 / 1.5 / 2.0). */
+  combo: z.number().optional(),
+  /** Best combo reached this run. */
+  comboBest: z.number().optional(),
+  /** Fares (delivered pallets) rated this run. */
+  fareTrips: z.number().int().nonnegative().optional(),
+  /** Speedy-rated fares this run. */
+  speedyTrips: z.number().int().nonnegative().optional(),
+  ppm: z.number().optional(),
+  onTimePct: z.number().nullable().optional(),
+  runFinished: z.boolean().optional(),
   msg: z.string().optional(),
   brainThinking: z.boolean().optional(),
   brainError: z.string().nullable().optional(),
@@ -375,6 +683,12 @@ export const QuantisedVehicleDeltaSchema = z.object({
   incidents: z.number().int().nonnegative().optional(),
   /** Lifetime near-miss count for this vehicle (sim `Vehicle.nearMisses`). */
   nearMisses: z.number().int().nonnegative().optional(),
+  /** Lifetime spill skid count for this vehicle (sim `Vehicle.skids`). */
+  skids: z.number().int().nonnegative().optional(),
+  /** Lifetime dropped pallet count on collision for this vehicle (sim `Vehicle.palletDrops`). */
+  palletDrops: z.number().int().nonnegative().optional(),
+  /** Lifetime delivered pallet count for this vehicle (sim `Vehicle.deliveries`). */
+  deliveries: z.number().int().nonnegative().optional(),
   /** The sim's per-vehicle `Tactics` object as stored (numbers rounded to 2 dp). */
   tactics: VehicleTacticsSchema.optional(),
   /** Next <= 12 planned waypoints flattened `[x0, y0, x1, y1, ...]` in integer tile units. Empty for human-driven vehicles. */
@@ -383,10 +697,16 @@ export const QuantisedVehicleDeltaSchema = z.object({
   extra: z.boolean().optional(),
   /** Metadata of the vehicle's last REAL applied brain decision. Omitted until one exists. */
   decision: VehicleDecisionSchema.optional(),
+  /** True when a human-owned vehicle is actively executing under Co-Pilot autopilot. */
+  autopilot: z.boolean().optional(),
+  /** Active Co-Pilot / Agent Designer directive on this vehicle. */
+  directive: AgentDirectiveSchema.nullable().optional(),
 });
 export const VehicleDeltaSchema = QuantisedVehicleDeltaSchema;
+export const WireVehicleSchema = QuantisedVehicleDeltaSchema;
 export type QuantisedVehicleDelta = z.infer<typeof QuantisedVehicleDeltaSchema>;
 export type VehicleDelta = QuantisedVehicleDelta;
+export type WireVehicle = QuantisedVehicleDelta;
 
 /** Real server-side limits, so clients never hardcode caps. */
 export const SiteLimitsSchema = z.object({
@@ -411,6 +731,7 @@ export type SiteLimits = z.infer<typeof SiteLimitsSchema>;
 
 export const WelcomeMessageSchema = z.object({
   type: z.literal('welcome'),
+  role: z.enum(['driver', 'spectator']).optional(),
   you: PlayerSessionInfoSchema,
   snapshot: z.any(),
   limits: SiteLimitsSchema.optional(),
@@ -525,6 +846,17 @@ export const CARD_TYPES = [
   'long_reach',
   'eco_cell',
   'high_roller',
+  'long_haul',
+  'local_hero',
+  'beat_planner',
+  'poacher',
+  'trailer_closer',
+  'crazy_stop',
+  'combo_king',
+  'double_nothing',
+  'rival_grudge',
+  'ghost_hunter',
+  'last_call',
 ] as const;
 
 export const CardSchema = z
@@ -541,6 +873,13 @@ export const CardSchema = z
     title: z.string(),
     desc: z.string(),
     modifiers: z.record(z.number()).optional(),
+    /** 'wild' cards are rare gambles (at most one held); default 'common'. */
+    rarity: z.enum(['common', 'wild']).optional(),
+    /** Never dealt to AI agents. */
+    humanOnly: z.boolean().optional(),
+    /** Perk granted once the card is completed (status 'done'). */
+    perk: z.record(z.number()).optional(),
+    completedAt: z.number().optional(),
   })
   .passthrough();
 export type Card = z.infer<typeof CardSchema>;
@@ -551,6 +890,8 @@ export const CardHandSchema = z
     offer: z.array(CardSchema).nullable(),
     cards: z.array(CardSchema),
     ai: z.boolean().optional(),
+    /** Max cards keepable from the current offer (1 on replacement draws). */
+    pick: z.number().int().positive().optional(),
   })
   .passthrough();
 export type CardHand = z.infer<typeof CardHandSchema>;
@@ -577,6 +918,7 @@ export type DeltaMessage = z.infer<typeof DeltaMessageSchema>;
 export const AckMessageSchema = z.object({
   type: z.literal('ack'),
   seq: z.number().int().nonnegative(),
+  t: z.number().optional(),
   x: z.number().optional(),
   y: z.number().optional(),
   vx: z.number().optional(),
@@ -633,11 +975,83 @@ export type ErrorMessage = z.infer<typeof ErrorMessageSchema>;
 export const CommandEchoMessageSchema = z.object({
   type: z.literal('commandEcho'),
   text: z.string(),
-  parsed: z.any(),
-  executed: z.boolean(),
+  parsed: z.any().optional(),
+  executed: z.boolean().optional(),
   reason: z.string().optional(),
+  status: z.enum(['executed', 'rejected']).optional(),
+  summary: z.string().optional(),
+  directive: AgentDirectiveSchema.optional(),
 });
 export type CommandEchoMessage = z.infer<typeof CommandEchoMessageSchema>;
+
+export const A2uiTelemetryPillSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  value: z.string().min(1),
+  tone: z.enum(['neutral', 'amber', 'red', 'green', 'blue', 'purple']).optional(),
+});
+export type A2uiTelemetryPill = z.infer<typeof A2uiTelemetryPillSchema>;
+
+export const A2uiOptionChipSchema = z.object({
+  value: z.string().min(1),
+  label: z.string().min(1),
+  badge: z.string().optional(),
+});
+export type A2uiOptionChip = z.infer<typeof A2uiOptionChipSchema>;
+
+export const A2uiSelectorGroupSchema = z.object({
+  field: z.enum(['sourceZone', 'targetBay', 'priority', 'count']),
+  label: z.string().min(1),
+  selected: z.string().min(1),
+  options: z.array(A2uiOptionChipSchema).min(1),
+});
+export type A2uiSelectorGroup = z.infer<typeof A2uiSelectorGroupSchema>;
+
+export const A2uiPresetButtonSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  desc: z.string().min(1),
+  dispatch: DispatchParamsSchema.optional(),
+  managerOp: ManagerOpSchema.optional(),
+});
+export type A2uiPresetButton = z.infer<typeof A2uiPresetButtonSchema>;
+
+export const A2uiScreenMessageSchema = z.object({
+  type: z.literal('a2uiScreen'),
+  screenId: z.string().min(1),
+  title: z.string().min(1),
+  subtitle: z.string().min(1),
+  rawText: z.string().optional(),
+  clarifyQuestion: z.string().optional(),
+  telemetry: z.array(A2uiTelemetryPillSchema),
+  selectors: z.array(A2uiSelectorGroupSchema),
+  presets: z.array(A2uiPresetButtonSchema),
+  recommendedDispatch: DispatchParamsSchema,
+  cooldownLeftMs: z.number().int().nonnegative().optional(),
+});
+export type A2uiScreenMessage = z.infer<typeof A2uiScreenMessageSchema>;
+
+export const RelocationOfferMessageSchema = z.object({
+  type: z.literal('relocationOffer'),
+  fromSite: SiteIdSchema,
+  toSite: SiteIdSchema.optional(),
+  targetSite: SiteIdSchema.optional(),
+  targetDrivers: z.number().int().min(0).optional(),
+  bonusPts: z.number().int().min(1),
+  expiresAt: z.number(),
+  reason: z.string(),
+});
+export type RelocationOfferMessage = z.infer<typeof RelocationOfferMessageSchema>;
+
+export const RelocateShardMessageSchema = z.object({
+  type: z.literal('relocateShard'),
+  toSite: SiteIdSchema.optional(),
+  siteId: SiteIdSchema.optional(),
+  wsUrl: z.string(),
+  ticket: z.string(),
+  bonusPts: z.number().int().min(0),
+});
+export type RelocateShardMessage = z.infer<typeof RelocateShardMessageSchema>;
 
 export const ServerMessageSchema = z.discriminatedUnion('type', [
   WelcomeMessageSchema,
@@ -648,6 +1062,9 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
   PhaseMessageSchema,
   ErrorMessageSchema,
   CommandEchoMessageSchema,
+  A2uiScreenMessageSchema,
+  RelocationOfferMessageSchema,
+  RelocateShardMessageSchema,
 ]);
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;
 
@@ -660,6 +1077,9 @@ export const SERVER_MESSAGE_TYPES = [
   'phase',
   'error',
   'commandEcho',
+  'a2uiScreen',
+  'relocationOffer',
+  'relocateShard',
 ] as const;
 
 // ============================================================================
@@ -713,6 +1133,7 @@ export const NlOrderActionSchema = z
     action: ManagerOpSchema,
     x: z.number().int().min(0).max(59).optional(),
     y: z.number().int().min(0).max(120).optional(),
+    dispatch: DispatchParamsSchema.optional(),
     echo: z.string().optional(),
   })
   .strict()
@@ -720,6 +1141,16 @@ export const NlOrderActionSchema = z
     message: 'cone action requires integer x and y coordinates',
   });
 export type NlOrderAction = z.infer<typeof NlOrderActionSchema>;
+
+export const NlOrderClarifySchema = z
+  .object({
+    action: z.literal('clarify'),
+    clarifyQuestion: z.string().min(1).max(200),
+    dispatch: DispatchParamsSchema.optional(),
+    echo: z.string().optional(),
+  })
+  .strict();
+export type NlOrderClarify = z.infer<typeof NlOrderClarifySchema>;
 
 export const NlOrderRefusalSchema = z
   .object({
@@ -743,6 +1174,7 @@ export const NlOrderSimpleRefusalSchema = z
 
 export const NlOrderParseSchema = z.union([
   NlOrderActionSchema,
+  NlOrderClarifySchema,
   NlOrderRefusalSchema,
   NlOrderSimpleRefusalSchema,
 ]);
@@ -822,8 +1254,8 @@ export const NL_ORDER_RESPONSE_SCHEMA: JsonSchemaObject = {
   properties: {
     action: {
       type: 'STRING',
-      enum: ['rush', 'p0', 'cone', 'fleetAdd', 'fleetRemove', 'refuse'],
-      description: 'Translated manager command or refuse.',
+      enum: ['rush', 'p0', 'cone', 'fleetAdd', 'fleetRemove', 'dispatch', 'clarify', 'refuse'],
+      description: 'Translated manager command, clarify (interactive A2UI screen), or refuse.',
     },
     x: {
       type: 'INTEGER',
@@ -832,6 +1264,41 @@ export const NL_ORDER_RESPONSE_SCHEMA: JsonSchemaObject = {
     y: {
       type: 'INTEGER',
       description: 'Tile Y coordinate (0..120), required only when action is cone.',
+    },
+    dispatch: {
+      type: 'OBJECT',
+      description: 'Zone-to-bay routing parameters when action is dispatch or clarify.',
+      properties: {
+        sourceZone: {
+          type: 'STRING',
+          enum: DISPATCH_SOURCE_ZONES,
+          description: 'Source district or rack zone (haz, cold, bulk, high, general, any, A..Z).',
+        },
+        targetBay: {
+          type: 'STRING',
+          enum: DISPATCH_TARGET_BAYS,
+          description: 'Destination bay (RET for Returns & QA, E1..E8, or auto).',
+        },
+        priority: {
+          type: 'STRING',
+          enum: DISPATCH_PRIORITIES,
+          description: 'Order priority tier (p0, urgent, standard).',
+        },
+        count: {
+          type: 'INTEGER',
+          description: 'Number of pallets to route/spawn (1..8).',
+        },
+        mode: {
+          type: 'STRING',
+          enum: DISPATCH_MODES,
+          description: 'Whether to reroute existing orders and/or spawn new ones.',
+        },
+      },
+      required: ['sourceZone', 'targetBay'],
+    },
+    clarifyQuestion: {
+      type: 'STRING',
+      description: 'Interactive clarification prompt when action is clarify (<= 160 chars).',
     },
     echo: {
       type: 'STRING',
@@ -844,6 +1311,66 @@ export const NL_ORDER_RESPONSE_SCHEMA: JsonSchemaObject = {
   },
   required: ['action'],
 };
+
+export const AGENT_COMMAND_RESPONSE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    refuse: {
+      type: 'STRING',
+      description: 'Set only if the request is out-of-scope, unsafe, or unintelligible.',
+    },
+    autopilot: {
+      type: 'BOOLEAN',
+      description:
+        'True to engage/keep autonomous driving; false if the user explicitly asks to stop/park/manual.',
+    },
+    strategy: {
+      type: 'STRING',
+      enum: ['Sprinter', 'Batcher', 'Steady', 'Opportunist', 'Strategist'],
+    },
+    tactics: {
+      type: 'OBJECT',
+      properties: {
+        speed: { type: 'NUMBER' },
+        respect: { type: 'NUMBER' },
+        buffer: { type: 'INTEGER' },
+        chargeAt: { type: 'NUMBER' },
+        batch: { type: 'INTEGER' },
+        flatPath: { type: 'NUMBER' },
+        preemptForP0: { type: 'BOOLEAN' },
+        poach: { type: 'BOOLEAN' },
+        note: { type: 'STRING' },
+      },
+    },
+    focusZones: {
+      type: 'ARRAY',
+      items: { type: 'STRING' },
+      description: 'Up to 6 single-letter warehouse zones (e.g. ["A", "C"]).',
+    },
+    focusBays: {
+      type: 'ARRAY',
+      items: { type: 'STRING' },
+      description: 'Up to 12 shipping bays (e.g. ["B1", "B4", "E1", "RET"]).',
+    },
+    priority: {
+      type: 'STRING',
+      enum: ['normal', 'p0_first', 'transfers_first', 'nearest'],
+    },
+    immediateTask: {
+      type: 'OBJECT',
+      properties: {
+        kind: { type: 'STRING', enum: ['auto', 'charge', 'zone', 'bay', 'order'] },
+        target: { type: 'STRING' },
+      },
+      required: ['kind'],
+    },
+    summary: {
+      type: 'STRING',
+      description: 'Concise confirmation of what the forklift will do (max 120 chars).',
+    },
+  },
+  required: ['summary'],
+} as const;
 
 export function schemaForDecisionKind(kind: DecisionKind): JsonSchemaObject {
   return GEMINI_RESPONSE_SCHEMAS[kind];

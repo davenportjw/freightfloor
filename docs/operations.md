@@ -8,10 +8,13 @@
 # Install dependencies across all workspaces
 npm install
 
-# Build all packages, apps, and tools
+# Build all packages, apps, and tools (orchestrated & cached via Wireit DAG)
 npm run build
 
-# Run fast offline unit tests (sim, protocol, armor, site, lobby)
+# Build a single workspace and its transitive dependencies automatically via Wireit
+npm run build -w @warehouse/client
+
+# Run fast offline unit tests (Wireit ensures upstream builds are up-to-date first)
 npm test
 
 # Run live Vertex AI Gemini 3.5 Flash-Lite brain verification
@@ -43,10 +46,10 @@ terraform -chdir=infra apply -var="project_id=davenport-boutique" -var="suffix="
 ```
 
 This provisions:
-- **4 Site Shards**: `site-den-1` (`min=1`, `IDLE_POLICY=run`, 20 agents), `site-slc-2`, `site-phx-3`, `site-abq-4` (`min=0`, `IDLE_POLICY=break`, 12 agents).
-- **Lobby Service**: `warehouse-lobby` (`min=0, max=3`).
+- **4 Private Site Shards**: `site-den-1` (`min=1`, `IDLE_POLICY=run`, 20 agents), `site-slc-2`, `site-phx-3`, `site-abq-4` (`min=0`, `IDLE_POLICY=break`, 12 agents). Restricted via Cloud Run IAM (`roles/run.invoker`) exclusively to `warehouse-lobby` and `warehouse-pubsub-push` with `REQUIRE_PROXY_AUTH=1`.
+- **Public Lobby & WebSocket Gateway Service**: `warehouse-lobby` (`min=0, max=3`), the only service with `allUsers` invoker access, serving static assets and proxying `/ws?site=<siteId>` to the private site shards.
 - **Pub/Sub**: `site-transfers` topic, `site-transfers-dlq`, and 4 filtered OIDC push subscriptions (`attributes.toSite = "<siteId>"`).
-- **Secret Manager**: `ticket-hmac-key` with a generated 64-character secret version.
+- **Secret Manager**: `ticket-hmac-key` with a generated 64-character secret version used for both join tickets and `x-warehouse-proxy` headers.
 - **Firestore**: 7-day TTL policy on `journal.expireAt`.
 
 ### Step 3: Live Verification Probes

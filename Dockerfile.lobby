@@ -29,13 +29,7 @@ COPY tools/sprites ./tools/sprites
 COPY apps/client ./apps/client
 COPY apps/lobby ./apps/lobby
 
-RUN npm run build -w @warehouse/protocol && \
-    npm run build -w @warehouse/armor && \
-    npm run build -w @warehouse/sim && \
-    npm run build -w @warehouse/sprites && \
-    npm run sprites --if-present && \
-    npm run build -w @warehouse/client && \
-    npm run build -w @warehouse/lobby
+RUN npm run build -w @warehouse/client && npm run build -w @warehouse/lobby
 
 # Stage 2: Production Runtime
 FROM node:24-slim AS runner

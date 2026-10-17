@@ -8,6 +8,7 @@ import {
   MAX_TIER,
   Point,
   Rack,
+  SiteId,
   Slot,
   StructInfo,
   TIER_ROWS,
@@ -44,23 +45,49 @@ export const K_PICK = KIND_IDS.map((k) => KINDS[k].pick);
 
 const BAND_Y = [5, 14, 23, 32];
 const BLOCK_X = [7, 12, 17, 22, 27, 32, 37, 42, 47];
-const LAYOUT: Array<Array<string | null>> = [
-  ['A:ambient', 'B:ambient', 'C:ambient', 'D:ambient', 'E:cold', 'F:cold', 'G:bulk', 'H:bulk', null],
-  ['I:ambient', 'J:ambient', 'K:fast', 'L:fast', 'M:cold', 'N:cold', null, null, 'O:haz'],
-  ['P:fast', 'Q:fast', 'R:ambient', 'S:ambient', 'T:ambient', 'U:ambient', 'V:bulk', 'W:bulk', null],
-  [null, null, null, 'X:ambient', 'Y:ambient', 'Z:haz', null, null, null],
-];
-const WING_KINDS: DistrictKind[] = [
-  'ambient',
-  'ambient',
-  'fast',
-  'fast',
-  'ambient',
-  'cold',
-  'cold',
-  'bulk',
-  'bulk',
-];
+
+type CanonicalSiteId = 'den-1' | 'slc-2' | 'phx-3' | 'abq-4';
+
+function normalizeSiteId(siteId?: SiteId): CanonicalSiteId {
+  if (siteId === 'slc-2' || siteId === 'phx-3' || siteId === 'abq-4') {
+    return siteId;
+  }
+  return 'den-1';
+}
+
+const SITE_LAYOUTS: Record<CanonicalSiteId, Array<Array<string | null>>> = {
+  'den-1': [
+    ['A:ambient', 'B:ambient', 'C:ambient', 'D:ambient', 'E:cold', 'F:cold', 'G:bulk', 'H:bulk', null],
+    ['I:ambient', 'J:ambient', 'K:fast', 'L:fast', 'M:cold', 'N:cold', null, null, 'O:haz'],
+    ['P:fast', 'Q:fast', 'R:ambient', 'S:ambient', 'T:ambient', 'U:ambient', 'V:bulk', 'W:bulk', null],
+    [null, null, null, 'X:ambient', 'Y:ambient', 'Z:haz', null, null, null],
+  ],
+  'slc-2': [
+    ['A:cold', 'B:cold', null, 'C:ambient', 'D:ambient', 'E:fast', null, 'F:bulk', 'G:bulk'],
+    ['H:cold', 'I:cold', null, 'J:fast', 'K:fast', 'L:ambient', null, 'M:ambient', 'N:haz'],
+    ['O:ambient', 'P:ambient', null, 'Q:cold', 'R:cold', 'U:fast', null, 'V:bulk', 'W:bulk'],
+    ['X:bulk', 'Y:bulk', null, null, 'Z:haz', null, null, 'S:ambient', 'T:ambient'],
+  ],
+  'phx-3': [
+    [null, 'A:fast', 'B:fast', 'C:cold', 'D:cold', 'E:fast', 'F:fast', null, 'G:haz'],
+    ['H:ambient', 'I:fast', 'J:fast', null, null, 'K:cold', 'L:cold', 'M:bulk', 'N:haz'],
+    [null, 'O:fast', 'P:fast', 'Q:ambient', 'R:ambient', 'U:fast', 'V:bulk', 'W:bulk', null],
+    ['X:bulk', 'Y:bulk', null, 'S:cold', 'T:cold', 'Z:haz', null, null, null],
+  ],
+  'abq-4': [
+    ['A:bulk', 'B:bulk', 'C:ambient', 'D:ambient', null, 'E:cold', 'F:bulk', 'G:bulk', null],
+    [null, 'H:bulk', 'I:ambient', 'J:fast', null, 'K:fast', 'L:ambient', 'M:haz', null],
+    ['N:bulk', 'O:bulk', 'P:ambient', 'Q:ambient', null, 'R:fast', 'U:ambient', 'W:bulk', null],
+    [null, null, 'X:ambient', 'Y:bulk', null, 'Z:haz', 'S:ambient', 'T:bulk', null],
+  ],
+};
+
+const SITE_WING_KINDS: Record<CanonicalSiteId, DistrictKind[]> = {
+  'den-1': ['ambient', 'ambient', 'fast', 'fast', 'ambient', 'cold', 'cold', 'bulk', 'bulk'],
+  'slc-2': ['cold', 'cold', 'ambient', 'fast', 'fast', 'ambient', 'cold', 'bulk', 'ambient'],
+  'phx-3': ['fast', 'fast', 'cold', 'cold', 'fast', 'haz', 'ambient', 'bulk', 'fast'],
+  'abq-4': ['bulk', 'bulk', 'ambient', 'ambient', 'fast', 'bulk', 'cold', 'ambient', 'bulk'],
+};
 
 export function tierFor(vehicleCount: number): number {
   return Math.max(0, Math.min(MAX_TIER, Math.ceil((vehicleCount - BASE_FLEET) / TIER_STEP)));
@@ -84,8 +111,9 @@ function checkIsHighway(hwyY: number[], x: number, y: number): boolean {
   );
 }
 
-export function buildMap(tierInput = 0): WorldMap {
+export function buildMap(tierInput = 0, siteId: SiteId = 'den-1'): WorldMap {
   const tier = Math.max(0, Math.min(MAX_TIER, tierInput | 0));
+  const canonicalSite = normalizeSiteId(siteId);
   const w = MAP_W;
   const h = tier ? BASE_H + 3 + TIER_ROWS * tier : BASE_H;
   const hwyY: number[] = [...BASE_HWY_Y];
@@ -105,14 +133,16 @@ export function buildMap(tierInput = 0): WorldMap {
   const staticBlock = new Uint8Array(w * h);
 
   const bandY = BAND_Y.slice();
-  const layout = LAYOUT.map((row) => row.slice());
+  const baseLayout = SITE_LAYOUTS[canonicalSite];
+  const wingKinds = SITE_WING_KINDS[canonicalSite];
+  const layout = baseLayout.map((row) => row.slice());
 
   for (let j = 1; j <= tier; j++) {
     hwyY.push(43 + TIER_ROWS * (j - 1));
     bandY.push(46 + TIER_ROWS * (j - 1));
     layout.push(
       Array.from({ length: 9 }, (_, ci) =>
-        ci === 8 ? null : `${'ABCDEFGHI'[ci]}${j}:${WING_KINDS[(ci + j * 3) % 9]}`,
+        ci === 8 ? null : `${'ABCDEFGHI'[ci]}${j}:${wingKinds[(ci + j * 3) % wingKinds.length]}`,
       ),
     );
   }
@@ -176,15 +206,59 @@ export function buildMap(tierInput = 0): WorldMap {
     }
   });
 
-  addArea('returns', 6, 31, 15, 7);
-  [6, 11, 16].forEach((x) => structs.push({ type: 'bench', x, y: 33, w: 3, h: 2 }));
-  addArea('staging', 36, 31, 15, 7);
-  addArea('staging', 46, 4, 5, 7);
-  addArea('staging', 46, 22, 5, 7);
-  addArea('office', 36, 14, 4, 5, 'Admin');
-  structs.push({ type: 'office', x: 36, y: 14, w: 4, h: 5, name: 'Admin' });
-  addArea('office', 41, 14, 4, 5, 'Break room');
-  structs.push({ type: 'break', x: 41, y: 14, w: 4, h: 5, name: 'Break room' });
+  let retDropX = 11;
+  if (canonicalSite === 'slc-2') {
+    addArea('office', 16, 14, 4, 5, 'Seed Vault');
+    structs.push({ type: 'office', x: 16, y: 14, w: 4, h: 5, name: 'Seed Vault' });
+    addArea('office', 36, 14, 4, 5, 'Conservatory Lounge');
+    structs.push({ type: 'break', x: 36, y: 14, w: 4, h: 5, name: 'Conservatory Lounge' });
+    addArea('returns', 16, 31, 9, 7, 'Pruning & Root QA');
+    structs.push({ type: 'bench', x: 16, y: 34, w: 3, h: 2 });
+    structs.push({ type: 'bench', x: 21, y: 33, w: 3, h: 2 });
+    addArea('staging', 36, 4, 4, 7, 'Canopy Staging');
+    addArea('staging', 36, 22, 4, 7, 'Terrarium Prep');
+    addArea('staging', 31, 31, 9, 7, 'Acclimation Deck');
+    retDropX = 17;
+  } else if (canonicalSite === 'phx-3') {
+    addArea('office', 21, 14, 4, 5, 'Cleanroom Control');
+    structs.push({ type: 'office', x: 21, y: 14, w: 4, h: 5, name: 'Cleanroom Control' });
+    addArea('office', 26, 14, 4, 5, 'Gowning & Airlock');
+    structs.push({ type: 'break', x: 26, y: 14, w: 4, h: 5, name: 'Gowning & Airlock' });
+    addArea('returns', 16, 31, 4, 7, 'Metrology QA');
+    structs.push({ type: 'bench', x: 16, y: 34, w: 3, h: 2 });
+    addArea('staging', 6, 4, 4, 7, 'FOUP Airlock N');
+    addArea('staging', 41, 4, 4, 7, 'Litho Staging');
+    addArea('staging', 6, 22, 4, 7, 'FOUP Airlock S');
+    addArea('staging', 46, 22, 5, 7, 'Wafer Outbound');
+    addArea('staging', 36, 31, 15, 7, 'Cleanroom Dock Staging');
+    structs.push({ type: 'bench', x: 36, y: 33, w: 3, h: 2 });
+    retDropX = 17;
+  } else if (canonicalSite === 'abq-4') {
+    addArea('office', 26, 14, 4, 5, 'Cupping Lab');
+    structs.push({ type: 'office', x: 26, y: 14, w: 4, h: 5, name: 'Cupping Lab' });
+    addArea('office', 26, 23, 4, 5, 'Tasting Patio');
+    structs.push({ type: 'break', x: 26, y: 23, w: 4, h: 5, name: 'Tasting Patio' });
+    addArea('returns', 6, 31, 9, 7, 'Cooperage & QA');
+    [6, 11].forEach((x) => structs.push({ type: 'bench', x, y: 33, w: 3, h: 2 }));
+    addArea('staging', 26, 4, 4, 7, 'Roastery Courtyard');
+    addArea('staging', 26, 31, 4, 7, 'Kiln Courtyard');
+    addArea('staging', 46, 4, 5, 7);
+    addArea('staging', 46, 13, 5, 7);
+    addArea('staging', 46, 22, 5, 7);
+    addArea('staging', 46, 31, 5, 7);
+    retDropX = 11;
+  } else {
+    addArea('returns', 6, 31, 15, 7);
+    [6, 11, 16].forEach((x) => structs.push({ type: 'bench', x, y: 33, w: 3, h: 2 }));
+    addArea('staging', 36, 31, 15, 7);
+    addArea('staging', 46, 4, 5, 7);
+    addArea('staging', 46, 22, 5, 7);
+    addArea('office', 36, 14, 4, 5, 'Admin');
+    structs.push({ type: 'office', x: 36, y: 14, w: 4, h: 5, name: 'Admin' });
+    addArea('office', 41, 14, 4, 5, 'Break room');
+    structs.push({ type: 'break', x: 41, y: 14, w: 4, h: 5, name: 'Break room' });
+    retDropX = 11;
+  }
   addArea('charging', 7, 40, 26, 2);
 
   bandY.forEach((y0) => {
@@ -208,6 +282,20 @@ export function buildMap(tierInput = 0): WorldMap {
         label: isTransferBay ? '→ NET' : id,
       });
     });
+
+  // Returns & QA containment drop bay ('RET') directly in front of the site's Returns bench
+  bays.push({
+    id: 'RET',
+    y: 32,
+    dropX: retDropX,
+    tiles: [
+      { x: retDropX - 1, y: 32 },
+      { x: retDropX, y: 32 },
+      { x: retDropX + 1, y: 32 },
+    ],
+    isTransferBay: false,
+    label: 'RET',
+  });
 
   bandY.forEach((y0, i) => westDocks.push({ id: `W${i + 1}`, x: 1, y: y0 + 2 }));
 
@@ -236,6 +324,7 @@ export function buildMap(tierInput = 0): WorldMap {
   });
 
   return {
+    siteId: canonicalSite,
     tier,
     w,
     h,

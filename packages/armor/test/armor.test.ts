@@ -6,6 +6,8 @@ import {
   ARMOR_REASON_CODES,
   ArmorGuard,
   ArmorReasonCodeSchema,
+  CALLSIGN_NOUNS,
+  DRIVER_CALLSIGN_ADJECTIVES,
   MUTE_DURATION_MS,
   RATE_WINDOW_MS,
   RESERVED_NAME_PREFIXES,
@@ -174,6 +176,39 @@ describe('@warehouse/armor', () => {
         expect.objectContaining({ ok: false, code: 'reserved_name' }),
       );
     });
+
+    it('generates deterministic, non-overlapping Adj-Noun driver callsigns and validates them', async () => {
+      const { generateDriverCallsign, isGeneratedCallsign } = await import('../src/index.js');
+      const existing = new Set<string>();
+      const c1 = generateDriverCallsign('client-alpha-1', existing);
+      expect(isGeneratedCallsign(c1)).toBe(true);
+      expect(validateDisplayName(c1)).toEqual({ ok: true, name: c1, isBot: false });
+
+      // Deterministic for same seed when not colliding
+      expect(generateDriverCallsign('client-alpha-1', new Set())).toBe(c1);
+
+      // Avoids collisions when c1 is already taken
+      existing.add(c1);
+      const c2 = generateDriverCallsign('client-alpha-1', existing);
+      expect(c2).not.toBe(c1);
+      expect(isGeneratedCallsign(c2)).toBe(true);
+
+      // Rejects arbitrary custom strings
+      expect(isGeneratedCallsign('CustomHackerName')).toBe(false);
+    });
+
+    it('validates all generated Adjective-Noun-digits callsigns', () => {
+      const failures: string[] = [];
+      for (const adj of DRIVER_CALLSIGN_ADJECTIVES) {
+        for (const noun of CALLSIGN_NOUNS) {
+          for (const num of ['10', '55', '71']) {
+            const name = `${adj}-${noun}-${num}`;
+            if (!validateDisplayName(name).ok) failures.push(name);
+          }
+        }
+      }
+      expect(failures).toEqual([]);
+    });
   });
 
   describe('Layer 3: Nonce Fencing & Untrusted Text Isolation', () => {
@@ -256,6 +291,64 @@ describe('@warehouse/armor', () => {
       expect(validateParsedOrder('{not json')).toEqual(
         expect.objectContaining({ ok: false, code: 'parse_invalid' }),
       );
+
+      // Dispatch action with sourceZone + targetBay + priority + count is accepted
+      expect(
+        validateParsedOrder({
+          action: 'dispatch',
+          dispatch: {
+            sourceZone: 'haz',
+            targetBay: 'RET',
+            priority: 'p0',
+            count: 3,
+            mode: 'reroute_and_spawn',
+          },
+          echo: 'Hazmat pallets routed to Returns & QA',
+        }),
+      ).toEqual({
+        ok: true,
+        command: {
+          action: 'dispatch',
+          dispatch: {
+            sourceZone: 'haz',
+            targetBay: 'RET',
+            priority: 'p0',
+            count: 3,
+            mode: 'reroute_and_spawn',
+          },
+          echo: 'Hazmat pallets routed to Returns & QA',
+        },
+      });
+
+      // Clarify action triggers interactive A2UI screen
+      expect(
+        validateParsedOrder({
+          action: 'clarify',
+          clarifyQuestion: 'Select source district and destination bay:',
+          dispatch: {
+            sourceZone: 'any',
+            targetBay: 'auto',
+          },
+          echo: 'Opening Dispatch & Objectives console',
+        }),
+      ).toEqual({
+        ok: true,
+        command: {
+          action: 'clarify',
+          clarifyQuestion: 'Select source district and destination bay:',
+          dispatch: {
+            sourceZone: 'any',
+            targetBay: 'auto',
+          },
+          echo: 'Opening Dispatch & Objectives console',
+        },
+      });
+
+      // Fenced user prompt includes dispatch, clarify, and RET bay mapping
+      const fenced = buildFencedOrderPrompt('get hazmats to returns');
+      expect(fenced.userPrompt).toContain('"dispatch"');
+      expect(fenced.userPrompt).toContain('"clarify"');
+      expect(fenced.userPrompt).toContain('RET');
     });
   });
 

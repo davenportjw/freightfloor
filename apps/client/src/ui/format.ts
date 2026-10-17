@@ -47,28 +47,31 @@ export function teamColor(strat: StrategyName | string): string {
   return cfg?.color ?? '#64748B';
 }
 
-export type VoteLevel = 'easy' | 'normal' | 'hard';
-export const VOTE_LEVELS: VoteLevel[] = ['easy', 'normal', 'hard'];
+export type VoteLevel = 'easy' | 'normal' | 'hard' | 'turbo';
+export const VOTE_LEVELS: VoteLevel[] = ['easy', 'normal', 'hard', 'turbo'];
 
-/** Collapse the sim's 6 difficulty keys onto the 3 vote buttons (matches protocol normaliseDifficultyKey). */
+/** Collapse the sim's difficulty keys onto the 4 vote buttons (matches protocol normaliseDifficultyKey). */
 export function voteLevelOf(key: string | null | undefined): VoteLevel | null {
   switch (key) {
     case 'easy':
     case 'calm':
       return 'easy';
     case 'normal':
+    case 'medium':
       return 'normal';
     case 'hard':
     case 'surge':
-    case 'crisis':
       return 'hard';
+    case 'crisis':
+    case 'turbo':
+      return 'turbo';
     default:
       return null;
   }
 }
 
 export function voteCounts(votes: Record<string, string> | null | undefined): Record<VoteLevel, number> {
-  const out: Record<VoteLevel, number> = { easy: 0, normal: 0, hard: 0 };
+  const out: Record<VoteLevel, number> = { easy: 0, normal: 0, hard: 0, turbo: 0 };
   for (const v of Object.values(votes ?? {})) {
     const lvl = voteLevelOf(v);
     if (lvl) out[lvl]++;
@@ -78,7 +81,7 @@ export function voteCounts(votes: Record<string, string> | null | undefined): Re
 
 export function difficultyTooltip(level: VoteLevel): string {
   const d = DIFFICULTY[level as DifficultyKey];
-  return `Demand ×${d.demand}, deadlines ×${d.due}, ~${d.hazardPerHr} spills/hr, crash risk ×${d.crash}, hall score ×${d.score}`;
+  return `Speed ×${d.speed ?? 1}, demand ×${d.demand}, deadlines ×${d.due}, ~${d.hazardPerHr} spills/hr, crash risk ×${d.crash}, hall score ×${d.score}`;
 }
 
 export function difficultyLabel(key: string): string {

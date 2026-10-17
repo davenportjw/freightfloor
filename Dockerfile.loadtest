@@ -21,8 +21,7 @@ RUN npm ci --include-workspace-root \
 COPY packages/protocol ./packages/protocol
 COPY tools/loadtest ./tools/loadtest
 
-RUN npm run build -w @warehouse/protocol && \
-    npm run build -w @warehouse/loadtest
+RUN npm run build -w @warehouse/loadtest
 
 # Stage 2: Production Runtime
 FROM node:24-slim AS runner

@@ -48,4 +48,14 @@ export default defineConfig({
       },
     },
   },
+  test: {
+    testTimeout: 30000,
+    hookTimeout: 30000,
+    maxWorkers: 2,
+    alias: {
+      '@warehouse/protocol': new URL('../../packages/protocol/src/index.ts', import.meta.url)
+        .pathname,
+      '@warehouse/sim': new URL('../../packages/sim/src/index.ts', import.meta.url).pathname,
+    },
+  },
 });

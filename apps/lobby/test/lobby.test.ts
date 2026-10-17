@@ -58,14 +58,14 @@ describe('@warehouse/lobby — M6 placement, ticket signing, and network directo
     expect(body.siteId).toBe('den-1');
     expect(body.role).toBe('driver');
     expect(body.isBot).toBe(false);
-    expect(body.wsUrl).toBe('wss://den-1.warehouse.example/ws');
+    expect(body.wsUrl).toBe('ws://localhost:80/ws?site=den-1');
 
     const verified = verifyTicket(body.ticket, TEST_SECRET, NOW + 1_000);
     expect(verified).toEqual({
       ok: true,
       payload: {
         clientId: 'client-alice-1',
-        name: 'Alice',
+        name: body.name,
         siteId: 'den-1',
         isBot: false,
         exp: NOW + 60_000,
@@ -329,4 +329,204 @@ describe('@warehouse/lobby — M6 placement, ticket signing, and network directo
 
     await app.close();
   });
+
+  it('8. FirestoreLobbyStore removes pending drivers on cross-site reassignment and expires stale pending entries once a newer heartbeat arrives', async () => {
+    const { FirestoreLobbyStore } = await import('../src/index.js');
+    const docs = new Map<string, Record<string, unknown>>([
+      [
+        'den-1',
+        {
+          id: 'den-1',
+          state: 'live',
+          phase: 'running',
+          drivers: 0,
+          spectators: 0,
+          driverClientIds: [],
+          updatedAt: 1_000,
+        },
+      ],
+      [
+        'slc-2',
+        {
+          id: 'slc-2',
+          state: 'live',
+          phase: 'running',
+          drivers: 0,
+          spectators: 0,
+          driverClientIds: [],
+          updatedAt: 1_000,
+        },
+      ],
+    ]);
+
+    const fakeDb = {
+      collection: () => ({
+        get: async () => ({
+          forEach: (cb: (doc: { id: string; data: () => Record<string, unknown> }) => void) => {
+            for (const [id, data] of docs.entries()) {
+              cb({ id, data: () => data });
+            }
+          },
+        }),
+      }),
+    };
+
+    const store = new FirestoreLobbyStore(fakeDb as never);
+
+    // Assign client-1 to den-1 at t=1000
+    store.recordAssignment('den-1', 'client-1', 'driver', 1_000);
+    let sites = await store.getSites(1_100);
+    expect(sites.find((s) => s.id === 'den-1')?.drivers).toBe(1);
+    expect(sites.find((s) => s.id === 'slc-2')?.drivers).toBe(0);
+
+    // Client-1 immediately switches to slc-2 at t=1200 -> removed from den-1 pendingDrivers
+    store.recordAssignment('slc-2', 'client-1', 'driver', 1_200);
+    sites = await store.getSites(1_300);
+    expect(sites.find((s) => s.id === 'den-1')?.drivers).toBe(0);
+    expect(sites.find((s) => s.id === 'slc-2')?.drivers).toBe(1);
+
+    // Suppose client-1 disconnects and slc-2 flushes a heartbeat at t=4000 (> 1200 + 2000) with driverClientIds: []
+    docs.set('slc-2', {
+      ...docs.get('slc-2')!,
+      drivers: 0,
+      driverClientIds: [],
+      updatedAt: 4_000,
+    });
+    sites = await store.getSites(4_100);
+    expect(sites.find((s) => s.id === 'slc-2')?.drivers).toBe(0);
+  });
+
+  it('9. Assigns non-overlapping Adj-Noun callsigns to human players and supports resuming a previous callsign', async () => {
+    const store = new InMemoryLobbyStore([makeSite('den-1', { drivers: 1 })]);
+    const app = await buildLobbyServer({
+      store,
+      ticketSecret: TEST_SECRET,
+      now: () => NOW,
+    });
+
+    // Join without specifying a name -> server assigns a valid Adj-Noun callsign
+    const join1 = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'client-human-101' },
+    });
+    expect(join1.statusCode).toBe(200);
+    const body1 = join1.json();
+    expect(body1.name).toMatch(/^[a-z]+-[a-z]+-\d{2}$/i);
+    expect(body1.clientId).toBe('client-human-101');
+
+    // Re-joining with the same clientId keeps the same assigned callsign
+    const join1Again = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'client-human-101' },
+    });
+    expect(join1Again.statusCode).toBe(200);
+    expect(join1Again.json().name).toBe(body1.name);
+
+    // Another client attempting to claim body1.name gets a different non-overlapping callsign
+    const join2 = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'client-human-202', name: body1.name },
+    });
+    expect(join2.statusCode).toBe(200);
+    const body2 = join2.json();
+    expect(body2.name).not.toBe(body1.name);
+
+    // Resuming body1.name from a new browser session restores client-human-101 and its callsign
+    const resumeRes = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'new-browser-session-id', resume: body1.name },
+    });
+    expect(resumeRes.statusCode).toBe(200);
+    const resumed = resumeRes.json();
+    expect(resumed.name).toBe(body1.name);
+    expect(resumed.clientId).toBe('client-human-101');
+
+    // Resuming an unknown callsign returns 404 unknown_callsign
+    const unknownRes = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'new-browser-session-id', resume: 'Nonexistent-Callsign' },
+    });
+    expect(unknownRes.statusCode).toBe(404);
+    expect(unknownRes.json().error).toBe('unknown_callsign');
+
+
+    await app.close();
+  });
+
+  it('10. Free Range soft-cap (drivers >= 26) routes freerange joiners to warmer/break shards while reserving 4-6 slots for Blitz drop-ins', async () => {
+    const store = new InMemoryLobbyStore([
+      makeSite('den-1', { drivers: 27 }),
+      makeSite('slc-2', { drivers: 8 }),
+      makeSite('phx-3', { drivers: 0, phase: 'on_break', state: 'break' }),
+      makeSite('abq-4', { drivers: 0, state: 'offline', updatedAt: NOW - 60_000 }),
+    ]);
+    const app = await buildLobbyServer({
+      store,
+      ticketSecret: TEST_SECRET,
+      now: () => NOW,
+    });
+
+    // Free Range joiner is routed away from den-1 (27 >= 26 soft cap) to slc-2 (8 < 26)
+    const freeRes = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: {
+        clientId: 'client-freerange-1',
+        preferredSite: 'den-1',
+        mode: 'freerange',
+      },
+    });
+    expect(freeRes.statusCode).toBe(200);
+    const freeBody = freeRes.json();
+    expect(freeBody.siteId).toBe('slc-2');
+    expect(freeBody.role).toBe('driver');
+    const verifiedFree = verifyTicket(freeBody.ticket, TEST_SECRET, NOW + 1_000);
+    expect(verifiedFree.ok).toBe(true);
+    if (verifiedFree.ok) {
+      expect(verifiedFree.payload.runMode).toBe('freerange');
+    }
+
+    // Blitz joiner can still drop into den-1 (27 < 30 blitz soft cap / 32 hard cap)
+    const blitzRes = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: {
+        clientId: 'client-blitz-1',
+        preferredSite: 'den-1',
+        mode: 'blitz',
+      },
+    });
+    expect(blitzRes.statusCode).toBe(200);
+    const blitzBody = blitzRes.json();
+    expect(blitzBody.siteId).toBe('den-1');
+    expect(blitzBody.role).toBe('driver');
+    const verifiedBlitz = verifyTicket(blitzBody.ticket, TEST_SECRET, NOW + 1_000);
+    expect(verifiedBlitz.ok).toBe(true);
+    if (verifiedBlitz.ok) {
+      expect(verifiedBlitz.payload.runMode).toBe('blitz');
+    }
+
+    // If slc-2 also reaches 26 drivers, Free Range joiner wakes phx-3 (break site)
+    store.setSite(makeSite('slc-2', { drivers: 26 }));
+    const wakeRes = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: {
+        clientId: 'client-freerange-2',
+        mode: 'freerange',
+      },
+    });
+    expect(wakeRes.statusCode).toBe(200);
+    expect(wakeRes.json().siteId).toBe('phx-3');
+    expect(store.wokenSites).toContain('phx-3');
+
+    await app.close();
+  });
 });
+
+

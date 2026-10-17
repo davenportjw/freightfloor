@@ -16,6 +16,7 @@ import {
   applyDecision,
   clearBrainError,
   markBrainError,
+  SKILLS,
   type CardOption,
   type ContractOption,
   type Decision,
@@ -31,10 +32,18 @@ import {
   type PersistenceStore,
 } from './persistence.js';
 
+/** Card types built around beating the planner; never shown to AI agents. */
+export const HUMAN_ONLY_CARD_TYPES: ReadonlySet<string> = new Set(
+  SKILLS.filter((s) => s.humanOnly).map((s) => s.type),
+);
+
 export { ALLOWED_GEMINI_MODELS, type AllowedGeminiModel };
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
 export const DEFAULT_GEMINI_LOCATION = 'global';
-export const DEFAULT_GCP_PROJECT = 'davenport-boutique';
+export const DEFAULT_GCP_PROJECT =
+  process.env.GCP_PROJECT_ID ||
+  process.env.GOOGLE_CLOUD_PROJECT ||
+  'davenport-boutique';
 export const MAX_CONCURRENT_BRAIN_CALLS = 8;
 export const BRAIN_ERROR_BACKOFF_MS = 3000;
 export const BRAIN_ERROR_BACKOFF_GAME_MIN = 3.0;
@@ -212,17 +221,55 @@ export function renderDecisionPrompt(
       `Output JSON format: {"speed":1.05,"buffer":2,"respect":0.7,"chargeAt":20,"batch":1,"note":"short note"}`,
     ].join('\n');
   } else {
-    const opts = req.options as CardOption[];
-    const lines = opts.map(
-      (o) => `- id="${o.id}" type=${o.cardType} pts=${o.pts} goal=${o.goal} title="${o.title}"`,
-    );
+    // humanOnly cards are never dealt to AI by the sim; filter again so the model can't see them.
+    const opts = (req.options as CardOption[]).filter((o) => !HUMAN_ONLY_CARD_TYPES.has(o.cardType));
+    const lines = opts.map((o) => {
+      const perk = o.perk && Object.keys(o.perk).length
+        ? ` perk=${Object.entries(o.perk).map(([k, n]) => `${k}:${n}`).join(',')}`
+        : '';
+      return `- id="${o.id}" type=${o.cardType} rarity=${o.rarity ?? 'common'} pts=${o.pts} goal=${o.goal}${perk} title="${o.title}"`;
+    });
     body = [
       `Decision: cards`,
       `Agent: ${ctx.agentId} (${ctx.persona}) difficulty=${ctx.difficulty}`,
-      `Offered shift cards (keep 1 to 2 valid id strings from this list):`,
+      `Offered shift cards (keep 1 to 2 valid id strings from this list; at most one wild):`,
       ...lines,
       `Output JSON format: {"keep":["${opts[0]?.id ?? 'C1'}"],"reason":"short reason"}`,
     ].join('\n');
+  }
+
+  const vehicle = world.vehicles.find((x) => x.id === req.agentId);
+  const dir = vehicle?.directive;
+  if (dir) {
+    const dirParts: string[] = [];
+    if (dir.strategy) dirParts.push(`persona=${dir.strategy}`);
+    if (dir.priority) dirParts.push(`priority=${dir.priority}`);
+    const zones = dir.focusZones?.length ? dir.focusZones : dir.preferredZones;
+    if (zones?.length) dirParts.push(`zone=${zones.join(',')}`);
+    const bays = dir.focusBays?.length ? dir.focusBays : dir.preferredBays;
+    if (bays?.length) dirParts.push(`bay=${bays.join(',')}`);
+    if (dir.immediateTask) {
+      if (typeof dir.immediateTask === 'string') {
+        dirParts.push(`task=${dir.immediateTask}`);
+      } else {
+        dirParts.push(
+          `task=${dir.immediateTask.kind}${dir.immediateTask.target ? `:${dir.immediateTask.target}` : ''}`,
+        );
+      }
+    }
+    if (dir.tactics) {
+      const t = dir.tactics;
+      if (t.speed !== undefined) dirParts.push(`speed=${t.speed}`);
+      if (t.respect !== undefined) dirParts.push(`respect=${t.respect}`);
+      if (t.buffer !== undefined) dirParts.push(`buffer=${t.buffer}`);
+      if (t.chargeAt !== undefined) dirParts.push(`chargeAt=${t.chargeAt}`);
+      if (t.batch !== undefined) dirParts.push(`batch=${t.batch}`);
+      if (t.preemptForP0 !== undefined) dirParts.push(`preemptP0=${t.preemptForP0 ? 1 : 0}`);
+      if (t.poach !== undefined) dirParts.push(`poach=${t.poach ? 1 : 0}`);
+    }
+    if (dirParts.length > 0) {
+      body += `\nActiveDirective: ${dirParts.join(' ')}`;
+    }
   }
 
   // Collect all connected player display names to enforce the untrusted-text isolation invariant

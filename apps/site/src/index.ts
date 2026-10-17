@@ -13,10 +13,22 @@ export * from './server.js';
 
 export async function startMainServer(): Promise<void> {
   const port = Number(process.env.PORT || 8080);
-  const host = process.env.HOST || '0.0.0.0';
+  const isCloudRun = Boolean(process.env.K_SERVICE);
+  const host = process.env.HOST || (isCloudRun ? '0.0.0.0' : '127.0.0.1');
   const siteId = ((process.env.SITE_ID as SiteId) || 'den-1');
   const useCloud =
-    process.env.USE_CLOUD_PERSISTENCE === '1' || Boolean(process.env.K_SERVICE);
+    process.env.USE_CLOUD_PERSISTENCE === '1' || isCloudRun;
+
+  if (
+    isCloudRun &&
+    !process.env.TICKET_SECRET &&
+    !process.env.TICKET_HMAC_KEY &&
+    !process.env.TICKET_HMAC_SECRET
+  ) {
+    throw new Error(
+      `[${siteId}] TICKET_SECRET (or TICKET_HMAC_KEY) must be injected via Secret Manager in Cloud Run`,
+    );
+  }
 
   const persistence = useCloud
     ? new CloudPersistenceStore({
@@ -38,6 +50,10 @@ export async function startMainServer(): Promise<void> {
     wsPublicUrl: process.env.WS_PUBLIC_URL,
     enableIntervals: true,
     restoreFromPersistence: useCloud,
+    requireProxyAuth:
+      isCloudRun ||
+      process.env.REQUIRE_PROXY_AUTH === '1' ||
+      process.env.REQUIRE_PROXY_AUTH === 'true',
   });
 
   const onSignal = async (sig: string) => {

@@ -9,14 +9,57 @@
     "tools/*"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "test": "vitest run",
+    "build": "wireit",
+    "test": "wireit",
     "test:sim": "npm test -w @warehouse/sim",
     "test:protocol": "npm test -w @warehouse/protocol",
     "test:armor": "npm test -w @warehouse/armor",
     "test:site": "npm test -w @warehouse/site",
     "test:lobby": "npm test -w @warehouse/lobby",
-    "sprites": "npm run generate -w @warehouse/sprites"
+    "sprites": "wireit"
+  },
+  "wireit": {
+    "sprites": {
+      "command": "node tools/sprites/dist/index.js",
+      "dependencies": [
+        "./tools/sprites:build"
+      ],
+      "files": [
+        "tools/sprites/dist/**"
+      ],
+      "output": [
+        "apps/client/public/assets/atlas.png",
+        "apps/client/public/assets/atlas.json"
+      ],
+      "clean": "if-file-deleted"
+    },
+    "build": {
+      "dependencies": [
+        "./packages/protocol:build",
+        "./packages/armor:build",
+        "./packages/sim:build",
+        "./tools/sprites:build",
+        "sprites",
+        "./apps/client:build",
+        "./apps/lobby:build",
+        "./apps/site:build",
+        "./tools/loadtest:build",
+        "./tools/smoke:build"
+      ]
+    },
+    "test": {
+      "dependencies": [
+        "./packages/protocol:test",
+        "./packages/armor:test",
+        "./packages/sim:test",
+        "./tools/sprites:test",
+        "./apps/client:test",
+        "./apps/lobby:test",
+        "./apps/site:test",
+        "./tools/loadtest:test",
+        "./tools/smoke:test"
+      ]
+    }
   },
   "dependencies": {
     "zod": "^3.24.2"
@@ -25,7 +68,8 @@
     "@types/node": "^22.13.4",
     "@types/ws": "^8.5.14",
     "typescript": "^5.7.3",
-    "vitest": "^3.0.6"
+    "vitest": "^3.0.6",
+    "wireit": "^0.14.13"
   },
   "engines": {
     "node": ">=22.0.0"

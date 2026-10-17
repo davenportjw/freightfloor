@@ -58,6 +58,7 @@ export interface PlayerProfileDoc {
   isBot: boolean;
   totalDeliveries: number;
   totalScore: number;
+  bestBlitzPts?: number;
   shiftsPlayed: number;
   lastSiteId: SiteId;
   updatedAt: number;

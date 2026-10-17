@@ -4,7 +4,7 @@ output "lobby_url" {
 }
 
 output "site_urls" {
-  description = "Map of site IDs to their public Cloud Run URLs"
+  description = "Map of site IDs to their internal Cloud Run URLs (IAM-restricted to warehouse-lobby and pubsub-push)"
   value = {
     for k, svc in google_cloud_run_v2_service.site : k => svc.uri
   }

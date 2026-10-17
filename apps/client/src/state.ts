@@ -7,8 +7,11 @@
  */
 import {
   dequantiseCoord,
+  type A2uiScreenMessage,
+  type AgentDirective,
   type BoardRow,
   type BrainHealthMessage,
+  type CommandEchoMessage,
   type DeltaMessage,
   type HeatLayer,
   type LeaderboardEntry,
@@ -16,6 +19,8 @@ import {
   type PlayerSessionInfo,
   type PresenceEntry,
   type QuantisedVehicleDelta,
+  type RelocationOfferMessage,
+  type RunMode,
   type SiteId,
   type SiteLimits,
   type SiteStatus,
@@ -165,7 +170,7 @@ export function makeClientVehicle(d: QuantisedVehicleDelta): Vehicle {
     strategy,
     human: Boolean(d.human),
     extra: Boolean(d.extra),
-    isPlayerVehicle: false,
+    isPlayerVehicle: d.id.startsWith('DRV-'),
     ownerClientId: null,
     controlledByClientId: null,
     playerOpaqueId: null,
@@ -190,9 +195,11 @@ export function makeClientVehicle(d: QuantisedVehicleDelta): Vehicle {
     stunnedUntil: d.stunnedUntil ?? 0,
     idleSince: 0,
     energySince: 0,
-    deliveries: 0,
+    deliveries: d.deliveries ?? 0,
     incidents: d.incidents ?? 0,
     nearMisses: d.nearMisses ?? 0,
+    skids: d.skids ?? 0,
+    palletDrops: d.palletDrops ?? 0,
     chargerIdx: -1,
     speedNow: d.speedNow ?? 0,
     braking: false,
@@ -214,6 +221,23 @@ export function makeClientVehicle(d: QuantisedVehicleDelta): Vehicle {
     lastDecision: null,
     lastTacticsReqAt: 0,
     target: null,
+    autopilot: Boolean(d.autopilot),
+    directive: d.directive ? ({ ...d.directive } as Vehicle['directive']) : null,
+    runMode: d.runMode ?? 'blitz',
+    runStartedAt: d.runStartedAt ?? null,
+    runEndsAt: d.runEndsAt ?? null,
+    runGraceUntil: null,
+    runPts: d.runPts ?? d.sPts ?? 0,
+    runDeliveries: d.runDeliveries ?? d.deliveries ?? 0,
+    runOnTime: d.runOnTime ?? d.deliveries ?? 0,
+    runIncidents: d.runIncidents ?? d.incidents ?? 0,
+    streak: d.streak ?? 0,
+    bestStreak: d.bestStreak ?? 0,
+    runFinished: Boolean(d.runFinished),
+    combo: d.combo,
+    comboBest: d.comboBest,
+    fareTrips: d.fareTrips,
+    speedyTrips: d.speedyTrips,
   };
 }
 
@@ -238,7 +262,7 @@ export function applyQuantisedDelta(
     let v = byId.get(d.id);
     if (!v) {
       v = makeClientVehicle(d);
-      byId.set(v.id, v);
+      byId.set(d.id, v);
     }
     seen.add(v.id);
     ordered.push(v);
@@ -246,8 +270,10 @@ export function applyQuantisedDelta(
     const targetX = typeof d.qx === 'number' ? dequantiseCoord(d.qx) : typeof d.px === 'number' ? d.px : v.px;
     const targetY = typeof d.qy === 'number' ? dequantiseCoord(d.qy) : typeof d.py === 'number' ? d.py : v.py;
 
-    // Our own driven vehicle is predicted locally and corrected by `ack`, unless no input is in flight.
-    if (v.id !== myVid || opts.acceptMyPose) {
+    const isAutopilot = typeof d.autopilot === 'boolean' ? d.autopilot : Boolean(v.autopilot);
+
+    // Our own driven vehicle is predicted locally and corrected by `ack`, unless no input is in flight or Co-Pilot autopilot is steering.
+    if (v.id !== myVid || opts.acceptMyPose || isAutopilot) {
       v.px = targetX;
       v.py = targetY;
       v.tile = { x: Math.floor(targetX), y: Math.floor(targetY) };
@@ -260,8 +286,16 @@ export function applyQuantisedDelta(
     if (typeof d.fork === 'number') v.fork = d.fork;
     if (Array.isArray(d.cargo)) v.cargo = d.cargo;
     if (Array.isArray(d.orders)) v.orders = d.orders;
+    if (typeof d.human === 'boolean') {
+      v.human = d.human;
+      if (!d.human && d.driver === undefined) v.driver = null;
+    }
     if (d.driver !== undefined) v.driver = d.driver;
-    if (typeof d.human === 'boolean') v.human = d.human;
+    if (typeof d.humanCharging === 'boolean') v.humanCharging = d.humanCharging;
+    if (typeof d.autopilot === 'boolean') v.autopilot = d.autopilot;
+    if (d.directive !== undefined) {
+      v.directive = d.directive ? ({ ...d.directive } as Vehicle['directive']) : null;
+    }
     if (typeof d.strategy === 'string' && (ARCHETYPES as string[]).includes(d.strategy)) {
       v.strategy = d.strategy as Archetype;
     }
@@ -273,6 +307,23 @@ export function applyQuantisedDelta(
     if (typeof d.msg === 'string') v.msg = d.msg;
     if (typeof d.incidents === 'number') v.incidents = d.incidents;
     if (typeof d.nearMisses === 'number') v.nearMisses = d.nearMisses;
+    if (typeof d.skids === 'number') v.skids = d.skids;
+    if (typeof d.palletDrops === 'number') v.palletDrops = d.palletDrops;
+    if (typeof d.deliveries === 'number') v.deliveries = d.deliveries;
+    if (d.runMode === 'blitz' || d.runMode === 'freerange') v.runMode = d.runMode;
+    if (d.runStartedAt !== undefined) v.runStartedAt = d.runStartedAt;
+    if (d.runEndsAt !== undefined) v.runEndsAt = d.runEndsAt;
+    if (typeof d.runPts === 'number') v.runPts = d.runPts;
+    if (typeof d.runDeliveries === 'number') v.runDeliveries = d.runDeliveries;
+    if (typeof d.runOnTime === 'number') v.runOnTime = d.runOnTime;
+    if (typeof d.runIncidents === 'number') v.runIncidents = d.runIncidents;
+    if (typeof d.streak === 'number') v.streak = d.streak;
+    if (typeof d.bestStreak === 'number') v.bestStreak = d.bestStreak;
+    if (typeof d.runFinished === 'boolean') v.runFinished = d.runFinished;
+    if (typeof d.combo === 'number') v.combo = d.combo;
+    if (typeof d.comboBest === 'number') v.comboBest = d.comboBest;
+    if (typeof d.fareTrips === 'number') v.fareTrips = d.fareTrips;
+    if (typeof d.speedyTrips === 'number') v.speedyTrips = d.speedyTrips;
     if (typeof d.extra === 'boolean') v.extra = d.extra;
     if (d.tactics && typeof d.tactics === 'object') v.tactics = { ...v.tactics, ...d.tactics };
     if (Array.isArray(d.path)) v.path = unflattenPath(d.path);
@@ -352,16 +403,63 @@ export interface PhaseInfo {
 export type DrawerTab = 'leaderboard' | 'value' | 'days' | 'events' | 'brain';
 export const DRAWER_TABS: DrawerTab[] = ['leaderboard', 'value', 'days', 'events', 'brain'];
 
+export type LeaderboardModalTab = 'all' | 'standings' | 'hall' | 'network' | 'silly';
+
+export interface RunEndSummary {
+  playerName: string;
+  runNumber: number;
+  nextRunName: string;
+  vehicleId: string;
+  score: number;
+  deliveries: number;
+  incidents: number;
+  nearMisses: number;
+  rank: number;
+  totalVehicles: number;
+  shift: number;
+  day: number;
+  runMode?: RunMode;
+  bestStreak?: number;
+  ppm?: number;
+  onTimePct?: number;
+  /** Best fare combo multiplier reached this run (1.0 / 1.2 / 1.5 / 2.0). */
+  comboBest?: number;
+  /** Rated trips this run and how many were SPEEDY. */
+  fareTrips?: number;
+  speedyTrips?: number;
+  /** Hand cards completed (`status === 'done'`). */
+  cardsDone?: number;
+}
+
 export interface UiState {
   drawerOpen: boolean;
   drawerTab: DrawerTab;
   helpOpen: boolean;
+  /** Full-screen Leaderboard & Silly Superlatives modal (#leaderboardModal). */
+  leaderboardModalOpen: boolean;
+  leaderboardModalTab: LeaderboardModalTab;
+  /** Co-Pilot & Agent Designer modal (#agent-designer-modal). */
+  agentDesignerOpen: boolean;
+  /** True while waiting for an `agentCommand` response / `commandEcho` from the server. */
+  agentCommandPending: boolean;
+  /** Last `commandEcho` resulting from an `agentCommand` or directive update. */
+  lastAgentEcho: CommandEchoMessage | null;
+  /** Hide left & right side panel docks while keeping toolbar and bottom command bar visible. */
+  docksHidden: boolean;
+  /** Toggleable quick-reference guide card above the bottom command bar. */
+  opsGuideOpen: boolean;
   /** Value chart window in game-minutes (240 / 480 / 1440). */
   valueWindow: number;
   /** Card ids selected in the current deal offer. */
   offerSel: Set<string>;
   /** Identity of the offer the selection belongs to (reset when a new offer arrives). */
   offerKey: string | null;
+  /** Populated when the player's 5-Min Blitz run finishes (`runFinished === true`). */
+  runEnd: RunEndSummary | null;
+  /** Selected driver play mode ('blitz' | 'freerange'). */
+  runMode: RunMode;
+  /** Active cross-site surge relocation offer (+75 pts) when current shard is crowded. */
+  relocationOffer: RelocationOfferMessage | null;
 }
 
 function eventVid(ev: SimEvent): string | null {
@@ -404,6 +502,7 @@ export class ClientStore {
   phaseInfo: PhaseInfo | null = null;
   limits: SiteLimits | null = null;
   board: BoardRow[] | null = null;
+  activeA2ui: A2uiScreenMessage | null = null;
   conn: { status: ConnStatus; text: string } = { status: 'idle', text: '' };
   network: NetworkState = {
     status: 'idle',
@@ -424,9 +523,19 @@ export class ClientStore {
     drawerOpen: false,
     drawerTab: 'leaderboard',
     helpOpen: false,
+    leaderboardModalOpen: false,
+    leaderboardModalTab: 'all',
+    agentDesignerOpen: false,
+    agentCommandPending: false,
+    lastAgentEcho: null,
+    docksHidden: false,
+    opsGuideOpen: false,
     valueWindow: 480,
     offerSel: new Set<string>(),
     offerKey: null,
+    runEnd: null,
+    runMode: 'blitz',
+    relocationOffer: null,
   };
 
   private listeners = new Set<() => void>();
@@ -459,10 +568,36 @@ export class ClientStore {
     return this.vehicle(this.you?.vid ?? null);
   }
 
-  /** True while we hold the wheel of a human-driven vehicle. */
+  /** True while we hold the wheel of a human-driven vehicle (manual or Co-Pilot autopilot). */
   isDriving(): boolean {
     const v = this.myVehicle();
     return Boolean(v && v.human);
+  }
+
+  /** True while our own leased vehicle is currently being steered by Co-Pilot / AI Autopilot. */
+  isMyVehicleAutopilot(): boolean {
+    const v = this.myVehicle();
+    return Boolean(v && v.human && v.autopilot);
+  }
+
+  /** Apply an incoming commandEcho that carries an AgentDirective immediately to our vehicle. */
+  applyAgentEcho(msg: CommandEchoMessage): void {
+    this.ui.agentCommandPending = false;
+    this.ui.lastAgentEcho = msg;
+    const v = this.myVehicle();
+    if (v && msg.directive) {
+      const dir = msg.directive as AgentDirective;
+      v.directive = { ...(v.directive ?? {}), ...dir } as Vehicle['directive'];
+      if (typeof dir.autopilot === 'boolean') v.autopilot = dir.autopilot;
+      const persona = dir.persona ?? dir.strategy;
+      if (persona && (ARCHETYPES as string[]).includes(persona)) {
+        v.strategy = persona as Archetype;
+      }
+      if (dir.tactics && typeof dir.tactics === 'object') {
+        v.tactics = { ...v.tactics, ...dir.tactics };
+      }
+    }
+    this.changed();
   }
 
   /** Driving a vehicle that belongs to an AI (Esc / Hand back returns it). */
@@ -490,6 +625,47 @@ export class ClientStore {
   myGuide(): GuideInfo | null {
     const vid = this.renderMyVid();
     return vid ? (this.side.guides.get(vid) ?? null) : null;
+  }
+
+  /**
+   * Synchronize `this.presence` and `this.world.vehicles` so that:
+   * - Vehicle `isBot`, `isPlayerVehicle`, `human`, and `driver` reflect active `presence` entries
+   *   even if `presence` arrived before the vehicle's first light `delta`.
+   * - `presence[i].points` and `presence[i].score` stay synced with live `v.sPts` from 10 Hz deltas.
+   */
+  private syncPresenceWithVehicles(): void {
+    const byVid = new Map<string, PresenceEntry>();
+    for (const p of this.presence) {
+      if (p.vid && (p.role ? p.role === 'driver' : true)) {
+        byVid.set(p.vid, p);
+      }
+    }
+    for (const v of this.world.vehicles) {
+      if (v.id.startsWith('DRV-')) v.isPlayerVehicle = true;
+      const p = byVid.get(v.id);
+      if (p) {
+        v.isBot = Boolean(p.isBot);
+        v.human = true;
+        if (p.name) v.driver = p.name;
+      } else {
+        v.isBot = false;
+      }
+      const ov = this.overlays.get(v.id);
+      if (ov) {
+        ov.isBot = Boolean(v.isBot);
+        ov.human = v.human;
+      }
+    }
+    for (const p of this.presence) {
+      if (p.vid) {
+        const v = this.world.vehicles.find((x) => x.id === p.vid);
+        if (v) {
+          const pts = Math.round(v.sPts);
+          p.points = pts;
+          p.score = pts;
+        }
+      }
+    }
   }
 
   // ---- message application -------------------------------------------------
@@ -550,7 +726,11 @@ export class ClientStore {
 
     if (siteChanged || !this.vehicle(this.selectedVid)) this.selectedVid = null;
     if (!this.selectedVid && this.isDriving()) this.selectedVid = msg.you.vid;
-    if (siteChanged) this.highlightStrategy = null;
+    if (siteChanged) {
+      this.highlightStrategy = null;
+      this.presence = [];
+    }
+    this.syncPresenceWithVehicles();
     this.mapVersion++;
     this.changed();
     return null;
@@ -563,7 +743,7 @@ export class ClientStore {
 
     if (typeof msg.tier === 'number' && msg.tier !== w.tier) {
       w.tier = msg.tier;
-      w.map = buildMap(msg.tier);
+      w.map = buildMap(msg.tier, w.siteId);
       const heat = new Float32Array(w.map.w * w.map.h);
       heat.set(w.heat.subarray(0, Math.min(w.heat.length, heat.length)));
       w.heat = heat;
@@ -572,6 +752,7 @@ export class ClientStore {
 
     const prevMyVid = this.you?.vid ?? null;
     applyQuantisedDelta(w, msg.vehicles, prevMyVid, this.overlays, this.side, opts);
+    this.syncPresenceWithVehicles();
 
     if (Array.isArray(msg.orders)) w.orders = msg.orders;
     if (Array.isArray(msg.hazards)) {
@@ -637,16 +818,17 @@ export class ClientStore {
 
   applyPresence(players: PresenceEntry[]): void {
     this.presence = players;
-    const bots = this.botVids();
-    for (const v of this.world.vehicles) v.isBot = bots.has(v.id);
-    for (const [vid, ov] of this.overlays) this.overlays.set(vid, { ...ov, isBot: bots.has(vid) });
     if (this.you) {
       const me = players.find((p) => p.clientId === this.you!.clientId);
-      if (me && me.vid !== this.you.vid) {
-        this.you = { ...this.you, vid: me.vid };
-        if (me.vid) this.selectedVid = me.vid;
+      if (me) {
+        const nextName = me.name || this.you.name;
+        if (me.vid !== this.you.vid || nextName !== this.you.name) {
+          this.you = { ...this.you, vid: me.vid, name: nextName };
+          if (me.vid && !this.selectedVid) this.selectedVid = me.vid;
+        }
       }
     }
+    this.syncPresenceWithVehicles();
     this.changed();
   }
 
@@ -668,6 +850,11 @@ export class ClientStore {
 
   select(vid: string | null): void {
     this.selectedVid = vid;
+    this.changed();
+  }
+
+  setA2ui(msg: A2uiScreenMessage | null): void {
+    this.activeA2ui = msg;
     this.changed();
   }
 }

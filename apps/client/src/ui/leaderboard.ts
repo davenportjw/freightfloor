@@ -27,16 +27,22 @@ export interface LeaderboardView<T> {
   myRank: number | null;
 }
 
-/** Top `top` rows plus (after a gap) my own row when I am further down. */
-export function leaderboardView<T extends { id: string }>(
+/** Top `top` rows plus (after a gap) my own row and any other human drivers further down. */
+export function leaderboardView<T extends { id: string; human?: boolean }>(
   rows: readonly T[],
   myVid: string | null,
   top = 5,
 ): LeaderboardView<T> {
   const myIdx = myVid ? rows.findIndex((r) => r.id === myVid) : -1;
   const out = rows.slice(0, top).map((row, i) => ({ rank: i + 1, row, mine: i === myIdx }));
-  const gap = myIdx >= top;
-  if (gap) out.push({ rank: myIdx + 1, row: rows[myIdx], mine: true });
+  let gap = false;
+  for (let i = top; i < rows.length; i++) {
+    const row = rows[i];
+    if (i === myIdx || Boolean(row.human)) {
+      if (i > (out[out.length - 1]?.rank ?? 0)) gap = true;
+      out.push({ rank: i + 1, row, mine: i === myIdx });
+    }
+  }
   return { rows: out, gap, myRank: myIdx >= 0 ? myIdx + 1 : null };
 }
 
@@ -46,6 +52,9 @@ export function leaderboardHeader(myRank: number | null, t: number): string {
 
 export function leaderRowEl(r: { rank: number; row: LeaderRow; mine: boolean }, onClick: () => void): HTMLElement {
   const who = r.row.human && r.row.driver ? ` · ${r.row.driver}` : '';
+  const modeTag = r.row.human
+    ? `${r.row.runMode === 'freerange' ? '🌐 Free' : '⏱️ Blitz'}${r.row.streak && r.row.streak >= 3 ? ` · 🔥×${r.row.streak}` : ''}`
+    : r.row.strat;
   return el(
     'button',
     {
@@ -58,7 +67,7 @@ export function leaderRowEl(r: { rank: number; row: LeaderRow; mine: boolean }, 
       el('span', { class: 'rank muted', text: String(r.rank) }),
       swatch(r.row.human ? teamColor('Human') : teamColor(r.row.strat)),
       el('span', { class: 'grow ellipsis', text: `${r.row.id}${who}${r.mine ? ' ★ you' : ''}` }),
-      el('span', { class: 'muted small', text: r.row.strat }),
+      el('span', { class: 'muted small', text: modeTag }),
       el('span', { class: 'pts b', text: String(Math.round(r.row.pts)) }),
     ],
   );
@@ -116,11 +125,24 @@ export function mountLeaderboard(zone: HTMLElement, ctx: UiCtx): UiModule & { pa
       const view = leaderboardView(lb, store.renderMyVid());
       header.textContent = leaderboardHeader(view.myRank, w.t);
       rows.render(
-        JSON.stringify(view.rows.map((r) => [r.rank, r.row.id, Math.round(r.row.pts), r.row.driver, r.mine, r.row.strat])),
+        JSON.stringify(
+          view.rows.map((r) => [
+            r.rank,
+            r.row.id,
+            Math.round(r.row.pts),
+            r.row.driver,
+            r.mine,
+            r.row.strat,
+            r.row.runMode,
+            r.row.streak,
+          ]),
+        ),
         () => {
           const out: Child[] = [];
           view.rows.forEach((r, i) => {
-            if (view.gap && i === view.rows.length - 1) out.push(el('div', { class: 'gap muted', text: '⋯' }));
+            if (i > 0 && r.rank > view.rows[i - 1].rank + 1) {
+              out.push(el('div', { class: 'gap muted', text: '⋯' }));
+            }
             out.push(leaderRowEl(r, () => actions.select(r.row.id)));
           });
           if (!out.length) out.push(el('div', { class: 'empty', text: 'No vehicles on the floor.' }));
@@ -133,11 +155,19 @@ export function mountLeaderboard(zone: HTMLElement, ctx: UiCtx): UiModule & { pa
       const current = voteLevelOf(w.difficulty);
       const dc = t.decisions;
       const dn = dc.reroute + dc.wait + dc.push;
+      const openModalBtn = button(
+        '🏆 Full Leaderboard & Silly Awards [L]',
+        'btn small lb-open-modal-btn',
+        () => actions.showLeaderboardModal(true, 'all'),
+        'Open the full-screen Leaderboard & Silly Superlatives modal [L]',
+      );
+      openModalBtn.dataset.action = 'open-leaderboard-modal';
       rest.render(
         JSON.stringify([t.wins, t.humanShifts, counts, myVote, current, w.difficulty, dc, t.hazards, w.hallOfFame.length, w.hallOfFame[0]?.scored]),
         () => [
+          openModalBtn,
           el('div', { class: 'hint' }, [
-            '+10 per pallet, +40 P0, half if late, −15 per crash.',
+            '+10 per pallet, +40 P0, streak up to 1.5×, −15 per crash.',
             t.humanShifts
               ? el('div', { text: `Human drivers on this site: ${plural(t.wins, 'win')} in ${plural(t.humanShifts, 'shift')}.` })
               : null,

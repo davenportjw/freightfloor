@@ -4,8 +4,40 @@
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
-    "build": "tsc -b",
-    "test": "vitest run"
+    "build": "wireit",
+    "test": "wireit"
+  },
+  "wireit": {
+    "build": {
+      "command": "tsc",
+      "dependencies": [
+        "../../packages/protocol:build"
+      ],
+      "files": [
+        "src/**",
+        "tsconfig.json",
+        "../../tsconfig.base.json"
+      ],
+      "output": [
+        "dist/**"
+      ],
+      "clean": "if-file-deleted"
+    },
+    "test": {
+      "command": "vitest run",
+      "dependencies": [
+        "build",
+        "../../packages/armor:build",
+        "../../apps/lobby:build",
+        "../../apps/site:build"
+      ],
+      "files": [
+        "test/**",
+        "src/**",
+        "tsconfig.json"
+      ],
+      "output": []
+    }
   },
   "dependencies": {
     "@google-cloud/firestore": "^7.11.0",

@@ -1,4 +1,9 @@
-import { NlOrderParseSchema, type NlOrderAction, type NlOrderParse } from '@warehouse/protocol';
+import {
+  NlOrderParseSchema,
+  type NlOrderAction,
+  type NlOrderClarify,
+  type NlOrderParse,
+} from '@warehouse/protocol';
 import type { ArmorReasonCode } from './hygiene.js';
 
 export type ArmorFilterCategory = 'pi_and_jailbreak' | 'malicious_uri' | 'rai' | 'unknown';
@@ -91,13 +96,13 @@ export function inspectPromptLocally(raw: string): ModelArmorVerdict {
 }
 
 export type ValidatedOrderResult =
-  | { ok: true; command: NlOrderAction }
+  | { ok: true; command: NlOrderAction | NlOrderClarify }
   | { ok: false; code: 'parse_invalid' | 'parse_refused'; reason: string };
 
 /**
  * Layer 4 Typed Validation:
  * Validates raw JSON string or object from Gemini against the strict command union
- * (`rush | p0 | cone{x,y} | fleetAdd | fleetRemove | refuse`) and map bounds.
+ * (`rush | p0 | cone{x,y} | fleetAdd | fleetRemove | dispatch | clarify | refuse`) and map bounds.
  */
 export function validateParsedOrder(
   rawJsonOrObj: unknown,
@@ -149,6 +154,16 @@ export function validateParsedOrder(
         reason: `Cone coordinates (${data.x}, ${data.y}) are outside legal floor bounds.`,
       };
     }
+  }
+
+  if (data.action === 'dispatch' && !data.dispatch) {
+    data.dispatch = {
+      sourceZone: 'haz',
+      targetBay: 'RET',
+      priority: 'p0',
+      count: 3,
+      mode: 'reroute_and_spawn',
+    };
   }
 
   return {

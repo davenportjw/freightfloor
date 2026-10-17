@@ -1,0 +1,13 @@
+node_modules/
+.npm/
+dist/
+build/
+.wireit/
+*.tsbuildinfo
+.git/
+.terraform/
+coverage/
+.vitest/
+tools/smoke/out/
+.env
+.env.*

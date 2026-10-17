@@ -27,14 +27,17 @@ export function mountStrategyBoard(zone: HTMLElement, ctx: UiCtx): UiModule & { 
   const view = new KeyedView(rowsEl);
   const body = el('div', { class: 'board' }, [
     el('div', { class: 'board-grid board-head label' }, [
-      el('span', { text: 'Strategy' }),
-      el('span', { class: 'r', text: '/hr' }),
-      el('span', { class: 'r', text: 'On-time' }),
-      el('span', { class: 'r', text: '⚠', title: 'Incidents' }),
-      el('span', { class: 'r', text: 'kWh/ord' }),
+      el('span', { text: 'Strategy', title: 'AI dispatch archetype or Human drivers (× vehicle count)' }),
+      el('span', { class: 'r', text: '/hr', title: 'Orders delivered per game-hour (rolling 60m)' }),
+      el('span', { class: 'r', text: 'On-time', title: 'Percentage of orders delivered before deadline' }),
+      el('span', { class: 'r', text: '⚠', title: 'Collisions/incidents in the last 60 game-min' }),
+      el('span', { class: 'r', text: 'kWh/ord', title: 'Battery energy used per delivered order' }),
     ]),
     rowsEl,
-    el('div', { class: 'hint', text: 'Last 60 game-min. Click a row to highlight that team on the map.' }),
+    el('div', {
+      class: 'hint',
+      text: 'AI dispatch strategies compete against each other and human drivers (rolling 60m). Click any row to highlight that team on the floor and spot bottlenecks.',
+    }),
   ]);
   const panel = createPanel(
     {

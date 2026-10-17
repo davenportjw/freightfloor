@@ -29,7 +29,7 @@ describe('@warehouse/smoke end-to-end verification (in-process Lobby + 2 Sites)'
     const brainClient: BrainModelClient = {
       async generateDecision(req) {
         if (req.kind === 'cards') {
-          const match = req.userPrompt.match(/"id":\s*"([^"]+)"/);
+          const match = req.prompt.match(/"id":\s*"([^"]+)"/);
           return {
             text: JSON.stringify({ keep: [match?.[1] ?? 'turbo'], reason: 'Keep card' }),
             tokensIn: 32,
@@ -37,7 +37,7 @@ describe('@warehouse/smoke end-to-end verification (in-process Lobby + 2 Sites)'
           };
         }
         if (req.kind === 'contract') {
-          const match = req.userPrompt.match(/"orderId":\s*"?(\d+)"?/);
+          const match = req.prompt.match(/"orderId":\s*"?(\d+)"?/);
           return {
             text: JSON.stringify({ orderIds: [match?.[1] ?? '1'], reason: 'Pick order' }),
             tokensIn: 32,

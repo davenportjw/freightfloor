@@ -8,6 +8,7 @@ import type {
   ClientMessage,
   JoinResponse,
   NetworkResponse,
+  RunMode,
   ServerMessage,
   SiteId,
 } from '@warehouse/protocol';
@@ -28,7 +29,7 @@ export function resolveWsUrl(
   siteId: SiteId,
   loc: { hostname: string; host: string; protocol: string } | null,
 ): string {
-  if (loc && rawWsUrl.startsWith('ws://localhost') && loc.hostname !== 'localhost') {
+  if (loc) {
     const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${proto}//${loc.host}/ws?site=${siteId}`;
   }
@@ -67,7 +68,7 @@ export class NetClient {
   siteId: SiteId | null = null;
 
   constructor(
-    private readonly identity: () => { name: string; clientId: string },
+    private readonly identity: () => { name?: string; clientId: string; runMode?: RunMode },
     private readonly handlers: NetHandlers,
   ) {}
 
@@ -82,7 +83,7 @@ export class NetClient {
   }
 
   /** Join via the lobby (optionally preferring a site) and open the site socket. Throws on lobby failure. */
-  async join(prefer?: SiteId): Promise<JoinResponse> {
+  async join(prefer?: SiteId, resume?: string, runModeOverride?: RunMode): Promise<JoinResponse> {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -91,11 +92,18 @@ export class NetClient {
     this.joining = true;
     this.handlers.onStatus({ kind: 'joining' });
     try {
-      const { name, clientId } = this.identity();
+      const { name, clientId, runMode } = this.identity();
+      const effectiveMode = runModeOverride ?? runMode;
       const res = await fetch('/api/join', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, clientId, prefer: prefer ?? this.siteId ?? undefined }),
+        body: JSON.stringify({
+          clientId,
+          ...(name ? { name } : {}),
+          prefer: prefer ?? this.siteId ?? undefined,
+          ...(resume ? { resume } : {}),
+          ...(effectiveMode ? { runMode: effectiveMode } : {}),
+        }),
       });
       if (!res.ok) throw new Error(`Lobby join failed: ${await readError(res)}`);
       const join = (await res.json()) as JoinResponse;
@@ -105,6 +113,63 @@ export class NetClient {
       return join;
     } finally {
       this.joining = false;
+    }
+  }
+
+  /** Connect directly to a target shard using a pre-signed carry-over relocation ticket. */
+  joinWithTicket(siteId: SiteId, ticket: string, wsUrl = `/ws?site=${siteId}`): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.stopped = false;
+    this.siteId = siteId;
+    const { name, clientId } = this.identity();
+    const join: JoinResponse = {
+      siteId,
+      wsUrl,
+      ticket,
+      clientId,
+      ...(name ? { name } : {}),
+    };
+    this.handlers.onJoined?.(join);
+    this.open(join);
+  }
+
+  /**
+   * Look up and resume an existing server-assigned callsign or clientId via the lobby without
+   * dropping the active socket if the callsign is not found (HTTP 404).
+   */
+  async resumeIdentity(
+    resumeToken: string,
+  ): Promise<{ ok: true; name: string; clientId: string } | { ok: false; message: string }> {
+    const trimmed = resumeToken.trim();
+    if (!trimmed) return { ok: false, message: 'Enter an assigned callsign or client ID to resume.' };
+    try {
+      const { clientId } = this.identity();
+      const res = await fetch('/api/join', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientId,
+          prefer: this.siteId ?? undefined,
+          resume: trimmed,
+        }),
+      });
+      if (!res.ok) {
+        return { ok: false, message: await readError(res) };
+      }
+      const join = (await res.json()) as JoinResponse;
+      this.siteId = join.siteId;
+      this.handlers.onJoined?.(join);
+      this.open(join);
+      return {
+        ok: true,
+        name: join.name ?? trimmed,
+        clientId: join.clientId ?? clientId,
+      };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
     }
   }
 
@@ -141,6 +206,10 @@ export class NetClient {
   }
 
   private open(join: JoinResponse): void {
+    if (this.isOpen && this.siteId === join.siteId && this.ws) {
+      this.send({ type: 'hello', ticket: join.ticket });
+      return;
+    }
     this.closeSocket();
     const loc = typeof window !== 'undefined' ? window.location : null;
     const socket = new WebSocket(resolveWsUrl(join.wsUrl, join.siteId, loc));

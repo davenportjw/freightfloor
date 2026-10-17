@@ -43,7 +43,14 @@ export function mountDrawer(drawer: HTMLElement, ctx: UiCtx): UiModule {
       case 'leaderboard': {
         const lb = leaderboard(w);
         const v = leaderboardView(lb, store.renderMyVid(), lb.length);
+        const openFullBtn = button(
+          '🏆 Full Leaderboard & Silly Awards [L]',
+          'btn small lb-open-modal-btn',
+          () => actions.showLeaderboardModal(true, 'all'),
+          'Open the full-screen Leaderboard & Silly Superlatives modal [L]',
+        );
         return [
+          openFullBtn,
           el('div', { class: 'label sub', text: 'This shift' }),
           ...v.rows.map((r) => leaderRowEl(r, () => actions.select(r.row.id))),
           w.hallOfFame.length ? el('div', { class: 'label sub', text: 'Hall of fame' }) : el('span'),

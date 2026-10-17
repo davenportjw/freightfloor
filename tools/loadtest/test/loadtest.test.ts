@@ -51,11 +51,38 @@ describe('@warehouse/loadtest — 128-client full-flow load & Gemini pilot harne
         enableIntervals: false,
         ticketSecret,
         brainClient: {
-          async generateDecision() {
+          async generateDecision(req) {
+            if (req.kind === 'cards') {
+              const match = req.prompt.match(/"id":\s*"([^"]+)"/);
+              return {
+                text: JSON.stringify({ keep: [match?.[1] ?? 'turbo'], reason: 'Keep card' }),
+                tokensIn: 32,
+                tokensOut: 14,
+              };
+            }
+            if (req.kind === 'contract') {
+              const match = req.prompt.match(/"orderId":\s*"?(\d+)"?/);
+              return {
+                text: JSON.stringify({ orderIds: [match?.[1] ?? '1'], reason: 'steady dispatch' }),
+                tokensIn: 32,
+                tokensOut: 14,
+              };
+            }
+            if (req.kind === 'hazard') {
+              return {
+                text: JSON.stringify({ choice: 'reroute', reason: 'Reroute around spill' }),
+                tokensIn: 32,
+                tokensOut: 14,
+              };
+            }
             return {
               text: JSON.stringify({
-                assignments: [{ agent: 'A1', order: 1, reason: 'steady dispatch' }],
-                ops: [],
+                speed: 1.0,
+                buffer: 2,
+                respect: 0.6,
+                chargeAt: 20,
+                batch: 1,
+                note: 'steady dispatch',
               }),
               tokensIn: 120,
               tokensOut: 40,
@@ -67,12 +94,11 @@ describe('@warehouse/loadtest — 128-client full-flow load & Gemini pilot harne
           async parseOrder({ userPrompt }: { systemInstruction: string; userPrompt: string }) {
             return {
               text: JSON.stringify({
-                action: 'createOrder',
+                action: userPrompt.toLowerCase().includes('urgent') ? 'p0' : 'rush',
                 sku: 'Water',
                 bay: 'E2',
-                priority: userPrompt.toLowerCase().includes('urgent') ? 'P0' : 'normal',
-                quantity: 1,
-                note: 'Parsed pilot NL order',
+                count: 1,
+                reply: 'Parsed pilot NL order',
               }),
               tokensIn: 80,
               tokensOut: 30,
@@ -225,7 +251,7 @@ describe('@warehouse/loadtest — 128-client full-flow load & Gemini pilot harne
     const tickTimer = setInterval(() => {
       for (const { instance } of sites.values()) {
         const t0 = performance.now();
-        void instance.stepTick(Date.now());
+        void instance.stepTick(Date.now(), true);
         tickSamplesMs.push(performance.now() - t0);
       }
     }, 100);
@@ -261,7 +287,7 @@ describe('@warehouse/loadtest — 128-client full-flow load & Gemini pilot harne
     } finally {
       clearInterval(tickTimer);
     }
-  });
+  }, 60000);
 
   it('enforces strict no-mock error holding when Gemini pilot fails or exhausts budget', async () => {
     const failingModelClient: PilotModelClient = {

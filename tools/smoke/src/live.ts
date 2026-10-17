@@ -35,7 +35,12 @@ export interface LiveSmokeReport {
 
 export function wsUrlToHttpUrl(wsUrl: string): string {
   const u = new URL(wsUrl);
-  u.protocol = u.protocol === 'wss:' ? 'https:' : 'http:';
+  const httpProto = u.protocol === 'wss:' ? 'https:' : 'http:';
+  const siteParam = u.searchParams.get('site');
+  if (u.pathname === '/ws' && siteParam) {
+    return `${httpProto}//${u.host}/sites/${siteParam}`;
+  }
+  u.protocol = httpProto;
   u.pathname = '';
   u.search = '';
   u.hash = '';

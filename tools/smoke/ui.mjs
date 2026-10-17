@@ -43,7 +43,7 @@ const consoleErrors = [];
 const acks = [];
 try {
   const context = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
-  // Skip the join form + first-visit help with real values (name is a real smoke player).
+  // Pre-seed display name and 'warehouse.help.seen'='1' to verify the Intro Page still opens on subsequent visits too.
   await context.addInitScript((name) => {
     if (!localStorage.getItem('warehouse_display_name')) localStorage.setItem('warehouse_display_name', name);
     localStorage.setItem('warehouse.help.seen', '1');
@@ -66,6 +66,45 @@ try {
   );
 
   await page.goto(`${lobbyUrl}/`, { waitUntil: 'domcontentloaded' });
+
+  // 0. Intro Page opens by default on boot with the "How to Play" tab, switches to "The AI Inside" tab, and closes/re-opens cleanly.
+  const helpVisibleOnBoot = await page.locator('#help').isVisible().catch(() => false);
+  check('intro page (#help) visible on initial load', helpVisibleOnBoot);
+
+  const rulesVisible = await page.locator('#help [data-pane="rules"]').isVisible().catch(() => false);
+  const stepCount = await page.locator('#help [data-pane="rules"] .intro-step').count().catch(() => 0);
+  check('intro How to Play tab shows 3 steps by default', rulesVisible && stepCount === 3, `rules=${rulesVisible} steps=${stepCount}`);
+
+  await page.screenshot({ path: join(outDir, 'ui-intro.png') });
+
+  await page.locator('#help [data-intro-tab="ai"]').click();
+  const aiConceptsVisible = await page.locator('#help [data-pane="ai-concepts"]').isVisible().catch(() => false);
+  const rulesHidden = !(await page.locator('#help [data-pane="rules"]').isVisible().catch(() => true));
+  const aiCardCount = await page.locator('#help [data-pane="ai-concepts"] .ai-concept-card').count().catch(() => 0);
+  check(
+    'intro AI tab switches panes',
+    aiConceptsVisible && rulesHidden && aiCardCount >= 4,
+    `ai=${aiConceptsVisible} rulesHidden=${rulesHidden} cards=${aiCardCount}`,
+  );
+  await page.screenshot({ path: join(outDir, 'ui-intro-ai.png') });
+  await page.locator('#help [data-intro-tab="play"]').click();
+
+  // Dismiss Intro Page via "Enter the Floor →" button
+  await page.locator('[data-action="close-intro"]').first().click();
+  await page.waitForTimeout(250);
+  const helpHiddenAfterClose = !(await page.locator('#help').isVisible().catch(() => true));
+  check('close-intro button dismisses #help', helpHiddenAfterClose);
+
+  // Re-open Intro Page via top toolbar "Intro & Rules ?" button
+  await page.locator('[data-action="open-intro"]').first().click();
+  await page.waitForTimeout(250);
+  const helpReopened = await page.locator('#help').isVisible().catch(() => false);
+  check('open-intro toolbar button re-opens #help', helpReopened);
+
+  // Dismiss again to proceed with floor tests
+  await page.locator('[data-action="close-intro"]').first().click();
+  await page.waitForTimeout(250);
+
   const joinVisible = await page.locator('#joinOverlay').isVisible().catch(() => false);
   if (joinVisible) {
     await page.fill('#joinName', displayName);
@@ -119,7 +158,13 @@ try {
   }
   check('every panel folds', foldable.length > 0 && foldable.every((p) => p.folded), foldable.map((p) => `${p.id}:${p.folded}`).join(' '));
   await page.reload({ waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(4000);
+  await page.waitForTimeout(1500);
+  const helpVisibleAfterReload = await page.locator('#help').isVisible().catch(() => false);
+  check('intro page (#help) visible on subsequent visit after reload', helpVisibleAfterReload);
+  if (helpVisibleAfterReload) {
+    await page.locator('[data-action="close-intro"]').first().click();
+  }
+  await page.waitForTimeout(2500);
   const persisted = [];
   for (const { id } of foldable) {
     const exp = await page.locator(`[data-panel="${id}"] .panel-header`).getAttribute('aria-expanded').catch(() => null);

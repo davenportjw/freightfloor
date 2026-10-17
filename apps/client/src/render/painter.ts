@@ -51,9 +51,59 @@ export class Painter {
     }
   }
 
+  /** Fast zero-allocation 4-point polygon draw. */
+  quad(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    x3: number,
+    y3: number,
+    fill: string | null,
+    stroke?: string | null,
+    lw = 1,
+  ): void {
+    const ctx = this.ctx;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.lineTo(x3, y3);
+    ctx.closePath();
+    if (fill) {
+      ctx.fillStyle = fill;
+      ctx.fill();
+    }
+    if (stroke) {
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = lw;
+      ctx.stroke();
+    }
+  }
+
   /** Floor-plane quad for a whole tile (or w x h tiles). */
   tile(x: number, y: number, fill: string | null, stroke?: string | null, lw = 1, w = 1, h = 1): void {
-    this.poly([this.P(x, y), this.P(x + w, y), this.P(x + w, y + h), this.P(x, y + h)], fill, stroke, lw);
+    const c = this.cam;
+    const z = c.zoom;
+    const hw = (TW / 2) * z;
+    const hh = (TH / 2) * z;
+    const xw = x + w;
+    const yh = y + h;
+    this.quad(
+      c.x + (x - y) * hw,
+      c.y + (x + y) * hh,
+      c.x + (xw - y) * hw,
+      c.y + (xw + y) * hh,
+      c.x + (xw - yh) * hw,
+      c.y + (xw + yh) * hh,
+      c.x + (x - yh) * hw,
+      c.y + (x + yh) * hh,
+      fill,
+      stroke,
+      lw,
+    );
   }
 
   /**
@@ -72,49 +122,158 @@ export class Painter {
     hex: string,
     stroke?: string,
   ): void {
+    if (a === 0) {
+      this.aaBox(cx - len / 2, cy - wid / 2, len, wid, z0, h, hex, stroke);
+      return;
+    }
+    const c = this.cam;
+    const z = c.zoom;
+    const hw = (TW / 2) * z;
+    const hh = (TH / 2) * z;
+    const zOff0 = z0 * z;
+    const dz = h * z;
+
     const ca = Math.cos(a);
     const sa = Math.sin(a);
     const hl = len / 2;
-    const hw = wid / 2;
-    const L: Pt[] = [
-      [hl, hw],
-      [hl, -hw],
-      [-hl, -hw],
-      [-hl, hw],
-    ].map(([u, v]) => [cx + ca * u - sa * v, cy + sa * u + ca * v]);
-    const faces: Array<{ A: Pt; B: Pt; d: number; left: boolean }> = [];
+    const hwid = wid / 2;
+
+    const gx0 = cx + ca * hl - sa * hwid;
+    const gy0 = cy + sa * hl + ca * hwid;
+    const gx1 = cx + ca * hl + sa * hwid;
+    const gy1 = cy + sa * hl - ca * hwid;
+    const gx2 = cx - ca * hl + sa * hwid;
+    const gy2 = cy - sa * hl - ca * hwid;
+    const gx3 = cx - ca * hl - sa * hwid;
+    const gy3 = cy - sa * hl + ca * hwid;
+
+    const sx0 = c.x + (gx0 - gy0) * hw;
+    const sy0 = c.y + (gx0 + gy0) * hh - zOff0;
+    const sx1 = c.x + (gx1 - gy1) * hw;
+    const sy1 = c.y + (gx1 + gy1) * hh - zOff0;
+    const sx2 = c.x + (gx2 - gy2) * hw;
+    const sy2 = c.y + (gx2 + gy2) * hh - zOff0;
+    const sx3 = c.x + (gx3 - gy3) * hw;
+    const sy3 = c.y + (gx3 + gy3) * hh - zOff0;
+
+    const gxs = [gx0, gx1, gx2, gx3];
+    const gys = [gy0, gy1, gy2, gy3];
+    const sxs = [sx0, sx1, sx2, sx3];
+    const sys = [sy0, sy1, sy2, sy3];
+
+    let f0Idx = -1;
+    let f0D = Infinity;
+    let f0Left = false;
+    let f1Idx = -1;
+    let f1D = Infinity;
+    let f1Left = false;
+
     for (let i = 0; i < 4; i++) {
-      const A = L[i];
-      const B = L[(i + 1) % 4];
-      const mx = (A[0] + B[0]) / 2;
-      const my = (A[1] + B[1]) / 2;
+      const j = (i + 1) & 3;
+      const mx = (gxs[i] + gxs[j]) * 0.5;
+      const my = (gys[i] + gys[j]) * 0.5;
       const nx = mx - cx;
       const ny = my - cy;
-      if (nx + ny > 0.001) faces.push({ A, B, d: mx + my, left: ny > nx });
+      if (nx + ny > 0.001) {
+        const d = mx + my;
+        const left = ny > nx;
+        if (f0Idx === -1) {
+          f0Idx = i;
+          f0D = d;
+          f0Left = left;
+        } else if (d < f0D) {
+          f1Idx = f0Idx;
+          f1D = f0D;
+          f1Left = f0Left;
+          f0Idx = i;
+          f0D = d;
+          f0Left = left;
+        } else {
+          f1Idx = i;
+          f1D = d;
+          f1Left = left;
+        }
+      }
     }
-    faces.sort((p, q) => p.d - q.d);
-    for (const f of faces) {
-      this.poly(
-        [
-          this.P(f.A[0], f.A[1], z0),
-          this.P(f.B[0], f.B[1], z0),
-          this.P(f.B[0], f.B[1], z0 + h),
-          this.P(f.A[0], f.A[1], z0 + h),
-        ],
-        shade(hex, f.left ? 0.84 : 0.66),
+
+    if (f0Idx !== -1) {
+      const j = (f0Idx + 1) & 3;
+      this.quad(
+        sxs[f0Idx],
+        sys[f0Idx],
+        sxs[j],
+        sys[j],
+        sxs[j],
+        sys[j] - dz,
+        sxs[f0Idx],
+        sys[f0Idx] - dz,
+        shade(hex, f0Left ? 0.84 : 0.66),
         stroke,
       );
     }
-    this.poly(
-      L.map((p) => this.P(p[0], p[1], z0 + h)),
+    if (f1Idx !== -1) {
+      const j = (f1Idx + 1) & 3;
+      this.quad(
+        sxs[f1Idx],
+        sys[f1Idx],
+        sxs[j],
+        sys[j],
+        sxs[j],
+        sys[j] - dz,
+        sxs[f1Idx],
+        sys[f1Idx] - dz,
+        shade(hex, f1Left ? 0.84 : 0.66),
+        stroke,
+      );
+    }
+    this.quad(
+      sx0,
+      sy0 - dz,
+      sx1,
+      sy1 - dz,
+      sx2,
+      sy2 - dz,
+      sx3,
+      sy3 - dz,
       shade(hex, 1.06),
       stroke,
     );
   }
 
-  /** Axis-aligned box with corner (x, y), footprint w x d. */
+  /** Axis-aligned box with corner (x, y), footprint w x d. Zero allocations. */
   aaBox(x: number, y: number, w: number, d: number, z0: number, h: number, hex: string, stroke?: string): void {
-    this.oBox(x + w / 2, y + d / 2, w, d, 0, z0, h, hex, stroke);
+    const c = this.cam;
+    const z = c.zoom;
+    const hw = (TW / 2) * z;
+    const hh = (TH / 2) * z;
+    const zOff0 = z0 * z;
+    const dz = h * z;
+
+    const x1 = x + w;
+    const y1 = y + d;
+
+    // 0: (x1, y1), 1: (x1, y), 2: (x, y), 3: (x, y1)
+    const sx0 = c.x + (x1 - y1) * hw;
+    const sy0 = c.y + (x1 + y1) * hh - zOff0;
+    const sx1 = c.x + (x1 - y) * hw;
+    const sy1 = c.y + (x1 + y) * hh - zOff0;
+    const sx2 = c.x + (x - y) * hw;
+    const sy2 = c.y + (x + y) * hh - zOff0;
+    const sx3 = c.x + (x - y1) * hw;
+    const sy3 = c.y + (x + y1) * hh - zOff0;
+
+    const rightCol = shade(hex, 0.66);
+    const leftCol = shade(hex, 0.84);
+
+    if (w < d) {
+      // +x face (0->1) is further back than +y face (3->0)
+      this.quad(sx0, sy0, sx1, sy1, sx1, sy1 - dz, sx0, sy0 - dz, rightCol, stroke);
+      this.quad(sx3, sy3, sx0, sy0, sx0, sy0 - dz, sx3, sy3 - dz, leftCol, stroke);
+    } else {
+      this.quad(sx3, sy3, sx0, sy0, sx0, sy0 - dz, sx3, sy3 - dz, leftCol, stroke);
+      this.quad(sx0, sy0, sx1, sy1, sx1, sy1 - dz, sx0, sy0 - dz, rightCol, stroke);
+    }
+    this.quad(sx0, sy0 - dz, sx1, sy1 - dz, sx2, sy2 - dz, sx3, sy3 - dz, shade(hex, 1.06), stroke);
   }
 
   /** Circle on the floor plane (an ellipse on screen). */

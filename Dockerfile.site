@@ -25,10 +25,7 @@ COPY packages/armor ./packages/armor
 COPY packages/sim ./packages/sim
 COPY apps/site ./apps/site
 
-RUN npm run build -w @warehouse/protocol && \
-    npm run build -w @warehouse/armor && \
-    npm run build -w @warehouse/sim && \
-    npm run build -w @warehouse/site
+RUN npm run build -w @warehouse/site
 
 # Stage 2: Production Runtime
 FROM node:24-slim AS runner

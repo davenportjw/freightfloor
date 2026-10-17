@@ -268,6 +268,15 @@ export async function runLoadtest(
     await Promise.all(batch.map((c) => c.start()));
   }
 
+  // Clear warmup ACK RTT samples captured during the sequential join/handshake storm
+  // so steady-state latency metrics reflect full 128-client concurrent operation.
+  for (const b of bots) {
+    b.metrics.ackRttsMs.length = 0;
+  }
+  for (const p of pilots) {
+    p.metrics.ackRttsMs.length = 0;
+  }
+
   // Let bots & pilots drive, plan, and interact for durationMs
   await new Promise((resolve) => setTimeout(resolve, durationMs));
 

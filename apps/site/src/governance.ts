@@ -1,9 +1,10 @@
 import type { ArmorReasonCode } from '@warehouse/armor';
-import type { ManagerOp } from '@warehouse/protocol';
+import type { DispatchParams, ManagerOp } from '@warehouse/protocol';
 import {
   addVehicle,
   bayAt,
   chargerAt,
+  dispatchOrderRoute,
   isBlocked,
   postP0,
   removeVehicle,
@@ -18,6 +19,7 @@ import {
 export const RUSH_PLAYER_COOLDOWN_SEC = 30; // 30 game-minutes (30 s at 10 Hz)
 export const RUSH_SITE_COOLDOWN_SEC = 20; // min 20 s between rushes
 export const P0_PLAYER_COOLDOWN_SEC = 15; // 15 game-minutes (15 s at 10 Hz)
+export const DISPATCH_PLAYER_COOLDOWN_SEC = 10; // 10 game-minutes (10 s at 10 Hz)
 export const MAX_OPEN_P0_ON_FLOOR = 4;
 export const MAX_CONES_PER_PLAYER = 6;
 export const MAX_CONES_ON_FLOOR = 24;
@@ -88,6 +90,7 @@ export class FacilityGovernor {
   private readonly lastPlayerP0 = new Map<string, TimeStampPair>();
   private readonly lastPlayerConeToggle = new Map<string, TimeStampPair>();
   private readonly lastPlayerFleet = new Map<string, TimeStampPair>();
+  private readonly lastPlayerDispatch = new Map<string, TimeStampPair>();
   private readonly coneMeta = new Map<string, ConeOwnership>();
   private inFlightNlCommands = 0;
 
@@ -440,11 +443,13 @@ export class FacilityGovernor {
         message: err,
       };
     }
-    // Single connected player's vote takes effect immediately
-    if (world.players.size <= 1) {
+    const targetDiff = world.difficultyVotes[clientId];
+    if (targetDiff) {
+      setDifficulty(world, targetDiff);
+    } else {
       setDifficulty(world, level as DifficultyInput | string);
     }
-    return { ok: true, message: `Difficulty vote recorded.` };
+    return { ok: true, message: `Difficulty mode set.` };
   }
 
   public executeVoteDifficulty(
@@ -456,11 +461,67 @@ export class FacilityGovernor {
     return this.tryVoteDifficulty(world, clientId, level, nowMs);
   }
 
+  public getDispatchCooldownLeftMs(
+    world: World,
+    clientId: string,
+    nowMs: number = Date.now(),
+  ): number {
+    const prev = this.lastPlayerDispatch.get(clientId);
+    if (!prev) return 0;
+    const elapsed = this.elapsedSec(world, prev, nowMs);
+    if (elapsed >= DISPATCH_PLAYER_COOLDOWN_SEC) return 0;
+    return Math.ceil((DISPATCH_PLAYER_COOLDOWN_SEC - elapsed) * 1000);
+  }
+
+  public tryDispatch(
+    world: World,
+    clientId: string,
+    dispatch?: DispatchParams,
+    nowMs: number = Date.now(),
+  ): GovernanceResult {
+    const playerElapsed = this.elapsedSec(world, this.lastPlayerDispatch.get(clientId), nowMs);
+    if (playerElapsed < DISPATCH_PLAYER_COOLDOWN_SEC) {
+      const retrySec = Math.ceil(DISPATCH_PLAYER_COOLDOWN_SEC - playerElapsed);
+      const reason = `Player dispatch cooldown active (1 per ${DISPATCH_PLAYER_COOLDOWN_SEC}s; ${retrySec}s left).`;
+      return {
+        ok: false,
+        code: 'governance_limit',
+        reason,
+        message: reason,
+        retryAfterSec: retrySec,
+      };
+    }
+
+    const params: DispatchParams = dispatch ?? {
+      sourceZone: 'haz',
+      targetBay: 'RET',
+      priority: 'p0',
+      count: 3,
+      mode: 'reroute_and_spawn',
+    };
+    const res = dispatchOrderRoute(world, params);
+    if (res.rerouted === 0 && res.spawned === 0) {
+      const reason = `No orders or rack slots available in ${params.sourceZone} right now.`;
+      return {
+        ok: false,
+        code: 'governance_limit',
+        reason,
+        message: reason,
+      };
+    }
+
+    this.lastPlayerDispatch.set(clientId, this.stamp(world, nowMs));
+    return {
+      ok: true,
+      message: res.summary,
+    };
+  }
+
   public executeManagerOp(
     world: World,
     clientId: string,
     op: ManagerOp,
-    coords?: { x?: number; y?: number },
+    coords?: { x?: number; y?: number; dispatch?: DispatchParams },
     nowMs: number = Date.now(),
   ): GovernanceResult {
     switch (op) {
@@ -484,6 +545,8 @@ export class FacilityGovernor {
         return this.tryFleetChange(world, clientId, 1, nowMs);
       case 'fleetRemove':
         return this.tryFleetChange(world, clientId, -1, nowMs);
+      case 'dispatch':
+        return this.tryDispatch(world, clientId, coords?.dispatch, nowMs);
     }
   }
 

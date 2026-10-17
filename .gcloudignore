@@ -1,0 +1,43 @@
+# Git & VCS
+.git
+.gitignore
+
+# Dependencies & Build Outputs
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+**/build/
+*.tsbuildinfo
+
+# Environment & Secrets (NEVER upload to Cloud Build)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*.json
+*service-account*.json
+
+# Terraform State & Local Infra Cache (contains sensitive state)
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/*.tfvars
+infra/*.tfvars.json
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+
+# Tests, Coverage & Local Artifacts
+coverage/
+.vitest/
+playwright-report/
+test-results/
+tools/smoke/out/
+*.log
+.DS_Store
+.idea/
+.vscode/

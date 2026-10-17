@@ -333,6 +333,29 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     expect(welcome2.you.name).toBe('DriverTwo');
     expect(welcome2.you.vid).toMatch(/^DRV-\d+$/);
     expect(server.world.vehicles.some((v) => v.id === welcome2.you.vid)).toBe(true);
+    await c1.waitForType('presence');
+
+    // 4. Score update on driver vehicle broadcasts updated presence with shift points (sPts), and in-place re-hello renames without dropping vehicle
+    const drv2 = server.world.vehicles.find((v) => v.id === welcome2.you.vid)!;
+    drv2.sPts = 15;
+    drv2.bank = 40; // bank is historical shifts; presence & leaderboard both report current shift points (sPts = 15)
+    c1.messages.length = 0;
+    await server.stepTick();
+    const scorePresence = await c1.waitForType('presence');
+    const p2Entry = scorePresence.players.find((p) => p.vid === welcome2.you.vid);
+    expect(p2Entry?.points).toBe(15);
+
+    const renamedTicket2 = makeTicket('client-h2-123456', 'BigLifter');
+    c1.messages.length = 0;
+    c2.messages.length = 0;
+    c2.send({ type: 'hello', ticket: renamedTicket2 });
+    const renameWelcome = await c2.waitForType('welcome');
+    expect(renameWelcome.you.name).toBe('BigLifter');
+    expect(renameWelcome.you.vid).toBe(welcome2.you.vid);
+    const renamePresence = await c1.waitForType('presence');
+    expect(renamePresence.players.find((p) => p.vid === welcome2.you.vid)?.name).toBe('BigLifter');
+    expect(drv2.driver).toBe('BigLifter');
+    expect(drv2.sPts).toBe(15);
 
     // Disconnect c2 -> vehicle removed from world
     await c2.close();
@@ -1102,4 +1125,400 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     expect(saved).not.toBeNull();
     expect(saved?.siteId).toBe('den-1');
   });
+
+  it('forwards boost flag on input messages to the player vehicle in server world', async () => {
+    const { server, wsUrl } = await bootServer();
+    const ticket = makeTicket('boost-driver-1', 'BoostPilot');
+    const client = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(ticket)}`);
+    activeClients.push(client);
+    const welcome = await client.waitForType('welcome');
+    const vid = welcome.you.vid!;
+
+    client.send({
+      type: 'input',
+      up: true,
+      down: false,
+      left: false,
+      right: false,
+      boost: true,
+      seq: 1,
+    });
+
+    // Wait briefly for message processing
+    await new Promise((r) => setTimeout(r, 40));
+    const v = server.world.vehicles.find((veh) => veh.id === vid)!;
+    expect(v.input.boost).toBe(true);
+    expect(v.input.up).toBe(true);
+  });
+
+  it('respawns a fresh 100%-battery player vehicle when reconnecting with a new Run N after battery depletion', async () => {
+    const { server, wsUrl } = await bootServer();
+    const clientId = 'run-retry-client-1234';
+    const ticket1 = makeTicket(clientId, 'Alex Run 1');
+    const client1 = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(ticket1)}`);
+    activeClients.push(client1);
+    const welcome1 = await client1.waitForType('welcome');
+    expect(welcome1.you.vid).toBe('DRV-01');
+    expect(welcome1.you.name).toBe('Alex Run 1');
+
+    const v1 = server.world.vehicles.find((veh) => veh.id === 'DRV-01')!;
+    v1.battery = 0;
+    v1.sPts = 88;
+    v1.deliveries = 3;
+
+    const ticket2 = makeTicket(clientId, 'Alex Run 2');
+    const client2 = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(ticket2)}`);
+    activeClients.push(client2);
+    const welcome2 = await client2.waitForType('welcome');
+    expect(welcome2.you.vid).toBe('DRV-01');
+    expect(welcome2.you.name).toBe('Alex Run 2');
+
+    const v2 = server.world.vehicles.find((veh) => veh.id === 'DRV-01')!;
+    expect(v2.driver).toBe('Alex Run 2');
+    expect(v2.battery).toBe(100);
+    expect(v2.sPts).toBe(0);
+    expect(v2.deliveries).toBe(0);
+  });
+
+  it('routes "get hazmats to returns" via nlCommand to RET bay, emits a2uiScreen on ambiguous commands, and executes a2uiAction dispatch', async () => {
+    const allowArmor: ModelArmorClient = {
+      async sanitizeUserPrompt() {
+        return { flagged: false };
+      },
+      async sanitizeModelResponse() {
+        return { flagged: false };
+      },
+    };
+    const parserStub: NlOrderParserClient = {
+      async parseOrder(fenced) {
+        if (/>\s*get hazmats to returns\s*<\//i.test(fenced.userPrompt)) {
+          return {
+            text: JSON.stringify({
+              action: 'dispatch',
+              dispatch: {
+                sourceZone: 'haz',
+                targetBay: 'RET',
+                priority: 'p0',
+                count: 3,
+                mode: 'reroute_and_spawn',
+              },
+              echo: 'Hazmat pallets routed to Returns & QA',
+            }),
+            tokensIn: 45,
+            tokensOut: 24,
+          };
+        }
+        return {
+          text: JSON.stringify({
+            action: 'clarify',
+            clarifyQuestion: 'Choose a district and destination bay to dispatch:',
+            dispatch: {
+              sourceZone: 'any',
+              targetBay: 'auto',
+              priority: 'p0',
+              count: 3,
+              mode: 'reroute_and_spawn',
+            },
+            echo: 'Opening Dispatch & Objectives console',
+          }),
+          tokensIn: 40,
+          tokensOut: 22,
+        };
+      },
+    };
+
+    const { server, wsUrl } = await bootServer({
+      armorClient: allowArmor,
+      nlParser: parserStub,
+    });
+    const ticket = makeTicket('hazmat-manager-1', 'HazmatMgr');
+    const client = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(ticket)}`);
+    activeClients.push(client);
+    await client.waitForType('welcome');
+
+    // 1. Send "get hazmats to returns" -> dispatches 3 Hazmat (Zone Z) P0 orders to RET bay
+    client.send({
+      type: 'nlCommand',
+      text: 'get hazmats to returns',
+    });
+
+    const echo1 = await client.waitForType('commandEcho');
+    expect(echo1.executed).toBe(true);
+    expect(echo1.text).toBe('get hazmats to returns');
+
+    const retOrders = server.world.orders.filter(
+      (o) => o.bay === 'RET' && o.slot.zone === 'Z',
+    );
+    expect(retOrders.length).toBeGreaterThanOrEqual(3);
+
+    // 2. Use a second manager client (to avoid 15s per-player NL rate limit) and send "what are our objectives?"
+    const ticket2 = makeTicket('hazmat-manager-2', 'ColdMgr');
+    const client2 = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(ticket2)}`);
+    activeClients.push(client2);
+    await client2.waitForType('welcome');
+
+    client2.send({
+      type: 'nlCommand',
+      text: 'what are our objectives?',
+    });
+
+    const clarifyEcho = await client2.waitForType('commandEcho');
+    expect(clarifyEcho.executed).toBe(false);
+    const a2ui = await client2.waitForType('a2uiScreen');
+    expect(a2ui.screenId).toBeTruthy();
+    expect(a2ui.telemetry.length).toBeGreaterThanOrEqual(4);
+    expect(a2ui.selectors.map((s) => s.field)).toEqual([
+      'sourceZone',
+      'targetBay',
+      'priority',
+      'count',
+    ]);
+    expect(a2ui.presets.length).toBeGreaterThanOrEqual(3);
+
+    // 3. Execute a2uiAction dispatch from client2 (a2uiAction uses its own dispatch cooldown, separate from NL rate limit)
+    client2.send({
+      type: 'a2uiAction',
+      screenId: a2ui.screenId,
+      actionId: 'apply_custom',
+      dispatch: {
+        sourceZone: 'cold',
+        targetBay: 'E2',
+        priority: 'urgent',
+        count: 2,
+        mode: 'reroute_and_spawn',
+      },
+    });
+
+    const echo2 = await client2.waitForType('commandEcho');
+    expect(echo2.executed).toBe(true);
+    const coldToE2 = server.world.orders.filter(
+      (o) => o.bay === 'E2' && o.slot.zone === 'W',
+    );
+    expect(coldToE2.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('22. synchronizes presence and heartbeat driver counts across release, takeWheel, transferSite, and duplicate clientId connections', async () => {
+    const { server, wsUrl } = await bootServer();
+
+    const ticketA1 = makeTicket('sync-client-a', 'DriverA');
+    const clientA1 = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(ticketA1)}`);
+    activeClients.push(clientA1);
+    const welcomeA1 = await clientA1.waitForType('welcome');
+    expect(welcomeA1.you.vid).toBeTruthy();
+    await clientA1.waitForType('presence');
+
+    // Second connection with same clientId (e.g., second tab or reconnect overlap)
+    const ticketA2 = makeTicket('sync-client-a', 'DriverA');
+    const clientA2 = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(ticketA2)}`);
+    activeClients.push(clientA2);
+    await clientA2.waitForType('welcome');
+    const presDedup = await clientA1.waitForType('presence');
+    expect(presDedup.players).toHaveLength(1);
+    expect(presDedup.players[0]?.role).toBe('driver');
+    expect(presDedup.players[0]?.vid).toBe(welcomeA1.you.vid);
+
+    await server.flushHeartbeat();
+    const hbs1 = await server.persistence.getHeartbeats();
+    const hbBothDriving = hbs1.find((h) => h.siteId === 'den-1')!;
+    expect(hbBothDriving.players).toBe(1);
+    expect(hbBothDriving.spectators).toBe(0);
+    expect(hbBothDriving.driverClientIds).toEqual(['sync-client-a']);
+
+    // Connect a spectator (spectate=1) -> 1 driver, 1 spectator
+    const ticketSpec = makeTicket('sync-client-spec', 'SpectatorB');
+    const clientSpec = await connectWsClient(
+      `${wsUrl}?spectate=1&ticket=${encodeURIComponent(ticketSpec)}`,
+    );
+    activeClients.push(clientSpec);
+    const welcomeSpec = await clientSpec.waitForType('welcome');
+    expect(welcomeSpec.you.vid).toBeNull();
+    const presWithSpec = await clientA1.waitForType('presence');
+    expect(presWithSpec.players).toHaveLength(2);
+    expect(presWithSpec.players.find((p) => p.clientId === 'sync-client-spec')?.role).toBe(
+      'spectator',
+    );
+
+    await server.flushHeartbeat();
+    const hbsSpec = await server.persistence.getHeartbeats();
+    const hbWithSpec = hbsSpec.find((h) => h.siteId === 'den-1')!;
+    expect(hbWithSpec.players).toBe(1);
+    expect(hbWithSpec.spectators).toBe(1);
+    expect(hbWithSpec.driverClientIds).toEqual(['sync-client-a']);
+
+    // Spectator takes wheel of an AI vehicle (FL-01) -> becomes driver (2 drivers, 0 spectators)
+    clientA1.messages.length = 0;
+    clientSpec.send({ type: 'takeWheel', vid: 'FL-01' });
+    const presSpecDriving = await clientA1.waitForType('presence');
+    const specEntryDriving = presSpecDriving.players.find((p) => p.clientId === 'sync-client-spec');
+    expect(specEntryDriving?.role).toBe('driver');
+    expect(specEntryDriving?.vid).toBe('FL-01');
+
+    await server.flushHeartbeat();
+    const hbsSpecDriving = await server.persistence.getHeartbeats();
+    const hbSpecDriving = hbsSpecDriving.find((h) => h.siteId === 'den-1')!;
+    expect(hbSpecDriving.players).toBe(2);
+    expect(hbSpecDriving.spectators).toBe(0);
+    expect(hbSpecDriving.driverClientIds).toEqual(['sync-client-a', 'sync-client-spec']);
+
+    // Spectator releases wheel of FL-01 -> returns to spectator (1 driver, 1 spectator)
+    clientA1.messages.length = 0;
+    clientSpec.send({ type: 'release' });
+    const presSpecReleased = await clientA1.waitForType('presence');
+    const specEntryReleased = presSpecReleased.players.find(
+      (p) => p.clientId === 'sync-client-spec',
+    );
+    expect(specEntryReleased?.role).toBe('spectator');
+    expect(specEntryReleased?.vid).toBeNull();
+
+    await server.flushHeartbeat();
+    const hbsSpecReleased = await server.persistence.getHeartbeats();
+    const hbSpecReleased = hbsSpecReleased.find((h) => h.siteId === 'den-1')!;
+    expect(hbSpecReleased.players).toBe(1);
+    expect(hbSpecReleased.spectators).toBe(1);
+    expect(hbSpecReleased.driverClientIds).toEqual(['sync-client-a']);
+  });
+
+  it('23. enforces requireProxyAuth so backend game engine rejects direct external HTTP/WS access without x-warehouse-proxy', async () => {
+    const { PROXY_HEADER_NAME, signProxyHeader } = await import('@warehouse/protocol');
+    const { baseUrl, wsUrl } = await bootServer({ requireProxyAuth: true });
+
+    // /healthz remains open for Cloud Run startup/liveness probes
+    const healthRes = await fetch(`${baseUrl}/healthz`);
+    expect(healthRes.status).toBe(200);
+
+    // Direct unauthenticated calls to /api/state, /api/status, /api/ticket, /api/journal, /internal/wake return 403
+    expect((await fetch(`${baseUrl}/api/state`)).status).toBe(403);
+    expect((await fetch(`${baseUrl}/api/status`)).status).toBe(403);
+    expect((await fetch(`${baseUrl}/api/journal`)).status).toBe(403);
+    expect(
+      (
+        await fetch(`${baseUrl}/api/ticket`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ clientId: 'direct-1', name: 'DirectCaller' }),
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await fetch(`${baseUrl}/internal/wake`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ immediate: true }),
+        })
+      ).status,
+    ).toBe(403);
+
+    // Direct unauthenticated WebSocket connection is rejected before upgrade (403)
+    const ticket = makeTicket('proxy-test-client', 'ProxyDriver');
+    await expect(
+      connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(ticket)}`),
+    ).rejects.toThrow();
+
+    // Authenticated requests from the lobby proxy (with valid x-warehouse-proxy header) succeed
+    const proxyHeader = signProxyHeader('den-1', DEFAULT_TICKET_SECRET);
+    const stateOkRes = await fetch(`${baseUrl}/api/state`, {
+      headers: { [PROXY_HEADER_NAME]: proxyHeader },
+    });
+    expect(stateOkRes.status).toBe(200);
+
+    const proxiedClient = await connectWsClient(
+      `${wsUrl}?ticket=${encodeURIComponent(ticket)}`,
+      { [PROXY_HEADER_NAME]: proxyHeader },
+    );
+    activeClients.push(proxiedClient);
+    const welcome = await proxiedClient.waitForType('welcome');
+    expect(welcome.you.clientId).toBe('proxy-test-client');
+  });
+
+  it('24. handles setRunMode, surge relocation offers at FREE_RANGE_SOFT_CAP, acceptRelocation (+75 pts), and carry-over ticket restoration', async () => {
+    const sharedStore = new InMemoryPersistenceStore();
+    // Seed a warm target shard heartbeat (slc-2 with 4 drivers)
+    await sharedStore.writeHeartbeat({
+      siteId: 'slc-2',
+      phase: 'running',
+      players: 4,
+      spectators: 0,
+      agents: 14,
+      throughputPerMin: 12,
+      shiftValue: 200,
+      updatedAt: Date.now(),
+    });
+
+    const { server: denServer, wsUrl: denWsUrl } = await bootServer({
+      siteId: 'den-1',
+      persistence: sharedStore,
+    });
+    const { server: slcServer, wsUrl: slcWsUrl } = await bootServer({
+      siteId: 'slc-2',
+      persistence: sharedStore,
+    });
+
+    // Connect a human driver and switch to freerange mode
+    const ticketMain = makeTicket('reloc-driver-main', 'SurgeRider');
+    const mainClient = await connectWsClient(`${denWsUrl}?ticket=${encodeURIComponent(ticketMain)}`);
+    activeClients.push(mainClient);
+    const wMain = await mainClient.waitForType('welcome');
+    const mainVid = wMain.you.vid!;
+
+    mainClient.send({ type: 'setRunMode', mode: 'freerange' });
+    await new Promise((r) => setTimeout(r, 25));
+    const mainVeh = denServer.world.vehicles.find((v) => v.id === mainVid)!;
+    expect(mainVeh.runMode).toBe('freerange');
+
+    // Give mainVeh some points, deliveries, streak, and an active + done card
+    mainVeh.sPts = 120;
+    mainVeh.runPts = 120;
+    mainVeh.sShipped = 6;
+    mainVeh.deliveries = 6;
+    mainVeh.runDeliveries = 6;
+    mainVeh.streak = 4;
+    mainVeh.bestStreak = 4;
+    const hand = dealCards(denServer.world, 'reloc-driver-main');
+    if (hand.offer && hand.offer.length > 0) {
+      mainClient.send({ type: 'keepCards', ids: [hand.offer[0]!.id] });
+      await new Promise((r) => setTimeout(r, 25));
+    }
+
+    // Add 25 more driver entries on denServer so activeDrivers >= 26 (FREE_RANGE_SOFT_CAP)
+    const extraClients: WsClientHelper[] = [];
+    for (let i = 0; i < 25; i++) {
+      const cid = `crowd-drv-${i}`;
+      const t = makeTicket(cid, `Crowd${i}`);
+      const c = await connectWsClient(`${denWsUrl}?ticket=${encodeURIComponent(t)}`);
+      activeClients.push(c);
+      extraClients.push(c);
+      await c.waitForType('welcome');
+    }
+
+    await denServer.checkSurgeRelocation(Date.now());
+    const offerMsg = await mainClient.waitForType('relocationOffer');
+    expect(offerMsg.fromSite).toBe('den-1');
+    expect(offerMsg.toSite).toBe('slc-2');
+    expect(offerMsg.bonusPts).toBe(75);
+
+    // Accept relocation
+    mainClient.send({ type: 'acceptRelocation', toSite: 'slc-2' });
+    const relocMsg = await mainClient.waitForType('relocateShard');
+    expect(relocMsg.toSite).toBe('slc-2');
+    expect(relocMsg.bonusPts).toBe(75);
+    expect(typeof relocMsg.ticket).toBe('string');
+
+    // Connect to slc-2 using the minted carry-over ticket
+    const slcClient = await connectWsClient(
+      `${slcWsUrl}?ticket=${encodeURIComponent(relocMsg.ticket)}`,
+    );
+    activeClients.push(slcClient);
+    const wSlc = await slcClient.waitForType('welcome');
+    const slcVeh = slcServer.world.vehicles.find((v) => v.id === wSlc.you.vid)!;
+    expect(slcVeh).toBeDefined();
+    expect(slcVeh.runMode).toBe('freerange');
+    expect(slcVeh.sPts).toBe(120 + 75);
+    expect(slcVeh.runPts).toBe(120 + 75);
+    expect(slcVeh.deliveries).toBe(6);
+    expect(slcVeh.streak).toBe(4);
+  });
 });
+
+
+

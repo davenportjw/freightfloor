@@ -5,11 +5,48 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "wireit",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "wireit"
+  },
+  "wireit": {
+    "build": {
+      "command": "vite build",
+      "dependencies": [
+        "../../packages/armor:build",
+        "../../packages/protocol:build",
+        "../../packages/sim:build",
+        "../../:sprites"
+      ],
+      "files": [
+        "src/**",
+        "public/**",
+        "index.html",
+        "vite.config.ts",
+        "tsconfig.json"
+      ],
+      "output": [
+        "dist/**"
+      ],
+      "clean": "if-file-deleted"
+    },
+    "test": {
+      "command": "vitest run",
+      "dependencies": [
+        "../../packages/armor:build",
+        "../../packages/protocol:build",
+        "../../packages/sim:build"
+      ],
+      "files": [
+        "test/**",
+        "src/**",
+        "tsconfig.json"
+      ],
+      "output": []
+    }
   },
   "dependencies": {
+    "@warehouse/armor": "*",
     "@warehouse/protocol": "*",
     "@warehouse/sim": "*",
     "zod": "^3.24.2"
