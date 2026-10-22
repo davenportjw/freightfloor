@@ -39,12 +39,37 @@ export const HUMAN_ONLY_CARD_TYPES: ReadonlySet<string> = new Set(
 
 export { ALLOWED_GEMINI_MODELS, type AllowedGeminiModel };
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
+
+/**
+ * Validate a configured Gemini model name against the protocol allow-list.
+ * Unset/blank values fall back to {@link DEFAULT_GEMINI_MODEL}; anything else
+ * that is not allow-listed throws so a misconfigured deploy fails loudly at
+ * startup instead of failing every brain/NL call at runtime.
+ */
+export function resolveGeminiModel(value?: string | null): AllowedGeminiModel {
+  const trimmed = value?.trim();
+  if (!trimmed) return DEFAULT_GEMINI_MODEL;
+  if ((ALLOWED_GEMINI_MODELS as readonly string[]).includes(trimmed)) {
+    return trimmed as AllowedGeminiModel;
+  }
+  throw new Error(
+    `GEMINI_MODEL=${JSON.stringify(trimmed)} is not allowed; expected one of: ${ALLOWED_GEMINI_MODELS.join(', ')}`,
+  );
+}
 export const DEFAULT_GEMINI_LOCATION = 'global';
 export const DEFAULT_GCP_PROJECT =
   process.env.GCP_PROJECT_ID ||
   process.env.GOOGLE_CLOUD_PROJECT ||
   'davenport-boutique';
 export const MAX_CONCURRENT_BRAIN_CALLS = 8;
+/**
+ * Per-attempt Gemini timeout for brain decisions. Flash-Lite with `thinkingBudget: 0` and a
+ * 120-token JSON answer returns well under a second, so 4 s bounds a hung call without
+ * cutting off healthy ones. With 1 retry the worst case per decision is ~8 s.
+ */
+export const BRAIN_CALL_TIMEOUT_MS = 4_000;
+/** Total model attempts per decision (1 initial + 1 retry). */
+export const BRAIN_MAX_ATTEMPTS = 2;
 export const BRAIN_ERROR_BACKOFF_MS = 3000;
 export const BRAIN_ERROR_BACKOFF_GAME_MIN = 3.0;
 
@@ -67,6 +92,8 @@ export interface BrainDecisionBroadcast {
   type: 'brainDecision';
   reqId: number;
   agentId: number;
+  /** Vehicle id the decision is for (lets the client pin the insight without digit-matching). */
+  vid?: string;
   kind: DecisionKind;
   decision: Record<string, unknown>;
   note: string;
@@ -112,7 +139,7 @@ export class VertexGeminiBrainClient implements BrainModelClient {
   constructor(opts?: { projectId?: string; location?: string; model?: string }) {
     const project = opts?.projectId ?? process.env.GCP_PROJECT_ID ?? DEFAULT_GCP_PROJECT;
     const location = opts?.location ?? process.env.GEMINI_LOCATION ?? DEFAULT_GEMINI_LOCATION;
-    this.model = opts?.model ?? process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL;
+    this.model = opts?.model ?? resolveGeminiModel(process.env.GEMINI_MODEL);
     this.ai = new GoogleGenAI({
       vertexai: true,
       project,
@@ -135,7 +162,9 @@ export class VertexGeminiBrainClient implements BrainModelClient {
         maxOutputTokens: 120,
         thinkingConfig: { thinkingBudget: 0 },
         responseMimeType: 'application/json',
-        abortSignal: AbortSignal.timeout(15_000),
+        // Structured output keeps the decision JSON parseable (same as the NL parser).
+        responseSchema: params.responseSchema as Record<string, unknown>,
+        abortSignal: AbortSignal.timeout(BRAIN_CALL_TIMEOUT_MS),
       },
     });
 
@@ -464,7 +493,7 @@ export class AgentBrainScheduler {
 
   constructor(opts: AgentBrainSchedulerOptions) {
     this.siteId = opts.siteId;
-    this.modelName = opts.modelName ?? process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL;
+    this.modelName = opts.modelName ?? resolveGeminiModel(process.env.GEMINI_MODEL);
     this.client = opts.client ?? new VertexGeminiBrainClient({ model: this.modelName });
     this.persistence = opts.persistence;
     this.maxConcurrent = opts.maxConcurrent ?? MAX_CONCURRENT_BRAIN_CALLS;
@@ -555,14 +584,19 @@ export class AgentBrainScheduler {
   }
 
   /**
-   * Drains pending decisions from `world.pendingDecisions` in priority order:
-   * `hazard` > `contract` > `cards` > `tactics`, up to `maxConcurrent` (8) in-flight requests.
-   * Zero Gemini calls when `world.phase !== 'running'`.
+   * Dispatches pending decisions from `world.pendingDecisions` in priority order
+   * (`hazard` > `contract` > `cards` > `tactics`) into free concurrency slots (`maxConcurrent`, 8).
+   * Each request runs independently and frees its own slot when it settles, so one slow or hung
+   * Gemini call never blocks the others or the next drain. With `wait: true` (default) the
+   * promise resolves once the requests dispatched by THIS call settle (tests, foreground ticks);
+   * the live server calls it with `wait: false` on every background tick.
+   * Zero Gemini calls when `world.phase !== 'running'`. Never rejects.
    */
   public async drainQueue(
     world: World,
     nowMs: number = Date.now(),
     extraUntrustedStrings: readonly string[] = [],
+    opts: { wait?: boolean } = {},
   ): Promise<void> {
     if (world.phase !== 'running') {
       return;
@@ -593,15 +627,48 @@ export class AgentBrainScheduler {
       if (this.inFlightReqIds.size >= this.maxConcurrent) {
         break;
       }
-      this.inFlightReqIds.add(req.id);
-      const task = this.executeRequest(world, req, nowMs, extraUntrustedStrings).finally(() => {
-        this.inFlightReqIds.delete(req.id);
-      });
-      dispatched.push(task);
+      dispatched.push(this.dispatchOne(world, req, nowMs, extraUntrustedStrings));
     }
 
-    if (dispatched.length > 0) {
+    if (opts.wait !== false && dispatched.length > 0) {
       await Promise.all(dispatched);
+    }
+  }
+
+  /** Runs one request in its own slot; the slot is released as soon as this request settles. */
+  private dispatchOne(
+    world: World,
+    req: DecisionRequest,
+    nowMs: number,
+    extraUntrustedStrings: readonly string[],
+  ): Promise<void> {
+    this.inFlightReqIds.add(req.id);
+    return this.executeRequest(world, req, nowMs, extraUntrustedStrings)
+      .catch((err) => {
+        // executeRequest records its own failures; this only catches a failure while recording.
+        console.error(
+          `[brain] ${req.kind} ${req.id} failed outside the decision path: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      })
+      .finally(() => {
+        this.inFlightReqIds.delete(req.id);
+      });
+  }
+
+  /** Record agent spend; a ledger failure is logged and never triggers another model call. */
+  private async recordUsageSafe(tokensIn: number, tokensOut: number, nowMs: number): Promise<void> {
+    if (tokensIn <= 0 && tokensOut <= 0) return;
+    try {
+      const updatedBudget = await this.persistence.recordUsage('agent', tokensIn, tokensOut, undefined, nowMs);
+      this.lastBudgetLeftUsd = Math.max(
+        0,
+        Number((updatedBudget.agentCapUsd - updatedBudget.agentSpentUsd).toFixed(4)),
+      );
+      this.budgetPaused = updatedBudget.agentSpentUsd >= updatedBudget.agentCapUsd;
+    } catch (err) {
+      console.error(
+        `[brain] agent usage record failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -615,24 +682,40 @@ export class AgentBrainScheduler {
       return;
     }
 
-    // Check daily $25.00 agent budget ledger BEFORE calling Gemini
-    const budget = await this.persistence.checkBudget('agent', nowMs);
-    this.budgetPaused = !budget.allowed;
-    this.lastBudgetLeftUsd = Math.max(0, Number((budget.capUsd - budget.spentUsd).toFixed(4)));
-    if (!budget.allowed) {
-      const errMsg = `Daily agent budget exhausted ($${budget.spentUsd.toFixed(2)}/$${budget.capUsd.toFixed(2)})`;
-      await this.recordBrainFailure(world, req, errMsg, 0, nowMs);
+    let systemInstruction: string;
+    let prompt: string;
+    let responseSchema: unknown;
+    try {
+      // Check daily agent budget BEFORE calling Gemini
+      const budget = await this.persistence.checkBudget('agent', nowMs);
+      this.budgetPaused = !budget.allowed;
+      this.lastBudgetLeftUsd = Math.max(0, Number((budget.capUsd - budget.spentUsd).toFixed(4)));
+      if (!budget.allowed) {
+        const errMsg = `Daily agent budget exhausted ($${budget.spentUsd.toFixed(2)}/$${budget.capUsd.toFixed(2)})`;
+        await this.recordBrainFailure(world, req, errMsg, 0, nowMs);
+        return;
+      }
+
+      ({ systemInstruction, prompt } = renderDecisionPrompt(world, req, extraUntrustedStrings));
+      responseSchema = GEMINI_RESPONSE_SCHEMAS[req.kind];
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      await this.recordBrainFailure(world, req, `Brain pre-call failed: ${errMsg}`, 0, nowMs);
       return;
     }
 
-    const { systemInstruction, prompt } = renderDecisionPrompt(world, req, extraUntrustedStrings);
-    const responseSchema = GEMINI_RESPONSE_SCHEMAS[req.kind];
-
     const startMs = Date.now();
     let lastError: Error | null = null;
+    let usedTokensIn = 0;
+    let usedTokensOut = 0;
+    let success:
+      | { raw: RawBrainResponse; mapped: ReturnType<typeof parseAndMapDecision>; latencyMs: number }
+      | null = null;
+    let stale = false;
 
-    // 1 initial attempt + 1 retry with jittered backoff (2 total attempts)
-    for (let attempt = 0; attempt < 2; attempt++) {
+    // Bounded retry: BRAIN_MAX_ATTEMPTS model calls with jittered backoff. Only the model call,
+    // parse and sim apply are inside the loop; usage is recorded once after it.
+    for (let attempt = 0; attempt < BRAIN_MAX_ATTEMPTS; attempt++) {
       if (attempt > 0 && this.retryDelayMs > 0) {
         const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(this.retryDelayMs / 2)));
         await new Promise((r) => setTimeout(r, this.retryDelayMs + jitter));
@@ -645,22 +728,10 @@ export class AgentBrainScheduler {
           prompt,
           responseSchema,
         });
+        usedTokensIn += raw.tokensIn;
+        usedTokensOut += raw.tokensOut;
         const latencyMs = Math.max(1, Date.now() - startMs);
         const mapped = parseAndMapDecision(req, raw.text);
-
-        // Record token usage in budget ledger
-        const updatedBudget = await this.persistence.recordUsage(
-          'agent',
-          raw.tokensIn,
-          raw.tokensOut,
-          undefined,
-          nowMs,
-        );
-        this.lastBudgetLeftUsd = Math.max(
-          0,
-          Number((updatedBudget.agentCapUsd - updatedBudget.agentSpentUsd).toFixed(4)),
-        );
-        this.budgetPaused = updatedBudget.agentSpentUsd >= updatedBudget.agentCapUsd;
 
         // Apply decision to simulation
         const applied = applyDecision(world, req.id, mapped.simDecision, {
@@ -673,59 +744,77 @@ export class AgentBrainScheduler {
         if (!applied.ok) {
           if (applied.error === 'stale') {
             // Order/spill changed while request was in flight; not a brain error
-            return;
+            stale = true;
+            break;
           }
           throw new Error(applied.detail || `Illegal ${req.kind} decision`);
         }
-
-        this.callSamples.push({
-          atMs: nowMs,
-          latencyMs,
-          tokensIn: raw.tokensIn,
-          tokensOut: raw.tokensOut,
-        });
-
-        const numericReqId =
-          Number.parseInt(req.id.replace(/\D+/g, ''), 10) || ++this.reqCounter;
-        const agentNum = numericAgentId(req.agentId);
-
-        const journalEntry: DecisionJournalEntry = {
-          id: `${this.siteId}-${req.id}-${nowMs}`,
-          siteId: this.siteId,
-          reqId: numericReqId,
-          agentId: agentNum,
-          agentName: req.agentId,
-          kind: req.kind,
-          promptSummary: prompt.slice(0, 240),
-          decision: mapped.wireDecision,
-          note: mapped.note,
-          model: raw.model ?? this.modelName,
-          latencyMs,
-          tokensIn: raw.tokensIn,
-          tokensOut: raw.tokensOut,
-          createdAt: nowMs,
-          expireAt: nowMs + JOURNAL_TTL_MS,
-        };
-        await this.persistence.appendDecisionJournal(this.siteId, journalEntry);
-
-        if (this.onDecisionBroadcast) {
-          this.onDecisionBroadcast({
-            type: 'brainDecision',
-            reqId: numericReqId,
-            agentId: agentNum,
-            kind: req.kind,
-            decision: mapped.wireDecision,
-            note: mapped.note,
-            latencyMs,
-            tokensIn: raw.tokensIn,
-            tokensOut: raw.tokensOut,
-            model: raw.model ?? this.modelName,
-          });
-        }
-        return;
+        success = { raw, mapped, latencyMs };
+        break;
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
       }
+    }
+
+    // Every billed model call is recorded exactly once, outside the retry loop.
+    await this.recordUsageSafe(usedTokensIn, usedTokensOut, nowMs);
+
+    if (stale) return;
+
+    if (success) {
+      const { raw, mapped, latencyMs } = success;
+      this.callSamples.push({
+        atMs: nowMs,
+        latencyMs,
+        tokensIn: raw.tokensIn,
+        tokensOut: raw.tokensOut,
+      });
+
+      const numericReqId =
+        Number.parseInt(req.id.replace(/\D+/g, ''), 10) || ++this.reqCounter;
+      const agentNum = numericAgentId(req.agentId);
+
+      const journalEntry: DecisionJournalEntry = {
+        id: `${this.siteId}-${req.id}-${nowMs}`,
+        siteId: this.siteId,
+        reqId: numericReqId,
+        agentId: agentNum,
+        agentName: req.agentId,
+        kind: req.kind,
+        promptSummary: prompt.slice(0, 240),
+        decision: mapped.wireDecision,
+        note: mapped.note,
+        model: raw.model ?? this.modelName,
+        latencyMs,
+        tokensIn: raw.tokensIn,
+        tokensOut: raw.tokensOut,
+        createdAt: nowMs,
+        expireAt: nowMs + JOURNAL_TTL_MS,
+      };
+      try {
+        await this.persistence.appendDecisionJournal(this.siteId, journalEntry);
+      } catch (err) {
+        console.error(
+          `[brain] decision journal write failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      if (this.onDecisionBroadcast) {
+        this.onDecisionBroadcast({
+          type: 'brainDecision',
+          reqId: numericReqId,
+          agentId: agentNum,
+          vid: req.agentId,
+          kind: req.kind,
+          decision: mapped.wireDecision,
+          note: mapped.note,
+          latencyMs,
+          tokensIn: raw.tokensIn,
+          tokensOut: raw.tokensOut,
+          model: raw.model ?? this.modelName,
+        });
+      }
+      return;
     }
 
     // Strict No-Mock Policy: never synthesize a rule-based fallback decision.

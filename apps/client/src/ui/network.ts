@@ -79,13 +79,13 @@ export function mountNetwork(zone: HTMLElement, ctx: UiCtx): UiModule & { panel:
           sw.disabled = !canSwitchTo(s, store.siteId, net);
           if (!here && sw.disabled && s.maxDrivers !== undefined && s.drivers >= s.maxDrivers) sw.title = 'Site is full';
           kids.push(
-            el('div', { class: `site-row${here ? ' row-hl' : ''}`, title: `${theme.subtitle} — ${theme.cargoLabel}` }, [
+            el('div', { class: `site-row${here ? ' row-hl' : ''}`, title: `${theme.city} — ${theme.cargoLabel}` }, [
               el('span', { class: `dot state-${s.state}`, title: s.state }),
               el('div', { class: 'grow' }, [
                 el('b', { text: `${s.id.toUpperCase()} · ${theme.name}` }),
                 el('div', {
                   class: 'muted small num',
-                  text: `${theme.subtitle} · ${s.state} · ${s.phase} · tier ${s.tier} · ${s.drivers}/${s.maxDrivers ?? DASH} drivers · ${s.spectators} watching · ${s.shipped} shipped`,
+                  text: `${theme.city} · ${s.state} · ${s.phase} · tier ${s.tier} · ${s.drivers}/${s.maxDrivers ?? DASH} drivers · ${s.spectators} watching · ${s.shipped} shipped`,
                 }),
               ]),
               sw,

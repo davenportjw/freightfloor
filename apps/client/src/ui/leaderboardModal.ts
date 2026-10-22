@@ -9,9 +9,11 @@
  */
 import { leaderboard, type Vehicle, type World } from '@warehouse/sim';
 import type { LeaderboardModalTab } from '../state.js';
+import { isOwnLeaderboardRow } from '../identity.js';
 import type { UiCtx, UiModule } from './context.js';
 import { button, el, KeyedView, swatch, type Child } from './dom.js';
 import { difficultyLabel, shiftLeft, teamColor } from './format.js';
+import { createFocusTrap, type TrapContainer } from './focusTrap.js';
 
 export interface SillyAward {
   id: 'crashes' | 'palletDrops' | 'skids' | 'nearMisses' | 'lowBattery' | 'parkingBrake';
@@ -368,6 +370,7 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
   );
 
   overlay.replaceChildren(card);
+  const focusTrap = createFocusTrap(overlay as unknown as TrapContainer<HTMLElement>);
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) actions.showLeaderboardModal(false);
   });
@@ -393,7 +396,7 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
       const teamLabel = r.human
         ? r.runMode === 'freerange'
           ? '🌐 Free Range'
-          : '⏱️ 5m Blitz'
+          : '⏱️ 3m Blitz'
         : r.strat;
       return el(
         'tr',
@@ -448,7 +451,7 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
         ]),
         el('p', {
           class: 'hint',
-          text: '+10 pts per pallet, +40 pts P0 critical, streak multiplier up to 1.5× (3/5/8 on-time), +6 pts Returns & QA containment, +5 pts cross-site stow, −15 pts per crash.',
+          text: '+10 pts per pallet, +40 pts P0 critical, fare combo up to ×2.0 (SPEEDY/NORMAL trips), +6 pts Returns & QA containment, +5 pts cross-site stow, −15 pts per crash.',
         }),
         rows.length
           ? el('div', { class: 'lb-table-scroll' }, [
@@ -497,49 +500,81 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
           }),
           el('span', {
             class: 'muted small num',
-            text: `Site totals: ${t.incidents} crashes · ${t.palletDrops ?? 0} pallet drops · ${t.skids ?? 0} skids · ${t.nearMisses} near misses`,
+            text: `Site totals: ${t.incidents} crashes · ${t.palletDrops ?? 0} pallet drops · ${t.skids ?? 0} skids · ${t.nearMisses ?? 0} near misses`,
           }),
         ]),
         el('p', {
           class: 'hint',
           text: 'Live lighthearted awards tracked from real 10 Hz warehouse physics—boost into a rack with cargo, drift through a floor spill, or run your battery down to 1% to claim a trophy!',
         }),
-        el(
-          'div',
-          { class: 'silly-awards-grid' },
-          awards.map((a) =>
-            el(
-              'article',
-              {
-                class: `silly-award-card${a.mine ? ' silly-award-card--mine' : ''}${a.vid ? ' silly-award-card--clickable' : ''}`,
-                attrs: { 'data-award': a.id },
-                title: a.vid ? `Click to inspect ${a.vid} on the floor` : a.title,
-                onClick: () => {
-                  if (a.vid) {
-                    actions.select(a.vid);
-                    actions.showLeaderboardModal(false);
-                  }
-                },
-              },
-              [
-                el('div', { class: 'silly-award-card__head' }, [
-                  el('span', { class: 'silly-award-icon', text: a.icon }),
-                  el('div', { class: 'silly-award-titles' }, [
-                    el('h4', { class: 'silly-award-title', text: a.title }),
-                    el('span', { class: 'muted small', text: a.subtitle }),
-                  ]),
-                  el('span', { class: 'tag silly-award-stat num', text: a.statText }),
+        el('div', { class: 'lb-table-scroll' }, [
+          el(
+            'table',
+            {
+              class: 'lb-modal-table silly-awards-table num',
+              attrs: { 'data-role': 'silly-awards-table' },
+            },
+            [
+              el('thead', {}, [
+                el('tr', {}, [
+                  el('th', { text: 'Award' }),
+                  el('th', { text: 'Category' }),
+                  el('th', { text: 'Current Holder' }),
+                  el('th', { class: 'r', text: 'Record' }),
+                  el('th', { text: 'Floor Notes' }),
                 ]),
-                el('div', { class: 'silly-award-holder' }, [
-                  a.strat ? swatch(a.human ? teamColor('Human') : teamColor(a.strat)) : null,
-                  el('b', { text: a.holder }),
-                  a.mine ? el('span', { class: 'tag lb-you-tag', text: '★ YOU' }) : null,
-                ]),
-                el('p', { class: 'silly-award-caption muted small', text: a.caption }),
-              ],
-            ),
+              ]),
+              el(
+                'tbody',
+                {},
+                awards.map((a) =>
+                  el(
+                    'tr',
+                    {
+                      class: [
+                        'lb-table-row',
+                        'silly-award-row',
+                        a.mine ? 'row-hl b silly-award-row--mine' : '',
+                        a.human && !a.mine ? 'lb-table-row--human' : '',
+                        a.vid ? 'silly-award-row--clickable' : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' '),
+                      attrs: { 'data-award': a.id },
+                      title: a.vid ? `Click to inspect ${a.vid} on the floor` : a.title,
+                      onClick: () => {
+                        if (a.vid) {
+                          actions.select(a.vid);
+                          actions.showLeaderboardModal(false);
+                        }
+                      },
+                    },
+                    [
+                      el('td', { class: 'silly-award-cell-title' }, [
+                        el('div', { class: 'silly-award-head' }, [
+                          el('span', { class: 'silly-award-icon', text: a.icon }),
+                          el('span', { class: 'silly-award-title', text: a.title }),
+                        ]),
+                      ]),
+                      el('td', { class: 'muted small silly-award-sub', text: a.subtitle }),
+                      el('td', {}, [
+                        el('div', { class: 'lb-driver-cell silly-award-holder' }, [
+                          a.strat ? swatch(a.human ? teamColor('Human') : teamColor(a.strat)) : null,
+                          el('b', { text: a.holder }),
+                          a.mine ? el('span', { class: 'tag lb-you-tag', text: '★ YOU' }) : null,
+                        ]),
+                      ]),
+                      el('td', { class: 'r num' }, [
+                        el('span', { class: 'tag silly-award-stat num', text: a.statText }),
+                      ]),
+                      el('td', { class: 'muted small silly-award-caption', text: a.caption }),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
-        ),
+        ]),
       ],
     );
   }
@@ -605,14 +640,14 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
         ]),
         el('p', {
           class: 'hint',
-          text: 'Best 5-Min Blitz scores, normalized pace (PPM), and cumulative lifetime points across DEN-1, SLC-2, PHX-3, and ABQ-4.',
+          text: 'Best 3-Minute Blitz scores, normalized pace (PPM), and cumulative lifetime points across DEN-1, SLC-2, PHX-3, and ABQ-4.',
         }),
         entries.length
           ? el(
               'div',
               { class: 'lb-hall-list' },
               entries.map((e, i) => {
-                const mine = store.you?.clientId === e.clientId;
+                const mine = isOwnLeaderboardRow(e, store.selfPublicId());
                 const blitzBadge =
                   typeof e.bestBlitzPts === 'number' && e.bestBlitzPts > 0
                     ? `⏱️ Best Blitz: ${Math.round(e.bestBlitzPts)} pts · `
@@ -676,6 +711,7 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
       const open = store.ui.leaderboardModalOpen;
       if (!open) {
         if (!overlay.hidden) overlay.hidden = true;
+        focusTrap.deactivate();
         return;
       }
       const wasHidden = overlay.hidden;
@@ -699,7 +735,7 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
         .join(',');
       const key = `${store.welcomed}|${tab}|${Math.floor(w.t)}|${vKey}|${w.hallOfFame.length}|${store.network.updatedAt}|${store.you?.name ?? ''}`;
       bodyView.render(key, () => renderModalContent(tab));
-      if (wasHidden) closeBtn.focus();
+      if (wasHidden) focusTrap.activate(closeBtn);
     },
   };
 }

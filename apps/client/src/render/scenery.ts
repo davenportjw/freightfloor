@@ -1,4 +1,5 @@
 /** District palette, rack palette and static scenery (racks, structures, cargo items). */
+import { getCanonicalBaseSiteId } from '@warehouse/protocol';
 import {
   getSiteTheme,
   HUMAN,
@@ -166,7 +167,7 @@ const SITE_VISUALS: Record<'den-1' | 'slc-2' | 'phx-3' | 'abq-4', SiteVisualPale
 
 export function getSiteVisuals(siteId = 'den-1'): SiteVisualPalette {
   const theme = getSiteTheme(siteId);
-  return SITE_VISUALS[theme.id];
+  return SITE_VISUALS[getCanonicalBaseSiteId(theme.id)];
 }
 
 type RackPal = [string, string, string[]];
@@ -214,7 +215,7 @@ export function drawRack(p: Painter, r: Rack, siteId = 'den-1'): void {
   const hsh = (x * 7 + y * 13 + x * y) % 7;
   const k = r.kind;
   const theme = getSiteTheme(siteId);
-  const sitePal = SITE_RACK_PAL[theme.id] ?? RACK_PAL;
+  const sitePal = SITE_RACK_PAL[getCanonicalBaseSiteId(theme.id)] ?? RACK_PAL;
   const pal = sitePal[k] ?? sitePal.ambient ?? RACK_PAL.ambient!;
 
   if (p.cam.zoom < 0.7) {
@@ -338,9 +339,36 @@ export function drawRack(p: Painter, r: Rack, siteId = 'den-1'): void {
 }
 
 /**
+ * Resolves the pre-baked isometric 3D cargo sprite key (`cargo_<style>_<variant>`)
+ * for an order at the given regional site.
+ */
+export function resolveCargoSpriteKey(
+  o: Pick<Order, 'id' | 'p0' | 'isTransfer'>,
+  siteId = 'den-1',
+): string {
+  const theme = getSiteTheme(siteId);
+  const suffix = o.p0
+    ? 'p0'
+    : o.isTransfer
+      ? 'net'
+      : String(Math.abs(o.id || 0) % 3);
+  return `cargo_${theme.cargoStyle}_${suffix}`;
+}
+
+/**
+ * Resolves the pre-baked isometric 3D conveyor tote sprite key (`conv_<style>_<variant>`)
+ * for a moving outbound tote at the given regional site.
+ */
+export function resolveConveyorSpriteKey(index: number, siteId = 'den-1'): string {
+  const theme = getSiteTheme(siteId);
+  const variant = Math.abs(Math.floor(index)) % 2;
+  return `conv_${theme.cargoStyle}_${variant}`;
+}
+
+/**
  * Draws an order's physical cargo item at aisle slot `(x, y)` starting at height `z0`.
- * Styled according to the site's cargo theme (`boxes`, `plants`, `tech`, `artisan`),
- * while preserving P0 and transfer (`→ NET`) visual highlights.
+ * Uses the baked 96x96 2:1 isometric 3D sprite when `p.sprite` has a loaded atlas,
+ * falling back to procedural 3D primitives otherwise.
  */
 export function drawCargoItem(
   p: Painter,
@@ -350,6 +378,10 @@ export function drawCargoItem(
   o: Pick<Order, 'id' | 'p0' | 'isTransfer'>,
   siteId = 'den-1',
 ): void {
+  const key = resolveCargoSpriteKey(o, siteId);
+  if (typeof (p as Partial<Painter>).sprite === 'function' && p.sprite(key, x + 0.5, y + 0.5, z0, 1.5)) {
+    return;
+  }
   const theme = getSiteTheme(siteId);
   const variant = Math.abs(o.id || 0) % 3;
 
@@ -431,6 +463,10 @@ export function drawConveyorItem(
   index: number,
   siteId = 'den-1',
 ): void {
+  const key = resolveConveyorSpriteKey(index, siteId);
+  if (typeof (p as Partial<Painter>).sprite === 'function' && p.sprite(key, x + 0.5, y, z0, 1.5)) {
+    return;
+  }
   const theme = getSiteTheme(siteId);
   if (theme.cargoStyle === 'plants') {
     p.cyl(x + 0.5, y, 0.18, z0, 3.8, '#C2410C');

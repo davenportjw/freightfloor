@@ -4,6 +4,7 @@
  */
 import { leaderboard, STRAT_ORDER, type StrategyName } from '@warehouse/sim';
 import { DRAWER_TABS, type DrawerTab } from '../state.js';
+import { isOwnLeaderboardRow } from '../identity.js';
 import type { UiCtx, UiModule } from './context.js';
 import { button, el, KeyedView, swatch } from './dom.js';
 import { DASH, eventColor, teamColor, timeOfDay } from './format.js';
@@ -61,7 +62,7 @@ export function mountDrawer(drawer: HTMLElement, ctx: UiCtx): UiModule {
                 .filter((e) => !e.isBot)
                 .slice(0, 10)
                 .map((e, i) =>
-                  el('div', { class: `lb-row num${store.you?.clientId === e.clientId ? ' row-hl b' : ''}` }, [
+                  el('div', { class: `lb-row num${isOwnLeaderboardRow(e, store.selfPublicId()) ? ' row-hl b' : ''}` }, [
                     el('span', { class: 'rank muted', text: String(i + 1) }),
                     el('span', { class: 'grow ellipsis', text: `${e.name}${e.siteId ? ` · ${e.siteId.toUpperCase()}` : ''}` }),
                     el('span', { class: 'muted small', text: `${e.deliveries} del` }),

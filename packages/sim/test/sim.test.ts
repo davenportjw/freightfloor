@@ -3,10 +3,12 @@ import {
   addVehicle,
   applyDecision,
   BLITZ_DURATION_MIN,
+  blitzLeaderboard,
   BOOST_SPEED_MUL,
   buildMap,
   buildOccupancy,
   compactFacilityIfNeeded,
+  computeBlitzPacePts,
   computeDriverOnTimePct,
   computeDriverPpm,
   ContractOption,
@@ -16,38 +18,50 @@ import {
   deliver,
   dispatchOrderRoute,
   dropPalletOnCollision,
+  evaluateRackLift,
   FLEET_CAP,
   getCardModifiers,
   getSiteTheme,
   humanInteract,
   INTERACT_REACH,
+  isRackSlot,
   keepCards,
+  leaderboard,
   markBrainError,
   MAX_TIER,
+  maxRackLevelsForKind,
+  parseDriverRunInfo,
   postOrder,
+  RACK_LEVEL_FORK_TARGETS,
   receiveTransfer,
+  recordCompletedRun,
+  release,
   releaseWheel,
   removePlayerVehicle,
   removeVehicle,
+  requiresRackLift,
   restore,
   RUN_CARD_GRACE_MIN,
   serialize,
   setDifficulty,
   setDriverRunMode,
   setPhase,
+  setVehicleAutopilot,
   SITE_THEMES,
   SKILLS,
   spawnPlayerVehicle,
   spawnSpill,
+  startBlitzClock,
   stepHuman,
-  streakMultiplier,
   takeWheel,
   tick,
   tierCap,
   vehicleReach,
+  VICTIM_STUN_MIN,
   voteDifficulty,
   World,
 } from '../src/index.js';
+import * as sim from '../src/index.js';
 
 /**
  * Helper for tests to drive pending Brain decisions through the real `applyDecision` API
@@ -379,11 +393,12 @@ describe('@warehouse/sim M1 verification suite', () => {
     expect(out.fromSite).toBe('den-1');
     expect(out.toSite).toBe(to.destSite);
 
-    // Receive transfer on destination world: idempotent by transfer.id and worth value + 5
+    // Receive transfer on destination world: idempotent by transfer.id; lands as a putaway order worth 8 + 5
     const destWorld = createWorld({ seed: 6007, siteId: out.toSite });
     const inbound1 = receiveTransfer(destWorld, out);
     expect(inbound1).not.toBeNull();
-    expect(inbound1!.value).toBe(out.value + 5);
+    expect(inbound1!.value).toBe(13);
+    expect(inbound1!.putaway).toBeTruthy();
     expect(destWorld.totals.transfersIn).toBe(1);
 
     // Duplicate receiveTransfer with the same id is a no-op
@@ -576,7 +591,7 @@ describe('@warehouse/sim M1 verification suite', () => {
 
     // (a) Low-speed player vehicle driving into AI vehicle stops (speedNow = 0) and cannot drive through it
     for (let i = 0; i < 40; i++) {
-      p1.speedNow = 0.8; // keep below 1.3 incident threshold to test low-speed stop
+      p1.speedNow = 0.8; // keep below the 1.65 incident threshold to test low-speed stop
       stepHuman(w, p1, { up: true, down: false, left: false, right: false }, 0.05);
     }
     expect(p1.speedNow).toBe(0);
@@ -591,7 +606,8 @@ describe('@warehouse/sim M1 verification suite', () => {
     expect(p1.speedNow).toBeLessThan(0);
     expect(p1.px).toBeLessThan(9.5);
 
-    // (c) High-speed collision (speedNow > 1.3) triggers incident (stuns both vehicles, zeroes speed, records incident)
+    // (c) High-speed collision (speedNow > COLLISION_SPEED 1.65) triggers an incident: the rammer is
+    // stunned 4 min and charged the incident; the parked victim only gets a short stun.
     p1.px = 9.55;
     p1.py = rowY + 0.5;
     p1.tile = { x: 9, y: rowY };
@@ -608,7 +624,8 @@ describe('@warehouse/sim M1 verification suite', () => {
     expect(p1.stunnedUntil).toBeGreaterThan(w.t);
     expect(ai.stunnedUntil).toBeGreaterThan(w.t);
     expect(p1.incidents).toBeGreaterThanOrEqual(1);
-    expect(ai.incidents).toBeGreaterThanOrEqual(1);
+    expect(ai.incidents).toBe(0);
+    expect(ai.stunnedUntil).toBeLessThanOrEqual(w.t + VICTIM_STUN_MIN + 1e-6);
 
     // Clear stuns and test backing up + steering away after high-speed collision
     p1.stunnedUntil = 0;
@@ -686,13 +703,16 @@ describe('@warehouse/sim M1 verification suite', () => {
 });
 
 describe('Speed boost and collision pallet drop', () => {
-  it('accelerates faster and reaches higher top speed when boost is held', () => {
+  it('accelerates faster and reaches higher top speed when boost is held (3.15 base unboosted vs 6.93 base boosted)', () => {
+    expect(BOOST_SPEED_MUL).toBe(2.2);
+    expect(3.15 * BOOST_SPEED_MUL).toBeCloseTo(6.93, 5);
+
     const wNorm = createWorld({ seed: 42, agents: 0 });
     const wBoost = createWorld({ seed: 42, agents: 0 });
     const vNorm = spawnPlayerVehicle(wNorm, 'p-norm', 'Norm')!;
     const vBoost = spawnPlayerVehicle(wBoost, 'p-boost', 'Boost')!;
 
-    // Place both on open east-west spine y = 13 heading east
+    // Place both on open east-west highway spine y = 13 heading east (normal difficulty: diffSpeed = 1.35, highway K_SPEED = 1.0)
     vNorm.tile = { x: 4, y: 13 };
     vNorm.px = 4.5;
     vNorm.py = 13.5;
@@ -708,9 +728,30 @@ describe('Speed boost and collision pallet drop', () => {
       stepHuman(wBoost, vBoost, { up: true, down: false, left: false, right: false, boost: true }, 0.05);
     }
 
+    expect(vNorm.speedNow / 1.35).toBeCloseTo(3.15, 4);
+    expect(vBoost.speedNow / 1.35).toBeCloseTo(6.93, 4);
     expect(vBoost.speedNow).toBeGreaterThan(vNorm.speedNow);
     expect(vBoost.speedNow).toBeCloseTo(vNorm.speedNow * BOOST_SPEED_MUL, 2);
     expect(vBoost.px).toBeGreaterThan(vNorm.px);
+
+    // Also verify Easy difficulty (diffSpeed = 1.15, K_SPEED = 1.0) base top speeds: 3.15 unboosted, 6.93 boosted
+    setDifficulty(wNorm, 'easy');
+    setDifficulty(wBoost, 'easy');
+    vNorm.tile = { x: 4, y: 13 };
+    vNorm.px = 4.5;
+    vNorm.py = 13.5;
+    vNorm.speedNow = 0;
+    vBoost.tile = { x: 4, y: 13 };
+    vBoost.px = 4.5;
+    vBoost.py = 13.5;
+    vBoost.speedNow = 0;
+
+    for (let i = 0; i < 20; i++) {
+      stepHuman(wNorm, vNorm, { up: true, down: false, left: false, right: false, boost: false }, 0.05);
+      stepHuman(wBoost, vBoost, { up: true, down: false, left: false, right: false, boost: true }, 0.05);
+    }
+    expect(vNorm.speedNow / 1.15).toBeCloseTo(3.15, 4);
+    expect(vBoost.speedNow / 1.15).toBeCloseTo(6.93, 4);
   });
 
   it('drops carried pallet onto floor and stuns driver when boosting into an obstacle, allowing re-pickup', () => {
@@ -991,7 +1032,7 @@ describe('Speed boost and collision pallet drop', () => {
     expect(skuPrefixes.size).toBe(4);
   });
 
-  it('supports 5-Minute Blitz mode with card grace period, personal run telemetry, and isolation from 480-min site shift rollovers', () => {
+  it('supports 3-Minute Blitz mode with card grace period, personal run telemetry, and isolation from 480-min site shift rollovers', () => {
     const w = createWorld({ seed: 777, agents: 0 });
     w.t = 470; // 10 sim-minutes before global 480-min shift rollover
     const v = spawnPlayerVehicle(w, 'blitz-driver', 'BlitzAce', 'blitz')!;
@@ -1001,9 +1042,12 @@ describe('Speed boost and collision pallet drop', () => {
     expect(v.runGraceUntil).toBeCloseTo(470 + RUN_CARD_GRACE_MIN, 4);
     expect(v.runFinished).toBe(false);
 
-    // Selecting cards immediately starts the 300 sim-min (5 real min) Blitz timer
+    // Drive-first: keeping cards does NOT start the clock; the first driving input does.
     const offerIds = w.cards['blitz-driver']!.offer.map((c) => c.id);
     keepCards(w, 'blitz-driver', offerIds.slice(0, 2));
+    expect(v.runStartedAt).toBeNull();
+    expect(v.runEndsAt).toBeNull();
+    startBlitzClock(w, v);
     expect(v.runStartedAt).toBe(470);
     expect(v.runEndsAt).toBeCloseTo(470 + BLITZ_DURATION_MIN, 4);
     expect(v.runGraceUntil).toBeNull();
@@ -1029,15 +1073,15 @@ describe('Speed boost and collision pallet drop', () => {
     expect(v.runFinished).toBe(false);
     expect(w.cards['blitz-driver']!.cards.length).toBe(2);
 
-    // Advance to t=770 (end of 300 sim-min Blitz run; 2880 ticks = 288 sim-min)
-    w.t = 769;
+    // Advance to t=650 (end of 180 sim-min Blitz run; 470 + 180 = 650)
+    w.t = 649;
     for (let i = 0; i < 10; i++) {
       tick(w, 0.1);
     }
-    expect(w.t).toBeCloseTo(770, 3);
+    expect(w.t).toBeCloseTo(650, 3);
     expect(v.runFinished).toBe(true);
-    expect(computeDriverPpm(w, v)).toBeCloseTo(0.6, 4);
-    expect(computeDriverPpm(v, w.t)).toBeCloseTo(0.6, 4);
+    expect(computeDriverPpm(w, v)).toBeCloseTo(1.0, 4);
+    expect(computeDriverPpm(v, w.t)).toBeCloseTo(1.0, 4);
     expect(computeDriverOnTimePct(v)).toBe(100);
 
     // Switching to Free Range clears runEndsAt and allows continuous play
@@ -1115,13 +1159,14 @@ describe('Speed boost and collision pallet drop', () => {
     expect(vNorm.battery).toBeGreaterThanOrEqual(15);
   });
 
-  it('retains completed card modifiers as permanent buffs, auto-redraws a new card offer when active cards < 2, and includes 4 new skills', () => {
+  it('retains completed card modifiers as permanent buffs, auto-redraws a new card offer when active cards < 2 (Free Range), and includes 4 new skills', () => {
     for (const title of ['Overdrive', 'Long Reach', 'Eco Cell', 'High Roller']) {
       expect(SKILLS.some((s) => s.title === title)).toBe(true);
     }
 
     const w = createWorld({ seed: 909, agents: 0 });
-    const v = spawnPlayerVehicle(w, 'card-driver', 'CardMaster', 'blitz')!;
+    // Auto-redraw replacement offers are a Free Range feature (the Blitz deck is dealt once).
+    const v = spawnPlayerVehicle(w, 'card-driver', 'CardMaster', 'freerange')!;
     const h = w.cards['card-driver']!;
 
     // Replace active hand with a deterministic speed card + a fragile card
@@ -1174,12 +1219,8 @@ describe('Speed boost and collision pallet drop', () => {
     expect(h.offer!.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('applies delivery streak multipliers (1.15x at 3, 1.3x at 5, 1.5x at 8+) and resets streak on late delivery or pallet drop', () => {
-    expect(streakMultiplier(0)).toBe(1.0);
-    expect(streakMultiplier(2)).toBe(1.0);
-    expect(streakMultiplier(3)).toBe(1.15);
-    expect(streakMultiplier(5)).toBe(1.3);
-    expect(streakMultiplier(8)).toBe(1.5);
+  it('tracks the delivery streak as a stat only (no multiplier) and resets it on a pallet drop', () => {
+    expect((sim as Record<string, unknown>).streakMultiplier).toBeUndefined();
 
     const w = createWorld({ seed: 919, agents: 0 });
     const v = spawnPlayerVehicle(w, 'streak-driver', 'StreakPilot', 'blitz')!;
@@ -1212,10 +1253,471 @@ describe('Speed boost and collision pallet drop', () => {
     expect(v.streak).toBe(0);
     expect(v.bestStreak).toBe(3);
   });
+
+  it('steers toward board-directional moveAngle and always drives forward without reversing', () => {
+    const w = createWorld({ seed: 101, agents: 0 });
+    const v = spawnPlayerVehicle(w, 'touch-driver', 'TouchPilot', 'freerange')!;
+    v.px = 10;
+    v.py = 2; // Open top highway row y=2
+    v.tile = { x: 10, y: 2 };
+    v.angle = 0;
+    v.speedNow = 0;
+
+    // Pulling joystick down on screen corresponds to world angle +pi/4 (down-right in world tiles)
+    const downScreenAngle = Math.PI / 4;
+    for (let i = 0; i < 10; i++) {
+      stepHuman(w, v, { up: false, down: true, left: false, right: false, moveAngle: downScreenAngle }, 0.05);
+      // Even though `down: true` is set, moveAngle mode never drives in reverse
+      expect(v.speedNow).toBeGreaterThanOrEqual(0);
+    }
+    expect(v.angle).toBeCloseTo(downScreenAngle, 2);
+    expect(v.speedNow).toBeGreaterThan(0);
+
+    // Sudden 180-degree joystick flip (toward -3*pi/4, screen up): brakes toward 0 while turning, never goes negative
+    const upScreenAngle = -3 * (Math.PI / 4);
+    stepHuman(w, v, { up: true, down: false, left: false, right: false, moveAngle: upScreenAngle }, 0.02);
+    expect(v.speedNow).toBeGreaterThanOrEqual(0);
+
+    for (let i = 0; i < 20; i++) {
+      stepHuman(w, v, { up: true, down: false, left: false, right: false, moveAngle: upScreenAngle }, 0.05);
+      expect(v.speedNow).toBeGreaterThanOrEqual(0);
+    }
+    expect(v.angle).toBeCloseTo(upScreenAngle, 2);
+    expect(v.speedNow).toBeGreaterThan(0);
+  });
+
+  it('persists multiple runs per user (Run 1, Run 2, Run 3) on leaderboard and blitzLeaderboard without overwriting prior runs', () => {
+    const w = createWorld({ seed: 2027, agents: 2 });
+    expect(parseDriverRunInfo('Alex Run 2')).toEqual({ baseName: 'Alex', runNumber: 2 });
+    expect(parseDriverRunInfo('Forklift-A')).toEqual({ baseName: 'Forklift-A', runNumber: 1 });
+
+    // Start Run 1
+    const v1 = spawnPlayerVehicle(w, 'client-alex', 'Alex Run 1', 'blitz')!;
+    v1.runStartedAt = 0;
+    v1.runEndsAt = 300;
+    v1.runPts = 140;
+    v1.sPts = 140;
+    v1.runDeliveries = 6;
+    v1.deliveries = 6;
+    v1.sShipped = 6;
+    v1.runOnTime = 5;
+    v1.bestStreak = 4;
+    v1.runFinished = true;
+    recordCompletedRun(w, v1);
+
+    // Start Run 2 on the same client -> archives Run 1 under distinct run ID and resets vehicle for Run 2
+    const v2 = spawnPlayerVehicle(w, 'client-alex', 'Alex Run 2', 'blitz')!;
+    expect(w.completedRuns?.[0]?.id).toBe(`${v1.id}:run-1`);
+    expect(v2.runPts).toBe(0);
+    v2.runStartedAt = 310;
+    v2.runEndsAt = 610;
+    v2.runPts = 195;
+    v2.sPts = 195;
+    v2.runDeliveries = 8;
+    v2.deliveries = 8;
+    v2.sShipped = 8;
+    v2.runOnTime = 8;
+    v2.bestStreak = 6;
+
+    // Start Run 3 -> archives Run 2 even if it was mid-run with deliveries, and spawns Run 3
+    const v3 = spawnPlayerVehicle(w, 'client-alex', 'Alex Run 3', 'blitz')!;
+    v3.runStartedAt = 620;
+    v3.runEndsAt = 920;
+    v3.runPts = 220;
+    v3.sPts = 220;
+    v3.runDeliveries = 9;
+    v3.deliveries = 9;
+    v3.sShipped = 9;
+    v3.runOnTime = 9;
+
+    // Verify completedRuns holds Run 1 and Run 2
+    expect(w.completedRuns.map((r) => r.driver)).toEqual(['Alex Run 1', 'Alex Run 2']);
+
+    // Verify both leaderboard(w) and blitzLeaderboard(w) contain all 3 runs for Alex
+    const lbDrivers = leaderboard(w).map((r) => r.driver);
+    expect(lbDrivers).toContain('Alex Run 1');
+    expect(lbDrivers).toContain('Alex Run 2');
+    expect(lbDrivers).toContain('Alex Run 3');
+
+    const blitzRows = blitzLeaderboard(w);
+    const alexRuns = blitzRows.filter((r) => (r.driver ?? '').startsWith('Alex Run'));
+    expect(alexRuns.map((r) => r.driver)).toEqual(['Alex Run 3', 'Alex Run 2', 'Alex Run 1']);
+    expect(alexRuns.map((r) => r.blitzPts)).toEqual([220, 195, 140]);
+
+    // Verify serialize/restore round-trip preserves completedRuns
+    const snap = serialize(w);
+    expect(snap.completedRuns).toHaveLength(2);
+    const restored = restore(snap);
+    expect(restored.completedRuns.map((r) => r.driver)).toEqual(['Alex Run 1', 'Alex Run 2']);
+  });
+
+  it('computes non-zero AI PPM and normalizes AI full-shift points into a 3-minute Blitz pace (blitzPts)', () => {
+    const w = createWorld({ seed: 2028, agents: 2 });
+    w.shiftTime = 1200; // 20 real minutes (1200 game-minutes) into the shift
+    w.t = 1200;
+
+    const ai = w.vehicles.find((v) => !v.human)!;
+    ai.sShipped = 30; // 30 pallets in 20 real minutes -> 1.5 PPM
+    ai.deliveries = 30;
+    ai.sPts = 1000; // 1000 points in 1200 game-min -> (1000 * 180) / 1200 = 150 blitzPts
+
+    const ppm = computeDriverPpm(ai, w);
+    expect(ppm).toBeCloseTo(1.5, 5);
+
+    const blitzPts = computeBlitzPacePts(ai, w);
+    expect(blitzPts).toBe(150);
+
+    // A human who scored 180 points in a 3-minute Blitz outranks the AI on blitzLeaderboard
+    // even though the AI has 1000 raw shift points
+    const human = spawnPlayerVehicle(w, 'client-pace', 'PacePilot Run 1', 'blitz')!;
+    human.runStartedAt = 1020;
+    human.runEndsAt = 1200;
+    human.runPts = 180;
+    human.sPts = 180;
+    human.runDeliveries = 8;
+    human.deliveries = 8;
+    human.sShipped = 8;
+
+    const shiftRows = leaderboard(w);
+    expect(shiftRows[0]!.id).toBe(ai.id); // Raw shift leaderboard has 1000 > 180
+
+    const blitzRows = blitzLeaderboard(w);
+    expect(blitzRows[0]!.id).toBe(human.id); // Normalized 3m Blitz leaderboard has 180 > 150
+    expect(blitzRows[0]!.blitzPts).toBe(180);
+    expect(blitzRows.find((r) => r.id === ai.id)?.blitzPts).toBe(150);
+    expect(blitzRows.find((r) => r.id === ai.id)?.ppm).toBeCloseTo(1.5, 5);
+  });
+
+  it('integrates 60Hz client and 10Hz server human turning identically and funnels 90-degree turns into 1-tile rack aisles without corner-stopping', () => {
+    // 1. 60Hz vs 10Hz integration parity during a 90° turn
+    const wClient = createWorld({ seed: 3030, agents: 0 });
+    const wServer = createWorld({ seed: 3030, agents: 0 });
+    const vc = spawnPlayerVehicle(wClient, 'c-60', 'Client60')!;
+    const vs = spawnPlayerVehicle(wServer, 's-10', 'Server10')!;
+
+    vc.px = 4.5;
+    vc.py = 13.5;
+    vc.tile = { x: 4, y: 13 };
+    vc.angle = 0;
+    vc.speedNow = 3.15;
+
+    vs.px = 4.5;
+    vs.py = 13.5;
+    vs.tile = { x: 4, y: 13 };
+    vs.angle = 0;
+    vs.speedNow = 3.15;
+
+    for (let tickIdx = 1; tickIdx <= 6; tickIdx++) {
+      const inp = {
+        up: true,
+        down: false,
+        left: tickIdx <= 5,
+        right: false,
+        boost: false,
+      };
+      stepHuman(wServer, vs, inp, 0.1);
+      for (let sub = 0; sub < 6; sub++) {
+        stepHuman(wClient, vc, inp, 0.1 / 6);
+      }
+    }
+
+    expect(Math.hypot(vc.px - vs.px, vc.py - vs.py)).toBeLessThan(0.015);
+    expect(vc.angle).toBeCloseTo(vs.angle, 4);
+
+    // 2. 90° turn at full cruise speed from highway y=13.5 into a 1-tile rack aisle
+    const wTurn = createWorld({ seed: 3031, agents: 0 });
+    const vTurn = spawnPlayerVehicle(wTurn, 'c-aisle', 'AisleDriver')!;
+    const hy = wTurn.map.hwyY[1]!;
+    const rackSet = new Set(wTurn.map.racks.map((r) => `${r.x},${r.y}`));
+    let aisleColX = 9;
+    for (let x = 8; x < wTurn.map.w - 4; x++) {
+      if (
+        rackSet.has(`${x},${hy + 1}`) &&
+        !rackSet.has(`${x + 1},${hy + 1}`) &&
+        rackSet.has(`${x + 2},${hy + 1}`)
+      ) {
+        aisleColX = x + 1;
+        break;
+      }
+    }
+    vTurn.px = aisleColX + 0.5 - 1.0; // start 1 tile before aisle entrance at full cruise speed
+    vTurn.py = hy + 0.5;
+    vTurn.tile = { x: Math.floor(vTurn.px), y: hy };
+    vTurn.angle = 0;
+    vTurn.speedNow = 4.25;
+
+    for (let step = 0; step < 90; step++) {
+      const turning = Math.abs(vTurn.angle - Math.PI / 2) > 0.08;
+      stepHuman(
+        wTurn,
+        vTurn,
+        { up: true, down: false, left: false, right: turning, boost: false },
+        1 / 60,
+      );
+    }
+
+    // Vehicle must have cleanly entered the rack aisle (y > hy + 2.5) centered near aisleColX + 0.5 without stopping on the rack corner
+    expect(vTurn.py).toBeGreaterThan(hy + 2.5);
+    expect(Math.abs(vTurn.px - (aisleColX + 0.5))).toBeLessThan(0.2);
+    expect(vTurn.speedNow).toBeGreaterThan(2.0);
+
+    // 3. Sub-tick inputQueue draining in tick(w, 0.1) executes brief sub-tick turns accurately
+    const wSub = createWorld({ seed: 3032, agents: 0 });
+    const vSub = spawnPlayerVehicle(wSub, 'c-sub', 'SubTickDriver')!;
+    vSub.px = 8.5;
+    vSub.py = 13.5;
+    vSub.tile = { x: 8, y: 13 };
+    vSub.angle = 0;
+    vSub.speedNow = 3.5;
+    vSub.input = { up: true, down: false, left: false, right: false };
+    vSub.inputQueue = [
+      { input: { up: true, down: false, left: false, right: false }, dt: 0.03 },
+      { input: { up: true, down: false, left: false, right: true }, dt: 0.05 },
+      { input: { up: true, down: false, left: false, right: false }, dt: 0.02 },
+    ];
+
+    tick(wSub, 0.1);
+    expect(vSub.inputQueue).toHaveLength(0);
+    expect(vSub.angle).toBeGreaterThan(0.15);
+
+    // 4. setVehicleAutopilot() and release() clear queued sub-tick inputs and carried dt
+    vSub.inputQueue = [
+      { input: { up: true, down: false, left: true, right: false }, dt: 0.05 },
+    ];
+    vSub.inputCarriedDt = 0.04;
+    setVehicleAutopilot(wSub, vSub, true);
+    expect(vSub.inputQueue).toEqual([]);
+    expect(vSub.inputCarriedDt).toBe(0);
+
+    vSub.inputQueue = [
+      { input: { up: true, down: false, left: false, right: true }, dt: 0.05 },
+    ];
+    vSub.inputCarriedDt = 0.03;
+    release(wSub, vSub.id);
+    expect(vSub.inputQueue).toEqual([]);
+    expect(vSub.inputCarriedDt).toBe(0);
+  });
+
+  it('supports overflow regional shard IDs in getSiteTheme, buildMap, and createWorld', () => {
+    const den2Theme = getSiteTheme('den-2');
+    expect(den2Theme.id).toBe('den-2');
+    expect(den2Theme.code).toBe('DEN-2');
+    expect(den2Theme.name).toBe('Denver, CO #2');
+    expect(den2Theme.title).toBe('Denver, CO Annex #2');
+    expect(den2Theme.cargoStyle).toBe(SITE_THEMES['den-1'].cargoStyle);
+    expect(den2Theme.skuPrefix).toBe(SITE_THEMES['den-1'].skuPrefix);
+    expect(den2Theme.accentColor).toBe(SITE_THEMES['den-1'].accentColor);
+
+    const slc3Theme = getSiteTheme('slc-3');
+    expect(slc3Theme.id).toBe('slc-3');
+    expect(slc3Theme.code).toBe('SLC-3');
+    expect(slc3Theme.name).toBe('Salt Lake City, UT #3');
+    expect(slc3Theme.title).toBe('Salt Lake City, UT Annex #3');
+    expect(slc3Theme.cargoStyle).toBe(SITE_THEMES['slc-2'].cargoStyle);
+    expect(slc3Theme.skuPrefix).toBe(SITE_THEMES['slc-2'].skuPrefix);
+
+    const phx4Theme = getSiteTheme('phx-4');
+    expect(phx4Theme.id).toBe('phx-4');
+    expect(phx4Theme.code).toBe('PHX-4');
+    expect(phx4Theme.cargoStyle).toBe(SITE_THEMES['phx-3'].cargoStyle);
+    expect(phx4Theme.skuPrefix).toBe(SITE_THEMES['phx-3'].skuPrefix);
+
+    const abq5Theme = getSiteTheme('abq-5');
+    expect(abq5Theme.id).toBe('abq-5');
+    expect(abq5Theme.code).toBe('ABQ-5');
+    expect(abq5Theme.cargoStyle).toBe(SITE_THEMES['abq-4'].cargoStyle);
+    expect(abq5Theme.skuPrefix).toBe(SITE_THEMES['abq-4'].skuPrefix);
+
+    // Map layout normalization by region prefix
+    const mapSlc3 = buildMap(0, 'slc-3');
+    const mapSlc2 = buildMap(0, 'slc-2');
+    expect(mapSlc3.racks).toEqual(mapSlc2.racks);
+    expect(mapSlc3.zoneKind).toEqual(mapSlc2.zoneKind);
+
+    const mapPhx4 = buildMap(0, 'phx-4');
+    const mapPhx3 = buildMap(0, 'phx-3');
+    expect(mapPhx4.racks).toEqual(mapPhx3.racks);
+    expect(mapPhx4.zoneKind).toEqual(mapPhx3.zoneKind);
+
+    const mapAbq5 = buildMap(0, 'abq-5');
+    const mapAbq4 = buildMap(0, 'abq-4');
+    expect(mapAbq5.racks).toEqual(mapAbq4.racks);
+    expect(mapAbq5.zoneKind).toEqual(mapAbq4.zoneKind);
+
+    const mapDen2 = buildMap(0, 'den-2');
+    const mapDen1 = buildMap(0, 'den-1');
+    expect(mapDen2.racks).toEqual(mapDen1.racks);
+    expect(mapDen2.zoneKind).toEqual(mapDen1.zoneKind);
+
+    // createWorld initializes cleanly with string or options object for overflow siteId
+    const wStr = createWorld('den-2');
+    expect(wStr.siteId).toBe('den-2');
+    expect(wStr.map.racks).toEqual(mapDen1.racks);
+
+    const wObj = createWorld({ siteId: 'slc-3', seed: 4242 });
+    expect(wObj.siteId).toBe('slc-3');
+    expect(wObj.map.racks).toEqual(mapSlc2.racks);
+  });
+
+  it('always starts a fresh driver run in takeWheel and finishes Blitz runs at 00:00 in tick(w)', () => {
+    const w = createWorld({ seed: 5150, agents: 2 });
+    w.t = 600;
+    const ai = w.vehicles.find((v) => !v.human)!;
+    // Simulate stale boot-time Blitz fields on an AI vehicle
+    ai.runMode = 'blitz';
+    ai.runStartedAt = 0;
+    ai.runEndsAt = 315;
+    ai.runPts = 99;
+    ai.runDeliveries = 4;
+
+    const err = takeWheel(w, ai.id, 'WheelDriver Run 1', 'client-wheel-1', 'blitz');
+    expect(err).toBeNull();
+    expect(ai.human).toBe(true);
+    expect(ai.runMode).toBe('blitz');
+    expect(ai.runStartedAt).toBeNull();
+    expect(ai.runEndsAt).toBeNull();
+    expect(ai.runFinished).toBe(false);
+    expect(ai.runPts).toBe(0);
+    expect(ai.runDeliveries).toBe(0);
+
+    // Even if runEndsAt is set while runStartedAt was null, tick(w) finishes the Blitz run when w.t >= runEndsAt
+    ai.runEndsAt = 900;
+    ai.runStartedAt = null;
+    ai.runPts = 120;
+    ai.runDeliveries = 5;
+    ai.path = [{ x: 4, y: 4 }];
+    ai.inputQueue = [{ input: { up: true, down: false, left: false, right: false }, dt: 0.05 }];
+    w.t = 900;
+
+    tick(w, 0.1);
+    expect(ai.runFinished).toBe(true);
+    expect(ai.runStartedAt).toBe(900 - BLITZ_DURATION_MIN);
+    expect(ai.speedNow).toBe(0);
+    expect(ai.path).toEqual([]);
+    expect(ai.inputQueue).toEqual([]);
+    expect(w.completedRuns?.some((r) => r.vehicleId === ai.id && r.pts === 120)).toBe(true);
+  });
 });
 
+describe('Rack Height Fork-Lift Minigame', () => {
+  it('assigns deterministic shelf levels (0..2 for standard racks, 0..1 for fast racks, 0 for docks/dropped)', () => {
+    const w = createWorld({ seed: 20261015, agents: 0 });
+    for (let i = 0; i < 12; i++) {
+      postOrder(w, { force: true });
+    }
+    tick(w, 0.1);
 
+    expect(maxRackLevelsForKind('ambient')).toBe(3);
+    expect(maxRackLevelsForKind('haz')).toBe(3);
+    expect(maxRackLevelsForKind('fast')).toBe(2);
 
+    const stdSlots = w.orders.filter((o) => !o.putaway && isRackSlot(o.slot));
+    expect(stdSlots.length).toBeGreaterThan(0);
+    for (const o of stdSlots) {
+      expect([0, 1, 2]).toContain(o.slot.level);
+      const rack = w.map.racks.find((r) => r.id === o.slot.rackId);
+      if (rack?.kind === 'fast') {
+        expect([0, 1]).toContain(o.slot.level);
+      }
+      expect(requiresRackLift(o, 'pick')).toBe(true);
+    }
 
+    const inbound = w.orders.filter((o) => Boolean(o.putaway));
+    for (const o of inbound) {
+      expect(o.slot.level).toBe(0);
+      expect(requiresRackLift(o, 'pick')).toBe(false);
+      if (o.putaway) {
+        expect([0, 1, 2]).toContain(o.putaway.level);
+        expect(requiresRackLift(o, 'stow')).toBe(true);
+      }
+    }
+  });
+
+  it('evaluates evaluateRackLift across Perfect, Clean, and Scrape bands with Hazmat scaling', () => {
+    // Level 1 target is RACK_LEVEL_FORK_TARGETS[1] (0.54)
+    const perfectStd = evaluateRackLift(RACK_LEVEL_FORK_TARGETS[1] + 0.01, 1, {
+      district: 'ambient',
+    });
+    expect(perfectStd.grade).toBe('perfect');
+    expect(perfectStd.bonusDelta).toBe(5);
+
+    const perfectHaz = evaluateRackLift(RACK_LEVEL_FORK_TARGETS[2], 2, {
+      district: 'haz',
+    });
+    expect(perfectHaz.grade).toBe('perfect');
+    expect(perfectHaz.bonusDelta).toBe(8);
+
+    const clean = evaluateRackLift(RACK_LEVEL_FORK_TARGETS[1] + 0.12, 1, {
+      district: 'ambient',
+    });
+    expect(clean.grade).toBe('clean');
+    expect(clean.bonusDelta).toBe(0);
+
+    const scrapeStd = evaluateRackLift(0.05, 2, { district: 'ambient' });
+    expect(scrapeStd.grade).toBe('scrape');
+    expect(scrapeStd.bonusDelta).toBe(-2);
+
+    const scrapeHaz = evaluateRackLift(0.05, 2, { district: 'haz' });
+    expect(scrapeHaz.grade).toBe('scrape');
+    expect(scrapeHaz.bonusDelta).toBe(-4);
+  });
+
+  it('applies Perfect Lift, Slide & Snatch, and Rack Scrape in humanInteract while preserving legacy non-forkHeight behavior', () => {
+    const w = createWorld({ seed: 99, agents: 0 });
+    w.rackLiftMinigame = true;
+    for (let i = 0; i < 6; i++) {
+      postOrder(w, { force: true });
+    }
+    const v = spawnPlayerVehicle(w, 'LiftTester', 'c-lift', 'blitz');
+    expect(v).not.toBeNull();
+    if (!v) return;
+
+    const rackOrder = w.orders.find((o) => !o.putaway && isRackSlot(o.slot))!;
+    rackOrder.slot.level = 2; // Top Level L3 High (target 0.92)
+    v.px = rackOrder.slot.ax + 0.5;
+    v.py = rackOrder.slot.ay + 0.5;
+    v.tile = { x: rackOrder.slot.ax, y: rackOrder.slot.ay };
+
+    // 1. Legacy call without forkHeight: works identically with 0 lift bonus
+    const valBefore = rackOrder.value;
+    expect(humanInteract(w, v.id)).toBe(true);
+    expect(v.cargo.length).toBe(1);
+    expect(rackOrder.value).toBe(valBefore);
+
+    // Reset order back to rack for minigame test
+    const picked = v.cargo.pop()!;
+    picked.state = 'open';
+    picked.claimant = null;
+    v.orders = [];
+
+    // 2. Perfect Lift with Slide & Snatch armed: bonus paid flat into points, value untouched
+    v.precisionArmed = {
+      until: w.t + 2,
+      tiles: [{ x: rackOrder.slot.ax, y: rackOrder.slot.ay }],
+    };
+    const ptsBeforePerfect = v.sPts;
+    expect(humanInteract(w, v.id, { forkHeight: RACK_LEVEL_FORK_TARGETS[2] })).toBe(true);
+    expect(v.cargo.length).toBe(1);
+    expect(rackOrder.value).toBe(valBefore);
+    expect(v.sPts).toBeGreaterThanOrEqual(ptsBeforePerfect + 10);
+    expect(v.liftBoostUntil).toBeGreaterThan(w.t);
+    expect(v.fork).toBeCloseTo(RACK_LEVEL_FORK_TARGETS[2], 2);
+
+    // Reset order for scrape test
+    const picked2 = v.cargo.pop()!;
+    picked2.state = 'open';
+    picked2.claimant = null;
+    v.orders = [];
+    v.liftBoostUntil = undefined;
+    const ptsAfterPerfect = v.sPts;
+
+    // 3. Forgiving Rack Scrape (way off target height): still picks pallet, deducts small scrape penalty
+    expect(humanInteract(w, v.id, { forkHeight: 0.05 })).toBe(true);
+    expect(v.cargo.length).toBe(1);
+    expect(rackOrder.value).toBe(valBefore);
+    expect(v.sPts).toBeLessThan(ptsAfterPerfect);
+    expect(v.liftScrapeUntil).toBeGreaterThan(w.t);
+  });
+});
 
 

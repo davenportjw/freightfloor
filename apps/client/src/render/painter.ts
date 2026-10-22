@@ -1,10 +1,22 @@
 /**
- * Canvas2D isometric drawing primitives (mock: poly, shade, oBox, aaBox, circleGrid, pill, star).
+ * Canvas2D isometric drawing primitives (mock: poly, shade, oBox, aaBox, circleGrid, pill, star, sprite).
  * A Painter binds a 2D context to a live camera; all coordinates are grid tiles unless noted.
  */
 import { type Camera, TH, TW } from './iso.js';
 
 export type Pt = [number, number];
+
+export interface SpriteFrameRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  anchor?: { x: number; y: number };
+}
+
+export type SpriteFrameEntry =
+  | SpriteFrameRect
+  | { frame: SpriteFrameRect; anchor?: { x: number; y: number } };
 
 const shadeCache = new Map<string, string>();
 
@@ -21,10 +33,65 @@ export function shade(hex: string, f: number): string {
 }
 
 export class Painter {
+  public atlasImage: CanvasImageSource | null = null;
+  public atlasFrames: Record<string, SpriteFrameEntry> | null = null;
+
   constructor(
     public readonly ctx: CanvasRenderingContext2D,
     public readonly cam: Camera,
   ) {}
+
+  /** Bind a loaded sprite atlas image and frame dictionary for hardware-accelerated blitting. */
+  setAtlas(
+    image: CanvasImageSource | null,
+    frames: Record<string, SpriteFrameEntry> | null,
+  ): void {
+    this.atlasImage = image;
+    this.atlasFrames = frames;
+  }
+
+  /** True when the isometric sprite atlas is loaded and contains `key`. */
+  hasSprite(key: string): boolean {
+    return Boolean(this.atlasImage && this.atlasFrames && this.atlasFrames[key]);
+  }
+
+  /**
+   * Blit a pre-baked 2:1 isometric 3D sprite from the atlas centred at grid `(gx, gy, z0)`.
+   * Returns `true` when drawn, or `false` when the atlas is not yet loaded so callers can
+   * seamlessly fall back to procedural 3D primitives.
+   */
+  sprite(
+    key: string,
+    gx: number,
+    gy: number,
+    z0 = 0,
+    worldTileWidth = 1.5,
+    anchorY = 0.62,
+  ): boolean {
+    const img = this.atlasImage;
+    const entry = this.atlasFrames?.[key];
+    if (!img || !entry || typeof this.ctx?.drawImage !== 'function') return false;
+    const rect = 'frame' in entry ? entry.frame : entry;
+    const anchor = entry.anchor ?? ('frame' in entry ? entry.frame.anchor : undefined);
+    if (!rect || !rect.w || !rect.h) return false;
+    const [sx, sy] = this.P(gx, gy, z0);
+    const drawW = worldTileWidth * TW * this.cam.zoom;
+    const drawH = drawW * (rect.h / rect.w);
+    const ax = anchor?.x ?? 0.5;
+    const ay = anchor?.y ?? anchorY;
+    this.ctx.drawImage(
+      img,
+      rect.x,
+      rect.y,
+      rect.w,
+      rect.h,
+      sx - drawW * ax,
+      sy - drawH * ay,
+      drawW,
+      drawH,
+    );
+    return true;
+  }
 
   /** Project grid (gx, gy, z) to screen. */
   P(gx: number, gy: number, z = 0): Pt {
@@ -109,7 +176,7 @@ export class Painter {
   /**
    * Oriented extruded box centred at (cx, cy) with heading a. A side face is visible when
    * its outward normal satisfies nx + ny > 0 (camera looks from +x,+y); visible sides draw
-   * back to front, then the top.
+   * back to front, then the top with a crisp specular bevel highlight.
    */
   oBox(
     cx: number,
@@ -235,12 +302,24 @@ export class Painter {
       sy2 - dz,
       sx3,
       sy3 - dz,
-      shade(hex, 1.06),
+      shade(hex, 1.08),
       stroke,
     );
+
+    const frontIdx = f1Idx !== -1 ? f1Idx : f0Idx;
+    if (frontIdx !== -1 && dz >= 1.5) {
+      const j = (frontIdx + 1) & 3;
+      const ctx = this.ctx;
+      ctx.beginPath();
+      ctx.moveTo(sxs[frontIdx], sys[frontIdx] - dz);
+      ctx.lineTo(sxs[j], sys[j] - dz);
+      ctx.strokeStyle = shade(hex, 1.3);
+      ctx.lineWidth = Math.max(0.75, 0.9 * z);
+      ctx.stroke();
+    }
   }
 
-  /** Axis-aligned box with corner (x, y), footprint w x d. Zero allocations. */
+  /** Axis-aligned box with corner (x, y), footprint w x d, and top specular bevel highlight. Zero allocations. */
   aaBox(x: number, y: number, w: number, d: number, z0: number, h: number, hex: string, stroke?: string): void {
     const c = this.cam;
     const z = c.zoom;
@@ -273,7 +352,66 @@ export class Painter {
       this.quad(sx3, sy3, sx0, sy0, sx0, sy0 - dz, sx3, sy3 - dz, leftCol, stroke);
       this.quad(sx0, sy0, sx1, sy1, sx1, sy1 - dz, sx0, sy0 - dz, rightCol, stroke);
     }
-    this.quad(sx0, sy0 - dz, sx1, sy1 - dz, sx2, sy2 - dz, sx3, sy3 - dz, shade(hex, 1.06), stroke);
+    this.quad(sx0, sy0 - dz, sx1, sy1 - dz, sx2, sy2 - dz, sx3, sy3 - dz, shade(hex, 1.08), stroke);
+
+    if (dz >= 1.5) {
+      const ctx = this.ctx;
+      ctx.beginPath();
+      ctx.moveTo(sx3, sy3 - dz);
+      ctx.lineTo(sx0, sy0 - dz);
+      ctx.lineTo(sx1, sy1 - dz);
+      ctx.strokeStyle = shade(hex, 1.3);
+      ctx.lineWidth = Math.max(0.75, 0.9 * z);
+      ctx.stroke();
+    }
+  }
+
+  /**
+   * Upright cylinder centred on grid point (cx, cy): radius r (tiles), base height z0 and
+   * height h (iso px). A floor circle projects to an ellipse with radii r·√2·TW/2 and r·√2·TH/2.
+   * The front half of the wall is shaded left→right (lit → shadow), then the lighter top cap.
+   */
+  cyl(cx: number, cy: number, r: number, z0: number, h: number, hex: string, stroke?: string): void {
+    const ctx = this.ctx;
+    const z = this.cam.zoom;
+    const rx = r * Math.SQRT2 * (TW / 2) * z;
+    const ry = r * Math.SQRT2 * (TH / 2) * z;
+    if (rx <= 0 || ry <= 0) return;
+    const [sx, sy] = this.P(cx, cy, z0);
+    const top = sy - h * z;
+    const wall = ctx.createLinearGradient(sx - rx, 0, sx + rx, 0);
+    wall.addColorStop(0, shade(hex, 0.92));
+    wall.addColorStop(0.55, shade(hex, 0.78));
+    wall.addColorStop(1, shade(hex, 0.58));
+    ctx.beginPath();
+    ctx.moveTo(sx - rx, top);
+    ctx.lineTo(sx - rx, sy);
+    ctx.ellipse(sx, sy, rx, ry, 0, Math.PI, 0, true);
+    ctx.lineTo(sx + rx, top);
+    ctx.closePath();
+    ctx.fillStyle = wall;
+    ctx.fill();
+    if (stroke) {
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.ellipse(sx, top, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fillStyle = shade(hex, 1.08);
+    ctx.fill();
+    if (stroke) {
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    if (h * z >= 1.5) {
+      ctx.beginPath();
+      ctx.ellipse(sx, top, rx * 0.92, ry * 0.92, 0, 0.15 * Math.PI, 0.85 * Math.PI);
+      ctx.strokeStyle = shade(hex, 1.3);
+      ctx.lineWidth = Math.max(0.75, 0.9 * z);
+      ctx.stroke();
+    }
   }
 
   /** Circle on the floor plane (an ellipse on screen). */

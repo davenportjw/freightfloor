@@ -18,9 +18,13 @@ import {
   LAST_CALL_PTS,
   LAST_CALL_MIN,
   CONTRACT_RESERVE_MIN,
+  contractReserveMin,
+  inLastCall,
+  lastCallMin,
   Order,
   PERK_CAPS,
   postOrder,
+  runWindowMin,
   SimEvent,
   SKILLS,
   spawnPlayerVehicle,
@@ -29,10 +33,11 @@ import {
   WILD_CHANCE,
   World,
 } from '../src/index.js';
+import { BASE_HWY_Y, isBlocked } from '../src/map.js';
 
 const META = { model: 'gemini-3.8-flash', latencyMs: 1, inputTokens: 1, outputTokens: 1 };
-/** User-added cards kept on the legacy active-modifier path (no perk). */
-const LEGACY_TITLES = ['Turbo Courier', 'Tele-Fork Extension', 'Regen Capacitor', 'Priority Broker'];
+/** User-added cards, now perk cards (unlock on completion). */
+const USER_CARD_TITLES = ['Turbo Courier', 'Tele-Fork Extension', 'Regen Capacitor', 'Priority Broker'];
 
 function collect(w: World, type: string): SimEvent[] {
   const out: SimEvent[] = [];
@@ -59,9 +64,13 @@ function skillCard(type: Card['type'], status: Card['status'], id = `${type}-${s
   };
 }
 
-function human(seed: number, id = 'card-pilot'): { w: World; v: Vehicle } {
+function human(
+  seed: number,
+  id = 'card-pilot',
+  mode: 'blitz' | 'freerange' = 'blitz',
+): { w: World; v: Vehicle } {
   const w = createWorld({ seed, agents: 0 });
-  const v = spawnPlayerVehicle(w, id, 'CardPilot', 'blitz')!;
+  const v = spawnPlayerVehicle(w, id, 'CardPilot', mode)!;
   w.cards[id]!.cards = [];
   w.cards[id]!.offer = null;
   w.bays.forEach((b) => (b.load = 0));
@@ -140,39 +149,123 @@ describe('cards: perks are rewards', () => {
 });
 
 describe('cards: catalogue and dealing', () => {
-  it('SKILLS covers the dealable types; Phase-3 types are typed but dormant', () => {
+  it('SKILLS covers the dealable types, including the Phase-3 cards', () => {
     const types = new Set(SKILLS.map((s) => s.type));
     for (const t of types) expect(CARD_TYPE_IDS).toContain(t);
     for (const t of ['long_haul', 'local_hero', 'poacher', 'rival_grudge', 'ghost_hunter']) {
       expect(CARD_TYPE_IDS).toContain(t);
-      expect(types.has(t as Card['type'])).toBe(false);
+      expect(types.has(t as Card['type'])).toBe(true);
     }
     expect(SKILLS.filter((s) => s.rarity === 'wild').map((s) => s.type).sort()).toEqual([
       'double_nothing',
+      'ghost_hunter',
       'high_roller',
       'last_call',
+      'rival_grudge',
     ]);
     expect(SKILLS.filter((s) => s.humanOnly).map((s) => s.type).sort()).toEqual([
       'beat_planner',
       'combo_king',
       'crazy_stop',
+      'ghost_hunter',
+      'poacher',
+      'rival_grudge',
     ]);
     expect(WILD_CHANCE).toBe(0.2);
   });
 
-  it('user-added cards are kept as legacy modifier cards (active path, no perk)', () => {
+  it('user-added cards are perk cards (no payout keys) that unlock only once done', () => {
     const expected: Record<string, object> = {
-      'Turbo Courier': { speedMul: 1.18, ptsBonus: 4 },
-      'Tele-Fork Extension': { reachBonus: 0.55, chargeBonus: 2 },
+      'Turbo Courier': { speedMul: 1.18 },
+      'Tele-Fork Extension': { reachBonus: 0.5, chargeBonus: 2 },
       'Regen Capacitor': { drainMul: 0.65, chargeBonus: 4 },
-      'Priority Broker': { p0Bonus: 12, ptsBonus: 3 },
+      'Priority Broker': { reachBonus: 0.15 },
     };
-    for (const title of LEGACY_TITLES) {
+    for (const title of USER_CARD_TITLES) {
       const s = SKILLS.find((x) => x.title === title)!;
       expect(s).toBeDefined();
-      expect(s.perk).toBeUndefined();
-      expect(s.modifiers).toEqual(expected[title]);
+      expect(s.perk).toEqual(expected[title]);
+      expect(s.modifiers).toBeUndefined();
+      for (const k of ['payoutBonus', 'ptsBonus', 'p0Bonus']) expect(s.perk).not.toHaveProperty(k);
     }
+
+    const { w, v } = human(5010);
+    const h = w.cards['card-pilot']!;
+    const card = (title: string, status: Card['status']): Card => {
+      const s = SKILLS.find((x) => x.title === title)!;
+      return {
+        id: `${title}-${status}`, type: s.type, goal: s.goal, progress: 0, status, pts: s.pts,
+        title: s.title, desc: s.desc, rarity: 'common', perk: { ...s.perk }, modifiers: { ...s.perk },
+      };
+    };
+    h.cards = USER_CARD_TITLES.map((t) => card(t, 'active'));
+    let m = getCardModifiers(w, v);
+    expect(m.speedMul).toBe(1);
+    expect(m.reachBonus).toBe(0);
+    expect(m.chargeBonus).toBe(0);
+    expect(m.drainMul).toBe(1);
+    h.cards = USER_CARD_TITLES.map((t) => card(t, 'done'));
+    m = getCardModifiers(w, v);
+    expect(m.speedMul).toBeCloseTo(1.18, 6);
+    expect(m.reachBonus).toBe(PERK_CAPS.reachBonus); // 0.5 + 0.15, capped
+    expect(m.chargeBonus).toBe(PERK_CAPS.chargeBonus); // 2 + 4
+    expect(m.drainMul).toBeCloseTo(0.65, 6); // boost drain only
+    expect(m.batteryDrainMul).toBe(1);
+    expect(m.ptsBonus).toBe(0);
+    expect(m.p0Bonus).toBe(0);
+  });
+
+  it('Regen Capacitor perk cuts boost drain only', () => {
+    /** Battery used driving 10 ticks along an open highway row, with or without boost/perk. */
+    const drained = (withPerk: boolean, boost: boolean): number => {
+      const { w, v } = human(5011);
+      const s = SKILLS.find((x) => x.title === 'Regen Capacitor')!;
+      if (withPerk) {
+        w.cards['card-pilot']!.cards = [
+          { id: 'regen', type: s.type, goal: 1, progress: 1, status: 'done', pts: s.pts, title: s.title, desc: s.desc, perk: { ...s.perk } },
+        ];
+      }
+      const y = BASE_HWY_Y[1];
+      let x0 = -1;
+      for (let x = 0; x < w.map.w - 16 && x0 < 0; x++) {
+        let open = true;
+        for (let k = 0; k < 16; k++) if (isBlocked(w, x + k, y)) open = false;
+        if (open) x0 = x;
+      }
+      expect(x0).toBeGreaterThanOrEqual(0);
+      v.px = x0 + 0.5;
+      v.py = y + 0.5;
+      v.tile = { x: x0, y };
+      v.angle = 0;
+      v.speedNow = 0;
+      v.battery = 100;
+      for (let i = 0; i < 10; i++) {
+        stepHuman(w, v, { up: true, down: false, left: false, right: false, boost }, 0.1);
+      }
+      return 100 - v.battery;
+    };
+    // Without boost the perk changes nothing; with boost it drains less.
+    expect(drained(true, false)).toBeCloseTo(drained(false, false), 9);
+    expect(drained(true, true)).toBeLessThan(drained(false, true));
+    expect(drained(true, true)).toBeGreaterThan(drained(false, false));
+  });
+
+  it('Turbo Courier counts trips ≤ 6 min; Priority Broker counts on-time pallets cumulatively', () => {
+    const { w, v } = human(5013);
+    const h = w.cards['card-pilot']!;
+    const mk = (title: string): Card => {
+      const s = SKILLS.find((x) => x.title === title)!;
+      return { id: title, type: s.type, goal: s.goal, progress: 0, status: 'active', pts: s.pts, title, desc: s.desc, perk: { ...s.perk } };
+    };
+    h.cards = [mk('Turbo Courier'), mk('Priority Broker')];
+    load(w, v, 5, 3); // 5-min trip vs par 3 → Slow, but within 6 min
+    deliver(w, v, 'E1');
+    expect(h.cards[0].progress).toBe(1);
+    expect(h.cards[1].progress).toBe(1); // on time (Slow doesn't reset it)
+    load(w, v, 7, 20); // 7-min trip: Speedy-ish but over 6 min
+    deliver(w, v, 'E1');
+    expect(h.cards[0].progress).toBe(1);
+    expect(h.cards[1].progress).toBe(2);
   });
 
   it('AI shift deals never include humanOnly cards and hold at most one wild', () => {
@@ -189,7 +282,7 @@ describe('cards: catalogue and dealing', () => {
         const wilds = opts.filter((o) => o.rarity === 'wild').length;
         expect(wilds).toBeLessThanOrEqual(1);
         if (wilds) wildDeals++;
-        expect(opts.every((o) => o.perk !== undefined || LEGACY_TITLES.includes(o.title ?? ''))).toBe(true);
+        expect(opts.every((o) => o.perk !== undefined)).toBe(true);
       }
     }
     expect(deals).toBeGreaterThan(50);
@@ -211,8 +304,8 @@ describe('cards: catalogue and dealing', () => {
     expect(h.cards.filter((c) => c.status === 'active')).toHaveLength(2);
   });
 
-  it('completing a card triggers a 1-of-2 replacement offer', () => {
-    const { w, v } = human(5005);
+  it('completing a card triggers a 1-of-2 replacement offer (Free Range)', () => {
+    const { w, v } = human(5005, 'card-pilot', 'freerange');
     const h = w.cards['card-pilot']!;
     h.cards = [
       { ...skillCard('overdrive', 'active', 'od'), goal: 1 },
@@ -285,17 +378,24 @@ describe('cards: narrowed progress rules', () => {
     expect((v.runPts ?? 0) - before).toBeGreaterThanOrEqual(40);
   });
 
-  it('Last Call pays +10 per Speedy fare inside the final window only', () => {
+  it('Last Call pays +10 per Speedy fare inside the final (blitz-clamped) window only', () => {
     const { w, v } = human(5008);
     const h = w.cards['card-pilot']!;
     h.cards = [skillCard('last_call', 'active', 'lc')];
+    // 30-min blitz run → window = min(90, 30/3) = 10 min.
     v.runStartedAt = w.t;
-    v.runEndsAt = w.t + LAST_CALL_MIN + 10;
+    v.runEndsAt = w.t + 30;
+    expect(lastCallMin(v)).toBeCloseTo(10, 6);
+    v.runStartedAt = w.t - 19;
+    v.runEndsAt = w.t + 11; // 11 min left: outside the 10-min window
+    expect(inLastCall(w, v)).toBe(false);
     load(w, v, 1);
     deliver(w, v, 'E1');
     expect(h.cards[0].progress).toBe(0);
 
-    v.runEndsAt = w.t + LAST_CALL_MIN - 1;
+    v.runStartedAt = w.t - 25;
+    v.runEndsAt = w.t + 5; // 5 min left: inside
+    expect(inLastCall(w, v)).toBe(true);
     const before = v.runPts ?? 0;
     const combo = v.combo ?? 1;
     load(w, v, 1);
@@ -303,6 +403,29 @@ describe('cards: narrowed progress rules', () => {
     expect(h.cards[0].progress).toBe(1);
     expect(h.cards[0].status).toBe('active');
     expect((v.runPts ?? 0) - before).toBeCloseTo(20 * 1.5 * combo + LAST_CALL_PTS, 4);
+  });
+
+  it('run windows clamp to a third of a blitz run but stay 90 min in shift mode', () => {
+    const { w, v } = human(5010);
+    // Blitz before the run starts uses BLITZ_DURATION_MIN (180) → min(90, 60) = 60.
+    expect(lastCallMin(v)).toBe(60);
+    expect(contractReserveMin(v)).toBe(60);
+    // Short live blitz run → clamp.
+    v.runStartedAt = w.t;
+    v.runEndsAt = w.t + 60;
+    expect(lastCallMin(v)).toBeCloseTo(20, 6);
+    expect(contractReserveMin(v)).toBeCloseTo(20, 6);
+    expect(runWindowMin(90, null)).toBe(90);
+
+    // Shift (freerange) driver: never clamped, Last Call = final 90 min of the 480-min shift.
+    const s = spawnPlayerVehicle(w, 'shift-pilot', 'Shift', 'freerange')!;
+    expect(s.runMode).not.toBe('blitz');
+    expect(lastCallMin(s)).toBe(LAST_CALL_MIN);
+    expect(contractReserveMin(s)).toBe(CONTRACT_RESERVE_MIN);
+    w.t = 480 - LAST_CALL_MIN - 1;
+    expect(inLastCall(w, s)).toBe(false);
+    w.t = 480 - 30;
+    expect(inLastCall(w, s)).toBe(true);
   });
 
   it('High Roller: a crash costs an extra incident penalty and burns the card', () => {
@@ -317,6 +440,8 @@ describe('cards: narrowed progress rules', () => {
     v2.tile = { x: 11, y: 13 };
     v2.px = 11.5;
     v2.py = 13.5;
+    v.sPts = 100; // penalties clamp at 0 (addPts), so start with points to lose
+    v.runPts = 100;
     const ptsBefore = v.sPts;
     for (let i = 0; i < 10 && w.t >= v.stunnedUntil; i++) {
       stepHuman(w, v, { up: true, down: false, left: false, right: false, boost: true }, 0.05);
@@ -329,7 +454,8 @@ describe('cards: narrowed progress rules', () => {
 describe('cards: route contract reservation and poaching', () => {
   function routeSetup() {
     const w = createWorld({ seed: 5100 });
-    const owner = spawnPlayerVehicle(w, 'owner', 'Owner', 'blitz')!;
+    // Route contracts are only dealt from the full (Free Range) deck.
+    const owner = spawnPlayerVehicle(w, 'owner', 'Owner', 'freerange')!;
     const rival = spawnPlayerVehicle(w, 'rival', 'Rival', 'blitz')!;
     const h = w.cards['owner']!;
     h.cards = [];
@@ -342,12 +468,29 @@ describe('cards: route contract reservation and poaching', () => {
     return { w, owner, rival, route: route!, orders };
   }
 
+  it('reservation window clamps to a third of a short live blitz run', () => {
+    const w = createWorld({ seed: 5100 });
+    // Dealt from the Free Range deck, then held in a short live blitz run.
+    const owner = spawnPlayerVehicle(w, 'owner', 'Owner', 'freerange')!;
+    owner.runMode = 'blitz';
+    owner.runStartedAt = w.t;
+    owner.runEndsAt = w.t + 30;
+    const h = w.cards['owner']!;
+    h.cards = [];
+    const route = h.offer!.find((c) => c.type === 'route')!;
+    h.offer = [route];
+    expect(keepCards(w, 'owner', [route.id])).toBeNull();
+    const orders = w.orders.filter((o) => o.card === route.id);
+    expect(orders.length).toBeGreaterThan(0);
+    for (const o of orders) expect(o.reservedUntil).toBeCloseTo(w.t + 10, 6);
+  });
+
   it('reserved pallets are hidden from AI candidates, rejected by applyDecision and unpickable by rivals', () => {
     const { w, owner, rival, orders } = routeSetup();
     const o = orders[0];
     expect(o.reservedFor).toBe('owner');
     expect(CONTRACT_RESERVE_MIN).toBe(90);
-    expect(o.reservedUntil).toBeCloseTo(w.t + CONTRACT_RESERVE_MIN, 6);
+    expect(o.reservedUntil).toBeCloseTo(w.t + contractReserveMin(owner), 6);
 
     // Rival human standing on the pickup can't pick it; the owner can.
     for (const v of [rival, owner]) {

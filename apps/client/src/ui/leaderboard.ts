@@ -1,21 +1,11 @@
 /**
  * "Win the shift" leaderboard (mock updateLb, lines 2004-2021): top 5 + my row, rules,
- * site record, difficulty vote, agent decision counts and hall of fame.
+ * site record, agent decision counts and hall of fame. (Mode voting lives in the top bar.)
  */
-import type { DifficultyLevel } from '@warehouse/protocol';
 import { leaderboard, type World } from '@warehouse/sim';
 import type { UiCtx, UiModule } from './context.js';
 import { button, el, KeyedView, swatch, type Child } from './dom.js';
-import {
-  difficultyLabel,
-  difficultyTooltip,
-  plural,
-  shiftLeft,
-  teamColor,
-  VOTE_LEVELS,
-  voteCounts,
-  voteLevelOf,
-} from './format.js';
+import { difficultyLabel, plural, shiftLeft, teamColor } from './format.js';
 import { createPanel, type PanelHandle } from './panel.js';
 
 export type LeaderRow = ReturnType<typeof leaderboard>[number];
@@ -150,9 +140,6 @@ export function mountLeaderboard(zone: HTMLElement, ctx: UiCtx): UiModule & { pa
         },
       );
       const t = w.totals;
-      const counts = voteCounts(w.difficultyVotes);
-      const myVote = store.you ? voteLevelOf(w.difficultyVotes[store.you.clientId]) : null;
-      const current = voteLevelOf(w.difficulty);
       const dc = t.decisions;
       const dn = dc.reroute + dc.wait + dc.push;
       const openModalBtn = button(
@@ -163,7 +150,7 @@ export function mountLeaderboard(zone: HTMLElement, ctx: UiCtx): UiModule & { pa
       );
       openModalBtn.dataset.action = 'open-leaderboard-modal';
       rest.render(
-        JSON.stringify([t.wins, t.humanShifts, counts, myVote, current, w.difficulty, dc, t.hazards, w.hallOfFame.length, w.hallOfFame[0]?.scored]),
+        JSON.stringify([t.wins, t.humanShifts, dc, t.hazards, w.hallOfFame.length, w.hallOfFame[0]?.scored]),
         () => [
           openModalBtn,
           el('div', { class: 'hint' }, [
@@ -171,19 +158,6 @@ export function mountLeaderboard(zone: HTMLElement, ctx: UiCtx): UiModule & { pa
             t.humanShifts
               ? el('div', { text: `Human drivers on this site: ${plural(t.wins, 'win')} in ${plural(t.humanShifts, 'shift')}.` })
               : null,
-          ]),
-          el('div', { class: 'vote-row' }, [
-            el('span', { class: 'label', text: 'Mode', title: `Current: ${difficultyLabel(w.difficulty)}` }),
-            ...VOTE_LEVELS.map((lvl) => {
-              const b = button(
-                `${difficultyLabel(lvl)} ${counts[lvl]}`,
-                `btn small${current === lvl ? ' on' : ''}${myVote === lvl ? ' voted' : ''}`,
-                () => actions.vote(lvl as DifficultyLevel),
-                `${difficultyTooltip(lvl)}. ${plural(counts[lvl], 'vote')}${myVote === lvl ? ' (yours)' : ''}.`,
-              );
-              b.setAttribute('aria-pressed', String(myVote === lvl));
-              return b;
-            }),
           ]),
           el('div', {
             class: 'hint num',

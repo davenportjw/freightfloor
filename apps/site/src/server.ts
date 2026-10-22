@@ -1,11 +1,14 @@
+import { randomBytes } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import {
   ClientMessageSchema,
   MAX_WS_FRAME_BYTES,
   PROXY_HEADER_NAME,
   SITE_IDS,
   TransferSchema,
+  isValidSiteId,
   signTicket,
   verifyProxyHeader,
   verifyTicket,
@@ -14,10 +17,13 @@ import {
   HEAT_MIN_VALUE,
   HEAT_INTERVAL_MS,
   BOARD_INTERVAL_MS,
+  DISPATCH_MAX_COUNT,
+  type EvictionReason,
   type SiteId,
   type ServerMessage,
   type DeltaMessage,
   type DeltaStats,
+  type FloorOrdersStatus,
   type HeatLayer,
   type PresenceMessage,
   type QuantisedVehicleDelta,
@@ -28,6 +34,7 @@ import {
 } from '@warehouse/protocol';
 import {
   ArmorGuard,
+  PLAYER_RATE_LIMIT_PER_MIN,
   checkFrameSize,
   validateDisplayName,
 } from '@warehouse/armor';
@@ -38,6 +45,7 @@ import {
   restore,
   spawnPlayerVehicle,
   removePlayerVehicle,
+  recordCompletedRun,
   extractRunNumber,
   setDriverRunMode,
   SKILLS,
@@ -48,6 +56,8 @@ import {
   applyAgentDirective,
   humanInteract,
   keepCards,
+  chooseOrder,
+  computeDriverPpm,
   receiveTransfer,
   setPhase,
   compactFacilityIfNeeded,
@@ -56,8 +66,10 @@ import {
   postOrder,
   board,
   BASE_FLEET,
+  BLITZ_DURATION_MIN,
   FLEET_CAP,
   MAX_TIER,
+  TICK_MIN,
   TIER_STEP,
   type BoardRow,
   type Card,
@@ -73,14 +85,25 @@ import {
   type PersistenceStore,
 } from './persistence.js';
 import {
+  createPublicIdMapper,
+  publicizeCompletedRuns,
+  publicizeEvents,
+  publicizeKeyedRecord,
+  publicizeSnapshot,
+} from './public-id.js';
+import {
+  CONE_EXPIRY_SEC,
   FacilityGovernor,
   MAX_AUTONOMOUS_AGENTS,
+  MAX_CONES_PER_PLAYER,
+  MAX_OPEN_P0_ON_FLOOR,
   MIN_AUTONOMOUS_AGENTS,
+  SITE_TICK_MS,
 } from './governance.js';
 import {
   AgentBrainScheduler,
-  DEFAULT_GEMINI_MODEL,
   VertexGeminiBrainClient,
+  resolveGeminiModel,
   type GeminiBrainClient,
 } from './brain.js';
 import {
@@ -91,21 +114,192 @@ import {
   type ModelArmorClient,
   type NlOrderParserClient,
 } from './armor-pipeline.js';
+import {
+  DispatchersCallCoordinator,
+  parseDispatchersCallActionId,
+  parseDispatchersCallFlag,
+  VertexDispatchersCallClient,
+  type DispatchersCallModelClient,
+} from './dispatchersCall.js';
 
 export const MAX_SOCKETS = 300;
 export const MAX_DRIVERS = 32;
 export const FREE_RANGE_SOFT_CAP = 26;
 export const RELOCATION_BONUS_PTS = 75;
 export const RELOCATION_COOLDOWN_MS = 90_000;
-export const MAX_DRIVERS_PER_CLIENT = 2;
+/** One driver seat per clientId: a second tab of the same player joins as a spectator. */
+export const MAX_DRIVERS_PER_CLIENT = 1;
+/** Received cross-site transfer ids kept for de-duplication (FIFO; bounds the snapshot doc). */
+export const MAX_RECEIVED_TRANSFER_IDS = 2_000;
+/** Protocol-level WebSocket frame ceiling (memory guard); the app limit is `MAX_WS_FRAME_BYTES`. */
+export const WS_MAX_PAYLOAD_BYTES = 64 * 1024;
 export const DEFAULT_INPUT_LEASE_MS = 5_000;
+export const DEFAULT_IDLE_EVICTION_MS = 60_000;
 export const DEFAULT_IDLE_BREAK_MS = 5 * 60 * 1000;
 export const DEFAULT_WIND_DOWN_MAX_MS = 60_000;
-export const DEFAULT_TICKET_SECRET =
-  process.env.TICKET_SECRET ||
-  process.env.TICKET_HMAC_KEY ||
-  process.env.TICKET_HMAC_SECRET ||
-  'dev-local-warehouse-hmac-secret-key-2026';
+/** Min real ms between countdown-only `delta.floorOrders` refreshes per connection. */
+export const FLOOR_ORDERS_INTERVAL_MS = 1_000;
+/**
+ * Ticket / proxy HMAC secret. Cloud Run must inject it via Secret Manager (startup refuses to
+ * run otherwise, see `index.ts`). Off Cloud Run with no secret configured, a random
+ * per-process secret is generated: tickets from any other process (e.g. a separately started
+ * lobby) will not verify unless both share `TICKET_SECRET`.
+ */
+export const DEFAULT_TICKET_SECRET = resolveTicketSecret();
+
+function resolveTicketSecret(): string {
+  const configured =
+    process.env.TICKET_SECRET || process.env.TICKET_HMAC_KEY || process.env.TICKET_HMAC_SECRET;
+  if (configured) return configured;
+  if (process.env.K_SERVICE) {
+    // Never fall back to a guessable or ephemeral secret in Cloud Run.
+    throw new Error(
+      'TICKET_SECRET (or TICKET_HMAC_KEY) must be injected via Secret Manager in Cloud Run',
+    );
+  }
+  console.warn(
+    '[site] No TICKET_SECRET set: using an ephemeral random per-process dev secret. ' +
+      'Set TICKET_SECRET (shared with the lobby) for multi-process local runs.',
+  );
+  return randomBytes(32).toString('hex');
+}
+
+/** Drop the oldest received-transfer ids (Set keeps insertion order) beyond `max`. */
+export function pruneReceivedTransferIds(world: World, max: number = MAX_RECEIVED_TRANSFER_IDS): void {
+  const ids = world.receivedTransferIds;
+  if (ids.size <= max) return;
+  let excess = ids.size - max;
+  for (const id of ids) {
+    if (excess-- <= 0) break;
+    ids.delete(id);
+  }
+}
+
+/**
+ * Verifies a Pub/Sub push OIDC bearer token: Google-signed, `aud` = this endpoint's URL and
+ * `email` = the push service account (`PUBSUB_PUSH_SERVICE_ACCOUNT`), with `email_verified`.
+ */
+/**
+ * Accepted audiences for `/internal/transfer` push tokens: `TRANSFER_PUSH_AUDIENCE`
+ * (comma-separated override) plus `https://<Host>/internal/transfer`.
+ */
+export function transferPushAudiences(
+  host: string | undefined,
+  override: string | undefined = process.env.TRANSFER_PUSH_AUDIENCE,
+): string[] {
+  const out = (override ?? '')
+    .split(',')
+    .map((a) => a.trim())
+    .filter(Boolean);
+  if (host) out.push(`https://${host}/internal/transfer`);
+  return [...new Set(out)];
+}
+
+export type TransferPushTokenVerifier = (
+  token: string,
+  audience: string | readonly string[],
+) => Promise<boolean>;
+
+/** Marker Cloud Run IAM writes over the JWT signature after it has verified the token itself. */
+export const CLOUD_RUN_SIGNATURE_REMOVED = 'SIGNATURE_REMOVED_BY_GOOGLE';
+
+const GOOGLE_ID_TOKEN_ISSUERS = new Set(['https://accounts.google.com', 'accounts.google.com']);
+
+interface PushTokenClaims {
+  email?: string;
+  email_verified?: boolean | string;
+  aud?: string | string[];
+  exp?: number;
+  iss?: string;
+}
+
+/** Minimal ID-token verifier surface (google-auth-library `OAuth2Client`). */
+export interface IdTokenVerifierClient {
+  verifyIdToken(opts: {
+    idToken: string;
+    audience: string | string[];
+  }): Promise<{ getPayload(): PushTokenClaims | undefined }>;
+}
+
+export interface PubSubPushVerifierOptions {
+  /** Clock for the Cloud Run pre-verified path (test seam). */
+  now?: () => number;
+  /** ID-token verifier for the full-signature path (test seam; default `new OAuth2Client()`). */
+  client?: IdTokenVerifierClient;
+}
+
+function decodeJwtPayload(segment: string): PushTokenClaims | null {
+  try {
+    const json = Buffer.from(segment, 'base64url').toString('utf8');
+    const parsed = JSON.parse(json) as unknown;
+    return parsed && typeof parsed === 'object' ? (parsed as PushTokenClaims) : null;
+  } catch {
+    return null;
+  }
+}
+
+function claimsMatch(
+  claims: PushTokenClaims,
+  expectedEmail: string,
+  audiences: readonly string[],
+): boolean {
+  const verified = claims.email_verified === true || claims.email_verified === 'true';
+  const auds = Array.isArray(claims.aud) ? claims.aud : claims.aud ? [claims.aud] : [];
+  return (
+    claims.email === expectedEmail && verified && auds.some((a) => audiences.includes(a))
+  );
+}
+
+/**
+ * Verifies the Pub/Sub push OIDC token on `/internal/transfer`.
+ *
+ * The site services are IAM-protected Cloud Run services: Cloud Run validates the
+ * token at the platform layer and may replace its signature segment with
+ * `SIGNATURE_REMOVED_BY_GOOGLE` before it reaches the container. In that case the
+ * signature cannot be re-checked, so the claims are decoded and still required to
+ * match (`email`, `email_verified`, `aud`, unexpired `exp`, Google issuer). Any
+ * other token gets full `verifyIdToken` signature verification.
+ */
+export function createPubSubPushVerifier(
+  expectedEmail: string | undefined = process.env.PUBSUB_PUSH_SERVICE_ACCOUNT,
+  opts: PubSubPushVerifierOptions = {},
+): TransferPushTokenVerifier {
+  const now = opts.now ?? Date.now;
+  let clientPromise: Promise<IdTokenVerifierClient> | null = opts.client
+    ? Promise.resolve(opts.client)
+    : null;
+  return async (token, audience) => {
+    if (!expectedEmail) {
+      console.error('[site] PUBSUB_PUSH_SERVICE_ACCOUNT is not set; rejecting push token');
+      return false;
+    }
+    const audiences = (typeof audience === 'string' ? [audience] : [...audience]).filter(Boolean);
+    if (audiences.length === 0) return false;
+    const parts = token.split('.');
+    try {
+      if (parts.length === 3 && parts[2] === CLOUD_RUN_SIGNATURE_REMOVED) {
+        const claims = decodeJwtPayload(parts[1]);
+        if (!claims) return false;
+        const expMs = typeof claims.exp === 'number' ? claims.exp * 1000 : 0;
+        if (expMs <= now()) return false;
+        if (claims.iss !== undefined && !GOOGLE_ID_TOKEN_ISSUERS.has(claims.iss)) return false;
+        return claimsMatch(claims, expectedEmail, audiences);
+      }
+      clientPromise ??= import('google-auth-library').then(
+        ({ OAuth2Client }) => new OAuth2Client() as unknown as IdTokenVerifierClient,
+      );
+      const client = await clientPromise;
+      const ticket = await client.verifyIdToken({ idToken: token, audience: audiences });
+      const payload = ticket.getPayload();
+      return Boolean(payload && claimsMatch(payload, expectedEmail, audiences));
+    } catch (err) {
+      console.warn(
+        `[site] Pub/Sub push token rejected: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  };
+}
 
 /** Real server + sim limits advertised in `welcome.limits`. */
 export const SITE_LIMITS: SiteLimits = {
@@ -117,6 +311,14 @@ export const SITE_LIMITS: SiteLimits = {
   tierStep: TIER_STEP,
   minAutonomousAgents: MIN_AUTONOMOUS_AGENTS,
   maxAutonomousAgents: MAX_AUTONOMOUS_AGENTS,
+  maxOpenP0: MAX_OPEN_P0_ON_FLOOR,
+  conesPerPlayer: MAX_CONES_PER_PLAYER,
+  coneTtlGameMin: CONE_EXPIRY_SEC,
+  dispatchMaxCount: DISPATCH_MAX_COUNT,
+  nlPerMinute: PLAYER_RATE_LIMIT_PER_MIN,
+  rackLiftMinigame: false,
+  /** Default on; the welcome carries the live `ENABLE_DISPATCHERS_CALL` value. */
+  dispatchersCall: true,
 };
 
 /**
@@ -247,6 +449,42 @@ export function fareStats(
   };
 }
 
+/** Inbound putaway guide extras: `stow` flag and the open cross-dock bay target (`alt`). */
+export function guideExtras(g: {
+  stow?: boolean;
+  alt?: { x: number; y: number; bay: string; left: number } | null;
+}): { stow?: true; alt?: { x: number; y: number; bay: string; left: number } } {
+  return {
+    ...(g.stow ? { stow: true as const } : {}),
+    ...(g.alt ? { alt: { ...g.alt } } : {}),
+  };
+}
+
+/**
+ * Order-choice state for human drivers (sim `Vehicle.fareOffer` / `rivalId`). Order
+ * options are public floor data; only the driver's own client acts on them.
+ */
+export function choiceStats(v: Vehicle): Pick<QuantisedVehicleDelta, 'fareOffer' | 'rivalId'> {
+  if (!v.human || v.isBot) return {};
+  const f = v.fareOffer;
+  return {
+    fareOffer: f
+      ? {
+          since: round2(f.since),
+          options: f.options.map((o) => ({
+            ...o,
+            parEmpty: o.parEmpty === null ? null : round2(o.parEmpty),
+            parLoaded: o.parLoaded === null ? null : round2(o.parLoaded),
+          })),
+          copilotId: f.copilotId,
+          reason: f.reason,
+          carpool: f.carpool,
+        }
+      : null,
+    rivalId: v.rivalId ?? null,
+  };
+}
+
 /** Inspector-only vehicle detail carried on FULL deltas. */
 export type VehicleDetail = Pick<
   QuantisedVehicleDelta,
@@ -275,6 +513,8 @@ export type VehicleDetail = Pick<
   | 'comboBest'
   | 'fareTrips'
   | 'speedyTrips'
+  | 'fareOffer'
+  | 'rivalId'
   | 'runFinished'
 >;
 
@@ -326,6 +566,7 @@ export function vehicleDetail(v: Vehicle): VehicleDetail {
           ...(v.streak !== undefined ? { streak: v.streak } : {}),
           ...(v.bestStreak !== undefined ? { bestStreak: v.bestStreak } : {}),
           ...fareStats(v),
+          ...choiceStats(v),
           ...(v.runFinished !== undefined ? { runFinished: Boolean(v.runFinished) } : {}),
         }
       : {}),
@@ -355,6 +596,10 @@ export interface ConnectedClient {
   isBot: boolean;
   vid: string | null;
   role: 'driver' | 'spectator';
+  ticketRole: 'driver' | 'spectator';
+  ticketJti: string | null;
+  evictedReason: EvictionReason | null;
+  lastHumanActivityAt: number;
   runMode?: RunMode;
   connectedAtMs: number;
   lastInputAtMs: number;
@@ -370,6 +615,16 @@ export interface ConnectedClient {
   historySentKey?: string;
   /** Signature of `world.hallOfFame` last sent to this connection. */
   hallSentKey?: string;
+  /** JSON of the last `floorOrders` sent to this connection. */
+  floorOrdersSentJson?: string;
+  /** Player opted out of Dispatcher's Call via `dispatchersCallPref` (client override). */
+  dispatchersCallOptOut?: boolean;
+  /** Timer-insensitive signature (ready flags, counts, cone keys) of the last `floorOrders` sent. */
+  floorOrdersSentShape?: string;
+  /** Wall-clock ms the last `floorOrders` was sent to this connection. */
+  floorOrdersSentAtMs?: number;
+  /** True when the client sends sub-tick `dt` on `input` messages. */
+  subTickClient?: boolean;
 }
 
 export interface SiteServerOptions {
@@ -389,6 +644,8 @@ export interface SiteServerOptions {
   nlPipeline?: NlOrderPipeline;
   enableIntervals?: boolean;
   inputLeaseMs?: number;
+  idleEvictionMs?: number;
+  evictOnRunComplete?: boolean;
   idleBreakThresholdMs?: number;
   windDownMaxMs?: number;
   restoreFromPersistence?: boolean;
@@ -398,6 +655,21 @@ export interface SiteServerOptions {
    * from the frontend `warehouse-lobby` gateway.
    */
   requireProxyAuth?: boolean;
+  /**
+   * Opt-in feature flag for the Rack Height Fork-Lift Minigame (ENABLE_RACK_LIFT_MINIGAME).
+   */
+  enableRackLiftMinigame?: boolean;
+  /**
+   * Dispatcher's Call minigame (ENABLE_DISPATCHERS_CALL, default on; `0|false|off|no` disables).
+   */
+  enableDispatchersCall?: boolean;
+  /** Gemini client for Dispatcher's Call (default: Vertex AI via ADC). */
+  dispatchersCallClient?: DispatchersCallModelClient;
+  /**
+   * Verifies the Pub/Sub push OIDC bearer token on `/internal/transfer` (test seam).
+   * Default: `createPubSubPushVerifier()` (google-auth-library `verifyIdToken`).
+   */
+  verifyTransferPushToken?: TransferPushTokenVerifier;
 }
 
 export interface SiteServerInstance {
@@ -412,6 +684,7 @@ export interface SiteServerInstance {
   brainScheduler: AgentBrainScheduler;
   nlPipeline: NlOrderPipeline;
   clients: Set<ConnectedClient>;
+  annexServers: Map<SiteId, SiteServerInstance>;
   stepTick: (nowMs?: number, background?: boolean) => Promise<void>;
   checkFactoryBreakPhase: (nowMs?: number) => Promise<void>;
   checkSurgeRelocation: (nowMs?: number) => Promise<void>;
@@ -433,12 +706,27 @@ export async function createSiteServer(
     process.env.TICKET_HMAC_KEY ??
     process.env.TICKET_HMAC_SECRET ??
     DEFAULT_TICKET_SECRET;
+  // Raw clientIds are bearer credentials at the lobby; every site → client payload carries the
+  // opaque publicId instead (see `public-id.ts`). Default-deny: any key/owner that is not a live
+  // vehicle id is treated as a possible clientId and hashed.
+  const toPublicId = createPublicIdMapper(ticketSecret);
+  const mayBeClientId = (key: string): boolean => !world.vehicles.some((v) => v.id === key);
   const requireProxyAuth =
     options.requireProxyAuth ??
     (Boolean(process.env.K_SERVICE) ||
       process.env.REQUIRE_PROXY_AUTH === '1' ||
       process.env.REQUIRE_PROXY_AUTH === 'true');
+  const enableRackLiftMinigame =
+    options.enableRackLiftMinigame ??
+    (process.env.ENABLE_RACK_LIFT_MINIGAME === '1' ||
+      process.env.ENABLE_RACK_LIFT_MINIGAME === 'true');
+  const enableDispatchersCall = options.enableDispatchersCall ?? parseDispatchersCallFlag();
+  // Fail loudly at startup if GEMINI_MODEL is not an allowed model.
+  const geminiModel = resolveGeminiModel(process.env.GEMINI_MODEL);
+  const verifyTransferPushToken = options.verifyTransferPushToken ?? createPubSubPushVerifier();
   const inputLeaseMs = options.inputLeaseMs ?? DEFAULT_INPUT_LEASE_MS;
+  const idleEvictionMs = options.idleEvictionMs ?? DEFAULT_IDLE_EVICTION_MS;
+  const evictOnRunComplete = options.evictOnRunComplete ?? true;
   const idleBreakThresholdMs =
     options.idleBreakThresholdMs ?? DEFAULT_IDLE_BREAK_MS;
   const windDownMaxMs = options.windDownMaxMs ?? DEFAULT_WIND_DOWN_MAX_MS;
@@ -461,7 +749,11 @@ export async function createSiteServer(
         }
       }
       world.vehicles = world.vehicles.filter((v) => !v.isPlayerVehicle);
-      if (world.phase === 'break') {
+      const keepAlwaysWarm =
+        process.env.IDLE_POLICY === 'warm' || process.env.IDLE_POLICY === 'run';
+      if (keepAlwaysWarm && world.phase !== 'running') {
+        setPhase(world, 'running');
+      } else if (world.phase === 'break') {
         compactFacilityIfNeeded(world);
       }
     } else {
@@ -478,19 +770,29 @@ export async function createSiteServer(
       agents: options.initialAgents,
     });
   }
+  world.rackLiftMinigame = enableRackLiftMinigame;
+  world.rackLiftMinigameKillSwitch = !enableRackLiftMinigame;
 
-  if (options.enableIntervals) {
+  if (options.enableIntervals && world.phase === 'running') {
     while (world.orders.filter((o) => o.state === 'open').length < 8) {
-      postOrder(world);
+      if (!postOrder(world)) break;
     }
   }
 
   const app = Fastify({ logger: false });
-  const wss = new WebSocketServer({ noServer: true });
+  // Frames larger than the protocol cap are rejected by ws itself (close 1009) instead of
+  // being buffered up to the 100 MiB default.
+  // `maxPayload` is a hard memory guard against huge frames (ws closes those at the protocol
+  // level). The 4 KB application limit stays in `checkFrameSize`, which replies with a
+  // readable error and a clean 1009 close.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES });
   const clients = new Set<ConnectedClient>();
   const pendingEvents: SimEvent[] = [];
   const relocationCooldownUntil = new Map<string, number>();
   const persistedFinishedRuns = new Set<string>();
+  const consumedTicketIds = new Map<string, number>();
+  const annexServers = new Map<SiteId, SiteServerInstance>();
+  const annexCreationPromises = new Map<SiteId, Promise<SiteServerInstance>>();
 
   async function persistVehicleStats(
     cid: string,
@@ -515,6 +817,9 @@ export async function createSiteServer(
       (v.runMode ?? 'blitz') === 'blitz'
         ? Math.max(prevBestBlitz, runPts)
         : prevBestBlitz;
+    // Best pallets per real minute over this player's runs (AI/bots never stored).
+    const runPpm = v.human && !isBotFlag && (v.runDeliveries ?? 0) > 0 ? computeDriverPpm(world, v) : 0;
+    const nextPpm = Math.max(existing?.ppm ?? 0, Number.isFinite(runPpm) ? runPpm : 0);
     await persistence.upsertPlayerStats({
       clientId: cid,
       name: playerName,
@@ -522,6 +827,7 @@ export async function createSiteServer(
       totalDeliveries: (existing?.totalDeliveries ?? 0) + v.deliveries,
       totalScore: (existing?.totalScore ?? 0) + score,
       ...(nextBestBlitz > 0 ? { bestBlitzPts: nextBestBlitz } : {}),
+      ...(nextPpm > 0 ? { ppm: nextPpm } : {}),
       shiftsPlayed: (existing?.shiftsPlayed ?? 0) + 1,
       lastSiteId: siteId,
       updatedAt: nowMs,
@@ -550,7 +856,7 @@ export async function createSiteServer(
     new VertexNlOrderParser({
       projectId: gcpProjectId,
       location: vertexLocation,
-      model: process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
+      model: geminiModel,
     });
 
   const nlPipeline =
@@ -561,6 +867,8 @@ export async function createSiteServer(
       governor,
       persistence,
       guard,
+      // Armor journal stores HMAC-SHA256(ip) keyed by the ticket secret, never the raw IP.
+      ipHashSalt: ticketSecret,
     });
 
   const brainClient =
@@ -568,7 +876,7 @@ export async function createSiteServer(
     new VertexGeminiBrainClient({
       projectId: gcpProjectId,
       location: vertexLocation,
-      model: process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
+      model: geminiModel,
     });
 
   const brainScheduler =
@@ -586,7 +894,42 @@ export async function createSiteServer(
     pendingEvents.push(ev);
   });
 
+  /** Send to every authenticated connection driving vehicle `vid`. */
+  function sendToVehicleDriver(vid: string, msg: ServerMessage): void {
+    for (const c of clients) {
+      if (c.authenticated && c.vid === vid) sendTo(c.socket, msg);
+    }
+  }
+
+  const dispatchersCall = new DispatchersCallCoordinator({
+    enabled: enableDispatchersCall,
+    client:
+      options.dispatchersCallClient ??
+      new VertexDispatchersCallClient({
+        projectId: gcpProjectId,
+        location: vertexLocation,
+        model: geminiModel,
+      }),
+    budget: persistence,
+    // Only drivers with a live connection that has not opted out get a call.
+    eligible: (v) => {
+      let connected = false;
+      for (const c of clients) {
+        if (!c.authenticated || c.vid !== v.id || c.isBot) continue;
+        if (c.dispatchersCallOptOut) return false;
+        connected = true;
+      }
+      return connected;
+    },
+    onOffer: (offer) => sendToVehicleDriver(offer.vid, offer.screen),
+  });
+  world.listeners.push((ev) => {
+    const reveal = dispatchersCall.onSimEvent(ev);
+    if (reveal && typeof ev.vid === 'string') sendToVehicleDriver(ev.vid, reveal);
+  });
+
   let lastHumanActiveAtMs = Date.now();
+  let lastTickAtMs = Date.now();
   let windingDownStartedAtMs: number | null = null;
   let lastBroadcastPhase = world.phase;
   let shuttingDown = false;
@@ -682,7 +1025,7 @@ export async function createSiteServer(
       const role: 'driver' | 'spectator' =
         c.role === 'driver' && c.vid ? 'driver' : 'spectator';
       return {
-        clientId: c.clientId,
+        clientId: toPublicId(c.clientId),
         playerId: c.playerId,
         name: c.name,
         vid: role === 'driver' ? c.vid : null,
@@ -708,6 +1051,7 @@ export async function createSiteServer(
     includeFullState: boolean = true,
     nowMs: number = Date.now(),
   ): DeltaMessage {
+    events = publicizeEvents(events, toPublicId, mayBeClientId);
     const pendingByAgent = new Set(
       world.pendingDecisions.map((r) => r.agentId),
     );
@@ -734,6 +1078,7 @@ export async function createSiteServer(
           angle: Math.round(v.angle * 100) / 100,
           speedNow: Math.round(v.speedNow * 10) / 10,
           battery: Math.round(v.battery * 10) / 10,
+          fork: Math.round(v.fork * 100) / 100,
           humanCharging: Boolean(v.humanCharging),
           autopilot: Boolean(v.autopilot),
           cargoCount: v.cargo.length,
@@ -756,6 +1101,7 @@ export async function createSiteServer(
           ...(v.streak !== undefined ? { streak: v.streak } : {}),
           ...(v.bestStreak !== undefined ? { bestStreak: v.bestStreak } : {}),
           ...fareStats(v),
+          ...choiceStats(v),
           ...(v.runFinished !== undefined ? { runFinished: Boolean(v.runFinished) } : {}),
           inRange: Boolean(g?.inRange),
           guide: g
@@ -764,6 +1110,7 @@ export async function createSiteServer(
                 x: g.x,
                 y: g.y,
                 inRange: g.inRange,
+                ...guideExtras(g),
               }
             : null,
         };
@@ -795,6 +1142,7 @@ export async function createSiteServer(
           value: o.value,
           due: o.due,
           sku: o.sku,
+          ...(o.putaway ? { rack: o.putaway.rackId, xdockBay: o.xdockBay ?? null, xdockDue: o.xdockDue ?? null } : {}),
         })),
         orders: v.orders.map((o) => ({
           id: o.id,
@@ -826,6 +1174,7 @@ export async function createSiteServer(
               y: g.y,
               text: g.text,
               inRange: g.inRange,
+              ...guideExtras(g),
             }
           : null,
         ...vehicleDetail(v),
@@ -851,7 +1200,7 @@ export async function createSiteServer(
       bays: world.bays,
       markers: world.markers,
       events,
-      votes: world.difficultyVotes,
+      votes: publicizeKeyedRecord(world.difficultyVotes, toPublicId) ?? {},
       difficulty: world.difficulty,
       tier: world.tier,
       stats: {
@@ -861,6 +1210,7 @@ export async function createSiteServer(
         shiftTime: world.shiftTime,
         rushUntil: world.rushUntil,
         board: currentBoard(nowMs),
+        completedRuns: publicizeCompletedRuns(world.completedRuns, toPublicId),
       },
     };
   }
@@ -900,13 +1250,58 @@ export async function createSiteServer(
     conn.lastHeatSentAtMs = undefined;
   }
 
-  function buildWelcome(conn: ConnectedClient): WelcomeMessage {
+  function floorOrdersFor(conn: ConnectedClient, nowMs: number): FloorOrdersStatus {
+    return governor.getFloorOrdersStatus(world, conn.clientId, nlPipeline.guard, conn.ip, nowMs);
+  }
+
+  /** Signature that ignores countdown values, so only ready/blocked flips and count changes bypass the 1/s throttle. */
+  function floorOrdersShape(s: FloorOrdersStatus): string {
+    return JSON.stringify([
+      s.rush.readyInMs > 0,
+      s.p0.open,
+      s.p0.readyInMs > 0,
+      s.cones.mine,
+      s.dispatch.readyInMs > 0,
+      s.fleet.addReadyInMs > 0,
+      s.fleet.removable,
+      s.nl.left,
+    ]);
+  }
+
+  function markFloorOrdersSent(
+    conn: ConnectedClient,
+    status: FloorOrdersStatus,
+    json: string,
+    nowMs: number,
+  ): void {
+    conn.floorOrdersSentJson = json;
+    conn.floorOrdersSentShape = floorOrdersShape(status);
+    conn.floorOrdersSentAtMs = nowMs;
+  }
+
+  /** JSON of `conn`'s Floor-order state when it should ride this delta, else null. */
+  function floorOrdersDeltaJson(conn: ConnectedClient, nowMs: number): string | null {
+    const status = floorOrdersFor(conn, nowMs);
+    const json = JSON.stringify(status);
+    if (json === conn.floorOrdersSentJson) return null;
+    const shapeChanged = floorOrdersShape(status) !== conn.floorOrdersSentShape;
+    const due =
+      conn.floorOrdersSentAtMs === undefined ||
+      nowMs - conn.floorOrdersSentAtMs >= FLOOR_ORDERS_INTERVAL_MS;
+    if (!shapeChanged && !due) return null;
+    markFloorOrdersSent(conn, status, json, nowMs);
+    return json;
+  }
+
+  function buildWelcome(conn: ConnectedClient, nowMs: number = Date.now()): WelcomeMessage {
     resetIncrementalTrackers(conn);
     const leanBot = conn.isBot;
+    const floorOrders = floorOrdersFor(conn, nowMs);
+    markFloorOrdersSent(conn, floorOrders, JSON.stringify(floorOrders), nowMs);
     return {
       type: 'welcome',
       you: {
-        clientId: conn.clientId,
+        clientId: toPublicId(conn.clientId),
         playerId: conn.playerId,
         name: conn.name,
         vid: conn.vid,
@@ -914,8 +1309,18 @@ export async function createSiteServer(
         siteId,
         isBot: conn.isBot,
       },
-      snapshot: snapshotForRecipient(world, conn.clientId, { leanBot }),
-      limits: { ...SITE_LIMITS },
+      snapshot: publicizeSnapshot(
+        snapshotForRecipient(world, conn.clientId, { leanBot }),
+        toPublicId,
+        mayBeClientId,
+      ),
+      limits: {
+        ...SITE_LIMITS,
+        nlPerMinute: nlPipeline.guard.getPlayerLimitPerMin(),
+        rackLiftMinigame: enableRackLiftMinigame,
+        dispatchersCall: enableDispatchersCall,
+      },
+      floorOrders,
     };
   }
 
@@ -950,7 +1355,7 @@ export async function createSiteServer(
 
       // Recipient's own hand only (hands are keyed by clientId in the sim).
       const own = c.clientId ? world.cards[c.clientId] : undefined;
-      const handsJson = own ? `{${JSON.stringify(c.clientId)}:${JSON.stringify(own)}}` : '{}';
+      const handsJson = own ? `{${JSON.stringify(toPublicId(c.clientId))}:${JSON.stringify(own)}}` : '{}';
 
       if (useLeanBotDelta && c.isBot) {
         if (botHead === null) {
@@ -1021,7 +1426,13 @@ export async function createSiteServer(
         c.lastHeatSentAtMs = nowMs;
       }
 
-      c.socket.send(`${head},"stats":{${statsCore}${extras}},"hands":${handsJson}}`);
+      // Recipient-only Floor-order state, when it changed (countdowns refreshed ≤ 1/s).
+      const floorJson = c.clientId ? floorOrdersDeltaJson(c, nowMs) : null;
+      const floorPart = floorJson ? `,"floorOrders":${floorJson}` : '';
+
+      c.socket.send(
+        `${head},"stats":{${statsCore}${extras}},"hands":${handsJson}${floorPart}}`,
+      );
     }
   }
 
@@ -1043,6 +1454,7 @@ export async function createSiteServer(
         removePlayerVehicle(world, cid);
       }
     }
+    pruneReceivedTransferIds(world);
     const snap = serialize(world);
     snap.vehicles = snap.vehicles.filter((v) => !v.isPlayerVehicle);
     snap.players = [];
@@ -1125,7 +1537,8 @@ export async function createSiteServer(
 
   async function checkFactoryBreakPhase(nowMs: number = Date.now()): Promise<void> {
     const connectedCount = countConnectedSockets();
-    const keepAlwaysWarm = process.env.IDLE_POLICY === 'warm';
+    const keepAlwaysWarm =
+      process.env.IDLE_POLICY === 'warm' || process.env.IDLE_POLICY === 'run';
     if (connectedCount > 0) {
       lastHumanActiveAtMs = nowMs;
       windingDownStartedAtMs = null;
@@ -1149,6 +1562,7 @@ export async function createSiteServer(
           setPhase(world, 'break');
           windingDownStartedAtMs = null;
           await flushSnapshot(nowMs);
+          await flushHeartbeat(nowMs);
         }
       }
     }
@@ -1237,16 +1651,129 @@ export async function createSiteServer(
     }
   }
 
+  function pruneConsumedTickets(nowMs: number): void {
+    for (const [jti, exp] of consumedTicketIds) {
+      if (exp < nowMs) {
+        consumedTicketIds.delete(jti);
+      }
+    }
+  }
+
+  async function getOrCreateAnnex(annexId: SiteId): Promise<SiteServerInstance> {
+    const existing = annexServers.get(annexId);
+    if (existing) return existing;
+    const inflight = annexCreationPromises.get(annexId);
+    if (inflight) return inflight;
+
+    const p = createSiteServer({
+      ...options,
+      siteId: annexId,
+      persistence,
+      ticketSecret,
+      requireProxyAuth,
+      enableIntervals: options.enableIntervals ?? true,
+      restoreFromPersistence: true,
+    }).then((srv) => {
+      annexServers.set(annexId, srv);
+      annexCreationPromises.delete(annexId);
+      return srv;
+    });
+    annexCreationPromises.set(annexId, p);
+    return p;
+  }
+
+  function evictDriverToSpectator(
+    clientId: string,
+    v: Vehicle,
+    reason: EvictionReason,
+    nowMs: number = Date.now(),
+  ): void {
+    const evictedVid = v.id;
+    const pts = Math.round(v.runPts ?? v.sPts ?? 0);
+    const shipped = Math.round(v.runDeliveries ?? v.sShipped ?? v.deliveries ?? 0);
+    const incidents = Math.round(v.runIncidents ?? v.incidents ?? 0);
+    const bestStreak = Math.round(v.bestStreak ?? v.streak ?? 0);
+    const runMode: RunMode = v.runMode ?? 'blitz';
+
+    if (v.isPlayerVehicle) {
+      removePlayerVehicle(world, clientId);
+    } else if (v.human) {
+      release(world, v.id);
+    }
+
+    for (const c of clients) {
+      if (!c.authenticated || c.clientId !== clientId) continue;
+      c.vid = null;
+      c.role = 'spectator';
+      c.evictedReason = reason;
+      sendTo(c.socket, {
+        type: 'runEvicted',
+        vid: evictedVid,
+        reason,
+        pts,
+        shipped,
+        incidents,
+        bestStreak,
+        runMode,
+      });
+    }
+
+    broadcast(buildPresenceMessage());
+    scheduleHeartbeatFlush();
+    void nowMs;
+  }
+
   function checkInputLeases(nowMs: number): void {
     let releasedAny = false;
     for (const c of clients) {
       if (!c.authenticated || !c.vid) continue;
+      if (c.role === 'driver' && nowMs - c.lastHumanActivityAt > idleEvictionMs) {
+        const v = world.vehicles.find((x) => x.id === c.vid);
+        if (v?.autopilot && !v.runFinished) continue;
+        // Once a Blitz run clock has started, let the 3-minute Blitz timer finish naturally
+        // as 'run_complete' rather than evicting mid-run for 'idle_timeout'.
+        if (v && v.runMode === 'blitz' && v.runEndsAt != null && !v.runFinished) continue;
+        // If another tab for the same client/vehicle is still active, do not evict the shared vehicle.
+        let siblingActive = false;
+        for (const other of clients) {
+          if (
+            other !== c &&
+            other.authenticated &&
+            (other.vid === c.vid || other.clientId === c.clientId) &&
+            nowMs - other.lastHumanActivityAt <= idleEvictionMs
+          ) {
+            siblingActive = true;
+            break;
+          }
+        }
+        if (siblingActive) continue;
+        if (v) {
+          if (v.sPts > 0 || v.deliveries > 0 || (v.runDeliveries ?? 0) > 0) {
+            void persistVehicleStats(c.clientId, c.name, c.isBot, v, 0, nowMs);
+          }
+          evictDriverToSpectator(c.clientId, v, 'idle_timeout', nowMs);
+        }
+        continue;
+      }
       if (nowMs - c.lastInputAtMs > inputLeaseMs) {
         const v = world.vehicles.find((x) => x.id === c.vid);
         if (!v) continue;
         // Co-Pilot autopilot vehicles continue operating autonomously for the player
         // without requiring constant keyboard heartbeats.
         if (v.autopilot) continue;
+        let siblingSendingInput = false;
+        for (const other of clients) {
+          if (
+            other !== c &&
+            other.authenticated &&
+            other.vid === c.vid &&
+            nowMs - other.lastInputAtMs <= inputLeaseMs
+          ) {
+            siblingSendingInput = true;
+            break;
+          }
+        }
+        if (siblingSendingInput) continue;
         if (v.isPlayerVehicle) {
           v.input = { up: false, down: false, left: false, right: false, boost: false };
         } else if (v.human) {
@@ -1264,7 +1791,7 @@ export async function createSiteServer(
     }
   }
 
-  let backgroundDrainInFlight = false;
+  let transferPublishInFlight = false;
   let bgTickCount = Math.max(0, SITE_IDS.indexOf(siteId)) * 3;
   let pendingPresenceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -1292,6 +1819,17 @@ export async function createSiteServer(
     checkInputLeases(nowMs);
     governor.expireCones(world, nowMs);
 
+    // Free-Range contention lease: when active drivers >= FREE_RANGE_SOFT_CAP (26),
+    // start a 5-minute (300s) lease countdown on uncapped Free-Range human vehicles.
+    if (countActiveDrivers() >= FREE_RANGE_SOFT_CAP) {
+      for (const v of world.vehicles) {
+        if (v.human && v.runMode === 'freerange' && v.runEndsAt === null) {
+          v.runStartedAt = v.runStartedAt ?? world.t;
+          v.runEndsAt = Math.round((world.t + 300) * 10) / 10;
+        }
+      }
+    }
+
     // When active human drivers are on the floor, ensure open orders are available for pickup
     if (world.phase === 'running' && options.enableIntervals) {
       const activeDrivers = countActiveDrivers();
@@ -1309,15 +1847,68 @@ export async function createSiteServer(
 
     const prevPhase = world.phase;
     tick(world);
+    lastTickAtMs = nowMs;
 
-    // Persist newly finished Blitz runs immediately so bestBlitzPts is recorded right away
+    // Dispatcher's Call: detect real situations in each human's Blitz window and ask
+    // Gemini (the coordinator de-duplicates in-flight calls per vehicle). Background
+    // ticks never wait on the model; foreground (test) ticks do.
+    if (dispatchersCall.enabled && world.phase === 'running') {
+      const dcPoll = dispatchersCall.poll(world);
+      if (background) void dcPoll;
+      else await dcPoll;
+    }
+
+    // Check Free-Range contention lease expiry after tick advances world.t
     for (const v of world.vehicles) {
+      if (
+        v.human &&
+        !v.runFinished &&
+        v.runMode === 'freerange' &&
+        v.runEndsAt !== null &&
+        v.runEndsAt !== undefined &&
+        world.t >= v.runEndsAt
+      ) {
+        v.runFinished = true;
+        v.speedNow = 0;
+        v.input = { up: false, down: false, left: false, right: false, boost: false, moveAngle: null };
+        recordCompletedRun(world, v);
+      }
+    }
+
+    // Send authoritative post-tick ack to active manual human drivers using sub-tick dt so
+    // client reconciliation stays synchronized on every 100 ms tick.
+    const ackT = Math.round(world.t * 100) / 100;
+    for (const c of clients) {
+      if (!c.authenticated || !c.subTickClient || !c.vid || typeof c.lastInputSeq !== 'number') {
+        continue;
+      }
+      if (nowMs - c.lastInputAtMs > inputLeaseMs) continue;
+      const v = world.vehicles.find((x) => x.id === c.vid && x.human);
+      if (!v || v.autopilot) continue;
+      sendTo(c.socket, {
+        type: 'ack',
+        seq: c.lastInputSeq,
+        t: ackT,
+        x: Math.round(v.px * 10000) / 10000,
+        y: Math.round(v.py * 10000) / 10000,
+        angle: Math.round(v.angle * 10000) / 10000,
+        speedNow: Math.round(v.speedNow * 10000) / 10000,
+      });
+    }
+
+    // Persist newly finished runs immediately and evict completed drivers to spectator
+    for (const v of [...world.vehicles]) {
       if (!v.human || !v.runFinished) continue;
       const cid = v.ownerClientId || v.controlledByClientId;
       if (!cid) continue;
       const runKey = `${cid}:${v.runStartedAt ?? 0}`;
       if (!persistedFinishedRuns.has(runKey)) {
         void persistVehicleStats(cid, v.driver || cid, Boolean(v.isBot), v, 0, nowMs);
+      }
+      if (evictOnRunComplete) {
+        const reason: EvictionReason =
+          v.runMode === 'freerange' ? 'session_lease_expired' : 'run_complete';
+        evictDriverToSpectator(cid, v, reason, nowMs);
       }
     }
 
@@ -1354,49 +1945,81 @@ export async function createSiteServer(
       }
     }
 
-    const runAsyncWork = async () => {
-      // Drain any outbound cross-site transfers produced during this tick
-      if (world.outboundTransfers.length > 0) {
-        const transfers = world.outboundTransfers.splice(0);
-        for (const xfer of transfers) {
-          const wireTransfer: Transfer = {
-            id: xfer.id,
-            fromSite: xfer.fromSite as SiteId,
-            toSite: xfer.toSite as SiteId,
-            orderRef: String(xfer.orderRef),
-            sku: xfer.sku,
-            value: xfer.value,
-            shippedAt: Math.max(0, Math.round(xfer.shippedAt * 1000)),
-            carrier: xfer.carrier || 'F-01',
-          };
-          await persistence.publishTransfer(wireTransfer);
+    // Cross-site transfers: publish in the background with their own in-flight guard, so a
+    // slow Pub/Sub publish never delays brain dispatch (and vice versa).
+    if (world.outboundTransfers.length > 0) {
+      if (background) {
+        if (!transferPublishInFlight) {
+          transferPublishInFlight = true;
+          void publishOutboundTransfers()
+            .catch((err) => logAsyncError('transfer publish', err))
+            .finally(() => {
+              transferPublishInFlight = false;
+            });
+        }
+      } else {
+        await publishOutboundTransfers();
+      }
+    }
+
+    // Schedule Gemini brain decisions if running (pause Gemini calls when warm-idle with 0 sockets for >= idleBreakThresholdMs)
+    const idlePauseGemini =
+      connectedCount === 0 && nowMs - lastHumanActiveAtMs >= idleBreakThresholdMs;
+    if (
+      world.phase === 'running' &&
+      world.pendingDecisions.length > 0 &&
+      !idlePauseGemini
+    ) {
+      const untrustedNames = Array.from(clients)
+        .filter((c) => c.authenticated && c.name)
+        .map((c) => c.name);
+      // Each request runs in its own concurrency slot; background ticks dispatch into free
+      // slots without waiting, so one hung call never stalls the other agents.
+      const drain = brainScheduler.drainQueue(world, nowMs, untrustedNames, { wait: !background });
+      if (background) {
+        void drain.catch((err) => logAsyncError('brain drain', err));
+      } else {
+        try {
+          await drain;
+        } catch (err) {
+          logAsyncError('brain drain', err);
         }
       }
+    }
+  }
 
-      // Schedule Gemini brain decisions if running (pause Gemini calls when warm-idle with 0 sockets for >= idleBreakThresholdMs)
-      const idlePauseGemini =
-        connectedCount === 0 && nowMs - lastHumanActiveAtMs >= idleBreakThresholdMs;
-      if (
-        world.phase === 'running' &&
-        world.pendingDecisions.length > 0 &&
-        !idlePauseGemini
-      ) {
-        const untrustedNames = Array.from(clients)
-          .filter((c) => c.authenticated && c.name)
-          .map((c) => c.name);
-        await brainScheduler.drainQueue(world, nowMs, untrustedNames);
-      }
-    };
+  function logAsyncError(what: string, err: unknown): void {
+    console.error(
+      `[${siteId}] ${what} failed: ${err instanceof Error ? err.stack || err.message : String(err)}`,
+    );
+  }
 
-    if (background) {
-      if (!backgroundDrainInFlight) {
-        backgroundDrainInFlight = true;
-        void runAsyncWork().finally(() => {
-          backgroundDrainInFlight = false;
-        });
+  /**
+   * Publishes queued outbound transfers in order. Each one leaves `world.outboundTransfers`
+   * only after Pub/Sub accepts it; on failure it (and everything behind it) stays queued for
+   * the next tick, so a failed publish never loses a pallet.
+   */
+  async function publishOutboundTransfers(): Promise<void> {
+    while (world.outboundTransfers.length > 0) {
+      const xfer = world.outboundTransfers[0];
+      const wireTransfer: Transfer = {
+        id: xfer.id,
+        fromSite: xfer.fromSite as SiteId,
+        toSite: xfer.toSite as SiteId,
+        orderRef: String(xfer.orderRef),
+        sku: xfer.sku,
+        value: xfer.value,
+        shippedAt: Math.max(0, Math.round(xfer.shippedAt * 1000)),
+        carrier: xfer.carrier || 'F-01',
+      };
+      try {
+        await persistence.publishTransfer(wireTransfer);
+      } catch (err) {
+        logAsyncError(`transfer ${xfer.id} publish (re-queued)`, err);
+        return;
       }
-    } else {
-      await runAsyncWork();
+      const idx = world.outboundTransfers.indexOf(xfer);
+      if (idx >= 0) world.outboundTransfers.splice(idx, 1);
     }
   }
 
@@ -1500,6 +2123,20 @@ export async function createSiteServer(
       return false;
     }
 
+    pruneConsumedTickets(nowMs);
+    if (payload.jti) {
+      if (consumedTicketIds.has(payload.jti)) {
+        sendTo(conn.socket, {
+          type: 'error',
+          code: 'REQUEUE_REQUIRED',
+          message: 'Ticket has already been used; request a fresh ticket via /api/join.',
+        });
+        conn.socket.close(4003, 'Ticket already consumed');
+        return false;
+      }
+      consumedTicketIds.set(payload.jti, payload.exp);
+    }
+
     const nameCheck = validateDisplayName(payload.name, {
       allowBotPrefix: payload.isBot,
     });
@@ -1518,11 +2155,18 @@ export async function createSiteServer(
       conn.authTimer = undefined;
     }
 
+    const ticketRole: 'driver' | 'spectator' =
+      spectateOnly || payload.role === 'spectator' ? 'spectator' : 'driver';
+
     conn.authenticated = true;
     conn.clientId = payload.clientId;
     conn.name = nameCheck.name;
     conn.isBot = payload.isBot;
+    conn.ticketRole = payload.role === 'spectator' ? 'spectator' : 'driver';
+    conn.ticketJti = payload.jti ?? null;
+    conn.evictedReason = null;
     conn.lastInputAtMs = nowMs;
+    conn.lastHumanActivityAt = nowMs;
     lastHumanActiveAtMs = nowMs;
 
     if (world.phase === 'break' || world.phase === 'winding_down') {
@@ -1537,7 +2181,14 @@ export async function createSiteServer(
         const nextRun = extractRunNumber(conn.name);
         const prevRun = extractRunNumber(existingSession.name);
         const isNewRun = nextRun !== null && nextRun !== prevRun;
-        if (ev.battery <= 0 || ev.runFinished || isNewRun) {
+        // A 0% battery mid-Blitz is not a finished run (the sim lets the clock run out), so a
+        // reconnect must resume the same vehicle rather than replace it.
+        const blitzStillRunning =
+          ev.runMode === 'blitz' &&
+          ev.runEndsAt != null &&
+          !ev.runFinished &&
+          world.t < ev.runEndsAt;
+        if ((ev.battery <= 0 && !blitzStillRunning) || ev.runFinished || isNewRun) {
           for (const other of Array.from(clients)) {
             if (other !== conn && other.authenticated && other.clientId === conn.clientId) {
               clients.delete(other);
@@ -1554,7 +2205,7 @@ export async function createSiteServer(
             const cid = conn.clientId;
             void persistVehicleStats(cid, prevName, prevIsBot, ev, 0, nowMs);
           }
-          if (spectateOnly) {
+          if (ticketRole === 'spectator') {
             removePlayerVehicle(world, conn.clientId);
           }
         }
@@ -1562,7 +2213,8 @@ export async function createSiteServer(
     }
 
     const canDrive =
-      !spectateOnly &&
+      ticketRole === 'driver' &&
+      conn.evictedReason === null &&
       countActiveDrivers() < MAX_DRIVERS &&
       countClientDrivers(conn.clientId) < MAX_DRIVERS_PER_CLIENT;
 
@@ -1571,7 +2223,7 @@ export async function createSiteServer(
         clientId: conn.clientId,
         name: conn.name,
         isBot: conn.isBot,
-        ...(payload.runMode ? { runMode: payload.runMode } : {}),
+        ...(payload.runMode ? { runMode: payload.runMode, mode: payload.runMode } : {}),
       });
       if (vehicle) {
         applyCarryOverToVehicle(conn, vehicle, payload);
@@ -1629,7 +2281,8 @@ export async function createSiteServer(
 
     const sizeCheck = checkFrameSize(buf, MAX_WS_FRAME_BYTES);
     if (!sizeCheck.ok) {
-      clients.delete(conn);
+      // Keep `conn` tracked so the socket 'close' handler releases its vehicle
+      // (deleting here made the close handler skip cleanup → ghost vehicles).
       sendTo(conn.socket, {
         type: 'error',
         code: sizeCheck.code,
@@ -1652,6 +2305,20 @@ export async function createSiteServer(
     }
 
     const candidate = parsedJson as Record<string, unknown> | null;
+    let rawHasMovement = false;
+    if (candidate !== null && typeof candidate === 'object' && candidate.type === 'input') {
+      const hasDx = typeof candidate.dx === 'number' && Number.isFinite(candidate.dx) && candidate.dx !== 0;
+      const hasDy = typeof candidate.dy === 'number' && Number.isFinite(candidate.dy) && candidate.dy !== 0;
+      const hasBrake = Boolean(candidate.brake);
+      const hasTarget = candidate.target !== undefined && candidate.target !== null;
+      const hasMoveAngle =
+        typeof candidate.moveAngle === 'number' && Number.isFinite(candidate.moveAngle);
+      const hasBoolDir = Boolean(
+        candidate.up || candidate.down || candidate.left || candidate.right || candidate.boost,
+      );
+      rawHasMovement = hasDx || hasDy || hasBrake || hasTarget || hasMoveAngle || hasBoolDir;
+    }
+
     let msg: ReturnType<typeof ClientMessageSchema.parse>;
     if (
       candidate !== null &&
@@ -1664,7 +2331,15 @@ export async function createSiteServer(
       typeof candidate.down === 'boolean' &&
       typeof candidate.left === 'boolean' &&
       typeof candidate.right === 'boolean' &&
-      (candidate.boost === undefined || typeof candidate.boost === 'boolean')
+      (candidate.boost === undefined || typeof candidate.boost === 'boolean') &&
+      (candidate.moveAngle === undefined ||
+        candidate.moveAngle === null ||
+        (typeof candidate.moveAngle === 'number' && Number.isFinite(candidate.moveAngle))) &&
+      (candidate.dt === undefined ||
+        (typeof candidate.dt === 'number' &&
+          Number.isFinite(candidate.dt) &&
+          candidate.dt >= 0 &&
+          candidate.dt <= 2))
     ) {
       msg = {
         type: 'input',
@@ -1674,6 +2349,29 @@ export async function createSiteServer(
         left: candidate.left,
         right: candidate.right,
         ...(candidate.boost !== undefined ? { boost: candidate.boost } : {}),
+        ...(candidate.moveAngle !== undefined ? { moveAngle: candidate.moveAngle } : {}),
+        ...(candidate.dt !== undefined ? { dt: candidate.dt } : {}),
+      };
+    } else if (
+      candidate !== null &&
+      typeof candidate === 'object' &&
+      candidate.type === 'input' &&
+      (typeof candidate.dx === 'number' || typeof candidate.dy === 'number')
+    ) {
+      const dx = typeof candidate.dx === 'number' && Number.isFinite(candidate.dx) ? candidate.dx : 0;
+      const dy = typeof candidate.dy === 'number' && Number.isFinite(candidate.dy) ? candidate.dy : 0;
+      const seq =
+        typeof candidate.seq === 'number' && Number.isInteger(candidate.seq) && candidate.seq >= 0
+          ? candidate.seq
+          : conn.lastInputSeq + 1;
+      msg = {
+        type: 'input',
+        seq,
+        up: dy < 0,
+        down: dy > 0,
+        left: dx < 0,
+        right: dx > 0,
+        ...(typeof candidate.boost === 'boolean' ? { boost: candidate.boost } : {}),
       };
     } else {
       const validated = ClientMessageSchema.safeParse(parsedJson);
@@ -1694,7 +2392,21 @@ export async function createSiteServer(
       } else {
         const verified = verifyTicket(msg.ticket, ticketSecret, nowMs);
         if (verified.ok && verified.payload.siteId === siteId && verified.payload.clientId === conn.clientId) {
-          const nameCheck = validateDisplayName(verified.payload.name);
+          pruneConsumedTickets(nowMs);
+          if (verified.payload.jti) {
+            if (consumedTicketIds.has(verified.payload.jti)) {
+              sendTo(conn.socket, {
+                type: 'error',
+                code: 'REQUEUE_REQUIRED',
+                message: 'Ticket has already been used; request a fresh ticket via /api/join.',
+              });
+              return;
+            }
+            consumedTicketIds.set(verified.payload.jti, verified.payload.exp);
+          }
+          const nameCheck = validateDisplayName(verified.payload.name, {
+            allowBotPrefix: verified.payload.isBot,
+          });
           if (nameCheck.ok) {
             conn.name = nameCheck.name;
             for (const c of clients) {
@@ -1710,6 +2422,31 @@ export async function createSiteServer(
               }
             }
           }
+          if (verified.payload.role !== 'spectator') {
+            conn.ticketRole = 'driver';
+            conn.ticketJti = verified.payload.jti ?? null;
+            conn.evictedReason = null;
+            conn.lastHumanActivityAt = nowMs;
+            if (
+              conn.role !== 'driver' &&
+              countActiveDrivers() < MAX_DRIVERS &&
+              countClientDrivers(conn.clientId) < MAX_DRIVERS_PER_CLIENT
+            ) {
+              const vehicle = spawnPlayerVehicle(world, {
+                clientId: conn.clientId,
+                name: conn.name,
+                isBot: conn.isBot,
+                ...(verified.payload.runMode
+                  ? { runMode: verified.payload.runMode, mode: verified.payload.runMode }
+                  : {}),
+              });
+              if (vehicle) {
+                applyCarryOverToVehicle(conn, vehicle, verified.payload);
+                conn.vid = vehicle.id;
+                conn.role = 'driver';
+              }
+            }
+          }
           if (verified.payload.runMode) {
             setDriverRunMode(world, conn.clientId, verified.payload.runMode);
           }
@@ -1721,7 +2458,7 @@ export async function createSiteServer(
     }
 
     if (!conn.authenticated) {
-      clients.delete(conn);
+      // Leave cleanup to the socket 'close' handler (see frame-size path).
       sendTo(conn.socket, {
         type: 'error',
         code: 'unauthorized',
@@ -1737,13 +2474,18 @@ export async function createSiteServer(
       case 'input': {
         conn.lastInputAtMs = nowMs;
         conn.lastInputSeq = msg.seq;
+        const hasMoveAngle =
+          typeof msg.moveAngle === 'number' && Number.isFinite(msg.moveAngle);
+        const anyKeyPressed = Boolean(
+          msg.up || msg.down || msg.left || msg.right || msg.boost || hasMoveAngle,
+        );
+        if (anyKeyPressed || rawHasMovement) {
+          conn.lastHumanActivityAt = nowMs;
+        }
         const v = conn.vid
           ? world.vehicles.find((x) => x.id === conn.vid && x.human)
           : null;
         if (v) {
-          const anyKeyPressed = Boolean(
-            msg.up || msg.down || msg.left || msg.right || msg.boost,
-          );
           if (v.autopilot && anyKeyPressed) {
             setVehicleAutopilot(
               world,
@@ -1753,13 +2495,69 @@ export async function createSiteServer(
             );
           }
           if (!v.autopilot) {
-            v.input = {
+            const movementPressed = Boolean(
+              msg.up || msg.down || msg.left || msg.right || hasMoveAngle,
+            );
+            if (
+              movementPressed &&
+              !v.runFinished &&
+              v.runMode === 'blitz' &&
+              v.runStartedAt === null
+            ) {
+              if (v.runEndsAt == null) {
+                v.runStartedAt = world.t;
+                v.runEndsAt = Math.round((world.t + BLITZ_DURATION_MIN) * 10) / 10;
+              } else {
+                v.runStartedAt = Math.max(0, v.runEndsAt - BLITZ_DURATION_MIN);
+              }
+              v.runGraceUntil = null;
+            }
+            const nextInput: Vehicle['input'] = {
               up: msg.up,
               down: msg.down,
               left: msg.left,
               right: msg.right,
               boost: Boolean(msg.boost),
+              moveAngle: hasMoveAngle ? msg.moveAngle : null,
             };
+            const inputChanged =
+              v.input.up !== nextInput.up ||
+              v.input.down !== nextInput.down ||
+              v.input.left !== nextInput.left ||
+              v.input.right !== nextInput.right ||
+              Boolean(v.input.boost) !== Boolean(nextInput.boost) ||
+              (v.input.moveAngle ?? null) !== (nextInput.moveAngle ?? null);
+            if (typeof msg.dt === 'number' && Number.isFinite(msg.dt)) {
+              conn.subTickClient = true;
+              const sliceDt = Math.max(0, msg.dt);
+              if (!v.inputQueue) v.inputQueue = [];
+              const queuedTotal = v.inputQueue.reduce((s, x) => s + x.dt, 0);
+              const prevActive =
+                v.input.up ||
+                v.input.down ||
+                v.input.left ||
+                v.input.right ||
+                (typeof v.input.moveAngle === 'number' && Number.isFinite(v.input.moveAngle));
+              let remDt: number;
+              if (inputChanged && !prevActive) {
+                const elapsedInTick = Math.min(
+                  TICK_MIN,
+                  Math.max(0, (nowMs - lastTickAtMs) * 0.001),
+                );
+                remDt = Math.max(0, elapsedInTick - queuedTotal);
+              } else {
+                const carried = v.inputCarriedDt ?? 0;
+                remDt = Math.min(TICK_MIN, Math.max(0, sliceDt - carried));
+              }
+              const allowed = Math.max(0, TICK_MIN * 1.5 - queuedTotal);
+              if (remDt > 1e-6 && allowed > 1e-6) {
+                v.inputQueue.push({ input: { ...v.input }, dt: Math.min(remDt, allowed) });
+              }
+              v.inputCarriedDt = inputChanged
+                ? 0
+                : Math.max(0, (v.inputCarriedDt ?? 0) - sliceDt);
+            }
+            v.input = nextInput;
           }
         }
         sendTo(conn.socket, {
@@ -1782,13 +2580,29 @@ export async function createSiteServer(
 
       case 'interact': {
         conn.lastInputAtMs = nowMs;
+        conn.lastHumanActivityAt = nowMs;
         if (conn.vid) {
-          humanInteract(world, conn.vid);
+          humanInteract(
+            world,
+            conn.vid,
+            enableRackLiftMinigame && msg.forkHeight !== undefined
+              ? { forkHeight: msg.forkHeight }
+              : undefined,
+          );
         }
         break;
       }
 
       case 'takeWheel': {
+        if (conn.ticketRole === 'spectator' || conn.evictedReason !== null) {
+          sendTo(conn.socket, {
+            type: 'error',
+            code: 'REQUEUE_REQUIRED',
+            message:
+              'Spectator or completed-run connections must join the driver queue via /api/join to claim a driver seat.',
+          });
+          return;
+        }
         if (
           conn.role !== 'driver' &&
           (countActiveDrivers() >= MAX_DRIVERS ||
@@ -1813,6 +2627,7 @@ export async function createSiteServer(
         conn.vid = msg.vid;
         conn.role = 'driver';
         conn.lastInputAtMs = nowMs;
+        conn.lastHumanActivityAt = nowMs;
         broadcast(buildPresenceMessage());
         scheduleHeartbeatFlush();
         break;
@@ -1829,6 +2644,7 @@ export async function createSiteServer(
       }
 
       case 'manager': {
+        conn.lastHumanActivityAt = nowMs;
         const res = governor.executeManagerOp(
           world,
           conn.clientId,
@@ -1865,6 +2681,7 @@ export async function createSiteServer(
       }
 
       case 'keepCards': {
+        conn.lastHumanActivityAt = nowMs;
         const err = keepCards(world, conn.clientId, msg.ids);
         if (err) {
           sendTo(conn.socket, {
@@ -1876,7 +2693,30 @@ export async function createSiteServer(
         break;
       }
 
+      case 'chooseOrder': {
+        const gov = governor.tryChooseOrder(world, conn.clientId, nowMs);
+        if (!gov.ok) {
+          sendTo(conn.socket, { type: 'error', code: gov.code, message: gov.message });
+          break;
+        }
+        conn.lastInputAtMs = nowMs;
+        conn.lastHumanActivityAt = nowMs;
+        const err = conn.vid
+          ? chooseOrder(world, conn.vid, msg.orderId)
+          : 'Take a vehicle before choosing an order.';
+        if (err) {
+          sendTo(conn.socket, { type: 'error', code: 'choose_order_failed', message: err });
+        }
+        break;
+      }
+
+      case 'dispatchersCallPref': {
+        conn.dispatchersCallOptOut = !msg.enabled;
+        break;
+      }
+
       case 'setRunMode': {
+        conn.lastHumanActivityAt = nowMs;
         setDriverRunMode(world, conn.clientId, msg.mode);
         broadcastDelta(pendingEvents.splice(0), true, nowMs);
         break;
@@ -1922,12 +2762,13 @@ export async function createSiteServer(
           );
         }
 
+        const relocationExp = nowMs + 60_000;
         const ticket = signTicket(
           {
             clientId: conn.clientId,
             name: conn.name,
             siteId: toSite,
-            exp: nowMs + 60_000,
+            exp: relocationExp,
             isBot: conn.isBot,
             runMode: 'freerange',
             carryPts,
@@ -1953,6 +2794,7 @@ export async function createSiteServer(
           siteId: toSite,
           wsUrl: `/ws?site=${toSite}`,
           ticket,
+          expiresAt: relocationExp,
           bonusPts: RELOCATION_BONUS_PTS,
         });
         broadcast(buildPresenceMessage());
@@ -1978,6 +2820,17 @@ export async function createSiteServer(
       }
 
       case 'nlCommand': {
+        if (conn.role !== 'driver') {
+          // Dispatcher orders spend shared Gemini budget and mutate the floor;
+          // spectators must not be able to issue them.
+          sendTo(conn.socket, {
+            type: 'error',
+            code: 'spectator_forbidden',
+            message: 'Spectators cannot issue dispatcher orders. Join the driver queue to play.',
+          });
+          return;
+        }
+        conn.lastHumanActivityAt = nowMs;
         const res = await nlPipeline.executeNlCommand({
           world,
           clientId: conn.clientId,
@@ -2000,6 +2853,7 @@ export async function createSiteServer(
 
       case 'agentCommand': {
         conn.lastInputAtMs = nowMs;
+        conn.lastHumanActivityAt = nowMs;
         let v: Vehicle | undefined;
         if (msg.vid) {
           const candidate = world.vehicles.find((x) => x.id === msg.vid);
@@ -2016,6 +2870,15 @@ export async function createSiteServer(
             candidate.controlledByClientId === conn.clientId ||
             conn.vid === candidate.id;
           if (!isOwnedOrControlled) {
+            if (conn.ticketRole === 'spectator' || conn.evictedReason !== null) {
+              sendTo(conn.socket, {
+                type: 'error',
+                code: 'REQUEUE_REQUIRED',
+                message:
+                  'Spectator or completed-run connections must join the driver queue via /api/join to claim a driver seat.',
+              });
+              return;
+            }
             if (!candidate.human && !candidate.isPlayerVehicle) {
               const err = takeWheel(world, conn.clientId, conn.name, candidate.id);
               if (err) {
@@ -2070,6 +2933,27 @@ export async function createSiteServer(
             rawText: msg.text,
             nowMs,
           });
+          // The pipeline awaited Gemini/Model Armor; the vehicle may have been
+          // removed, replaced, or handed to another driver meanwhile. Re-resolve
+          // the live vehicle and re-check ownership before mutating anything.
+          const targetVid = v.id;
+          const live = world.vehicles.find((x) => x.id === targetVid);
+          const stillOwned =
+            live !== undefined &&
+            (live.ownerClientId === conn.clientId ||
+              live.controlledByClientId === conn.clientId ||
+              conn.vid === live.id);
+          if (res.ok && res.executed && (!live || !stillOwned)) {
+            sendTo(conn.socket, {
+              type: 'error',
+              code: 'vehicle_changed',
+              message: `Vehicle ${targetVid} changed while the Co-Pilot command was processing; the command was not applied.`,
+            });
+            res.echo.executed = false;
+            sendTo(conn.socket, res.echo);
+            break;
+          }
+          if (live) v = live;
           if (res.ok && res.executed) {
             if (res.directive) {
               applyAgentDirective(world, v, res.directive);
@@ -2155,6 +3039,28 @@ export async function createSiteServer(
       }
 
       case 'a2uiAction': {
+        const dcIdx = parseDispatchersCallActionId(msg.actionId);
+        if (dcIdx !== null || (msg.actionId === 'dismiss' && dispatchersCall.isActive(msg.screenId))) {
+          // Dispatcher's Call pick: execute the server-stored option (client dispatch ignored).
+          // Dismissing the minigame card is a no-pick; the sim deadline resolves it.
+          if (dcIdx === null) break;
+          const v = conn.vid ? world.vehicles.find((x) => x.id === conn.vid) : undefined;
+          const out = v
+            ? dispatchersCall.handlePick(world, v, msg.screenId, dcIdx)
+            : ({ ok: false, error: 'no_challenge' } as const);
+          if (out.ok) {
+            sendTo(conn.socket, out.reveal);
+          } else {
+            sendTo(conn.socket, {
+              type: 'commandEcho',
+              text: "Dispatcher's Call",
+              parsed: { action: 'dispatch', echo: `Pick rejected: ${out.error}` },
+              executed: false,
+              reason: out.error,
+            });
+          }
+          break;
+        }
         if (msg.actionId === 'dismiss') {
           break;
         }
@@ -2259,15 +3165,33 @@ export async function createSiteServer(
     const url = new URL(req.url || '/ws', 'http://localhost');
     const ticketFromQuery = url.searchParams.get('ticket');
     const spectateOnly = url.searchParams.get('spectate') === '1';
-    const forwardedFor = req.headers['x-forwarded-for'];
-    const clientIp =
-      (Array.isArray(forwardedFor)
-        ? forwardedFor[0]
-        : typeof forwardedFor === 'string'
-          ? forwardedFor.split(',')[0]?.trim()
-          : undefined) ||
-      req.socket?.remoteAddress ||
-      '127.0.0.1';
+    // Client IP: only trust the lobby-computed `x-warehouse-client-ip` when this upgrade carries a
+    // valid `x-warehouse-proxy` token AND the IP's HMAC (bound to that exact token) verifies.
+    // Otherwise use the socket peer. Never use the raw (client-controlled) left-most XFF entry.
+    const clientIp = ((): string => {
+      const socketIp = req.socket?.remoteAddress || '127.0.0.1';
+      const first = (v: string | string[] | undefined): string | undefined =>
+        Array.isArray(v) ? v[0] : v;
+      const proxyToken = first(req.headers[PROXY_HEADER_NAME])?.trim();
+      const claimedIp = first(req.headers['x-warehouse-client-ip'])?.trim();
+      const claimedSig = first(req.headers['x-warehouse-client-ip-sig'])?.trim();
+      if (!proxyToken || !claimedIp || !claimedSig || claimedIp.length > 64) return socketIp;
+      const urlSite = url.searchParams.get('site');
+      const proxyOk =
+        hasValidProxyHeader(req.headers) ||
+        (urlSite !== null && isValidSiteId(urlSite) && hasValidProxyHeader(req.headers, urlSite));
+      if (!proxyOk) return socketIp;
+      const expected = Buffer.from(
+        createHmac('sha256', ticketSecret)
+          .update(`client-ip:${proxyToken}:${claimedIp}`)
+          .digest('base64url'),
+        'utf8',
+      );
+      const actual = Buffer.from(claimedSig, 'utf8');
+      return expected.length === actual.length && timingSafeEqual(expected, actual)
+        ? claimedIp
+        : socketIp;
+    })();
 
     const conn: ConnectedClient = {
       socket,
@@ -2279,6 +3203,10 @@ export async function createSiteServer(
       isBot: false,
       vid: null,
       role: 'spectator',
+      ticketRole: 'spectator',
+      ticketJti: null,
+      evictedReason: null,
+      lastHumanActivityAt: Date.now(),
       connectedAtMs: Date.now(),
       lastInputAtMs: Date.now(),
       lastInputSeq: 0,
@@ -2311,7 +3239,22 @@ export async function createSiteServer(
     }
 
     socket.on('message', (data) => {
-      void handleClientMessage(conn, data);
+      handleClientMessage(conn, data).catch((err: unknown) => {
+        logAsyncError('message handler', err);
+        sendTo(conn.socket, {
+          type: 'error',
+          code: 'internal_error',
+          message: 'Server failed to process that message.',
+        });
+      });
+    });
+
+    socket.on('error', (err) => {
+      // ws only emits 'error' for protocol violations (e.g. a frame above maxPayload); it has
+      // already started closing and stopped reading, so drop the TCP socket promptly instead
+      // of waiting out the 30s closing-handshake timeout. 'close' then frees the vehicle.
+      logAsyncError('socket', err);
+      setTimeout(() => socket.terminate(), 1_000).unref?.();
     });
 
     socket.on('close', () => {
@@ -2321,11 +3264,16 @@ export async function createSiteServer(
       const wasTracked = clients.delete(conn);
       if (!wasTracked) return;
       if (conn.authenticated && conn.clientId) {
-        // Check if this client still has any other active driver socket
-        const stillConnected = Array.from(clients).some(
-          (c) => c.authenticated && c.clientId === conn.clientId,
+        // Only keep the vehicle if another *driver* socket for this client
+        // still holds it; a remaining spectator-only tab must not pin a ghost.
+        const stillDriving = Array.from(clients).some(
+          (c) =>
+            c.authenticated &&
+            c.clientId === conn.clientId &&
+            c.role === 'driver' &&
+            c.vid,
         );
-        if (!stillConnected) {
+        if (!stillDriving) {
           const v = world.vehicles.find(
             (x) =>
               x.ownerClientId === conn.clientId ||
@@ -2351,17 +3299,35 @@ export async function createSiteServer(
 
   function hasValidProxyHeader(
     headers: Record<string, string | string[] | undefined>,
+    targetSite: SiteId = siteId,
   ): boolean {
     const raw = headers[PROXY_HEADER_NAME];
     const token = Array.isArray(raw) ? raw[0] : raw;
-    return verifyProxyHeader(token, siteId, ticketSecret);
+    if (verifyProxyHeader(token, targetSite, ticketSecret)) return true;
+    if (targetSite !== siteId && verifyProxyHeader(token, siteId, ticketSecret)) {
+      return true;
+    }
+    return false;
   }
 
-  // Attach HTTP Upgrade handler for /ws
+  // Attach HTTP Upgrade handler for /ws (routes dynamic annex shards like den-2 to their in-process WSS)
   app.server.on('upgrade', (request, socket, head) => {
-    const pathname = new URL(request.url || '/', 'http://localhost').pathname;
-    if (pathname === '/ws') {
-      if (requireProxyAuth && !hasValidProxyHeader(request.headers)) {
+    const reqUrl = new URL(request.url || '/', 'http://localhost');
+    if (reqUrl.pathname === '/ws') {
+      const siteParam = reqUrl.searchParams.get('site');
+      let targetSiteId: SiteId | null =
+        siteParam && isValidSiteId(siteParam) ? siteParam : null;
+      if (!targetSiteId) {
+        const ticketParam = reqUrl.searchParams.get('ticket');
+        if (ticketParam) {
+          const verified = verifyTicket(ticketParam, ticketSecret);
+          if (verified.ok && isValidSiteId(verified.payload.siteId)) {
+            targetSiteId = verified.payload.siteId;
+          }
+        }
+      }
+      const effectiveSite = targetSiteId ?? siteId;
+      if (requireProxyAuth && !hasValidProxyHeader(request.headers, effectiveSite)) {
         socket.write(
           'HTTP/1.1 403 Forbidden\r\n' +
             'Content-Type: application/json\r\n' +
@@ -2369,6 +3335,18 @@ export async function createSiteServer(
             '{"ok":false,"error":"Direct backend access is forbidden; connect via warehouse-lobby gateway"}\r\n',
         );
         socket.destroy();
+        return;
+      }
+      if (effectiveSite !== siteId) {
+        void getOrCreateAnnex(effectiveSite)
+          .then((annex) => {
+            annex.wss.handleUpgrade(request, socket, head, (ws) => {
+              annex.wss.emit('connection', ws, request);
+            });
+          })
+          .catch(() => {
+            socket.destroy();
+          });
         return;
       }
       wss.handleUpgrade(request, socket, head, (ws) => {
@@ -2404,17 +3382,49 @@ export async function createSiteServer(
   });
 
   app.get('/api/state', async (req, reply) => {
-    if (requireProxyAuth && !hasValidProxyHeader(req.headers)) {
+    const query = (req.query || {}) as { site?: string };
+    const requestedSite =
+      query.site && isValidSiteId(query.site) ? query.site : siteId;
+    if (requireProxyAuth && !hasValidProxyHeader(req.headers, requestedSite)) {
       return reply.code(403).send({
         ok: false,
         error: 'Direct backend access is forbidden; use warehouse-lobby gateway',
       });
     }
+    if (requestedSite !== siteId && annexServers.has(requestedSite)) {
+      const annex = annexServers.get(requestedSite)!;
+      const nowMs = Date.now();
+      const annexPlayers = Array.from(annex.clients)
+        .filter((c) => c.authenticated)
+        .map((c) => ({
+          id: c.playerId,
+          name: c.name,
+          vid: c.vid,
+          role: c.role,
+          isBot: c.isBot,
+          pts: 0,
+          shipped: 0,
+        }));
+      return {
+        ok: true,
+        siteId: annex.siteId,
+        snapshot: publicizeSnapshot(
+          snapshotForRecipient(annex.world, null),
+          toPublicId,
+          (key) => !annex.world.vehicles.some((v) => v.id === key),
+        ),
+        presence: annexPlayers,
+        brainHealth: annex.brainScheduler.getBrainHealthMessage(
+          nowMs,
+          annex.nlPipeline.getArmorBlocks1h(nowMs),
+        ),
+      };
+    }
     const nowMs = Date.now();
     return {
       ok: true,
       siteId,
-      snapshot: snapshotForRecipient(world, null),
+      snapshot: publicizeSnapshot(snapshotForRecipient(world, null), toPublicId, mayBeClientId),
       presence: buildPresenceMessage().players,
       brainHealth: brainScheduler.getBrainHealthMessage(
         nowMs,
@@ -2424,11 +3434,40 @@ export async function createSiteServer(
   });
 
   app.get('/api/status', async (req, reply) => {
-    if (requireProxyAuth && !hasValidProxyHeader(req.headers)) {
+    const query = (req.query || {}) as { site?: string };
+    const requestedSite =
+      query.site && isValidSiteId(query.site) ? query.site : siteId;
+    if (requireProxyAuth && !hasValidProxyHeader(req.headers, requestedSite)) {
       return reply.code(403).send({
         ok: false,
         error: 'Direct backend access is forbidden; use warehouse-lobby gateway',
       });
+    }
+    if (requestedSite !== siteId && annexServers.has(requestedSite)) {
+      const annex = annexServers.get(requestedSite)!;
+      const nowMs = Date.now();
+      const annexDrivers = Array.from(annex.clients).filter(
+        (c) => c.authenticated && c.role === 'driver' && Boolean(c.vid),
+      ).length;
+      const annexTotal = Array.from(annex.clients).filter(
+        (c) => c.authenticated,
+      ).length;
+      return {
+        ok: true,
+        siteId: annex.siteId,
+        phase: annex.world.phase,
+        drivers: annexDrivers,
+        spectators: Math.max(0, annexTotal - annexDrivers),
+        snapshot: publicizeSnapshot(
+          snapshotForRecipient(annex.world, null),
+          toPublicId,
+          (key) => !annex.world.vehicles.some((v) => v.id === key),
+        ),
+        brainHealth: annex.brainScheduler.getBrainHealthMessage(
+          nowMs,
+          annex.nlPipeline.getArmorBlocks1h(nowMs),
+        ),
+      };
     }
     const nowMs = Date.now();
     const drivers = countActiveDrivers();
@@ -2439,7 +3478,7 @@ export async function createSiteServer(
       phase: world.phase,
       drivers,
       spectators: Math.max(0, totalAuth - drivers),
-      snapshot: snapshotForRecipient(world, null),
+      snapshot: publicizeSnapshot(snapshotForRecipient(world, null), toPublicId, mayBeClientId),
       brainHealth: brainScheduler.getBrainHealthMessage(
         nowMs,
         nlPipeline.getArmorBlocks1h(nowMs),
@@ -2516,14 +3555,37 @@ export async function createSiteServer(
   });
 
   app.post('/internal/transfer', async (req, reply) => {
-    const hasBearerToken =
-      typeof req.headers.authorization === 'string' &&
-      req.headers.authorization.startsWith('Bearer ');
-    if (requireProxyAuth && !hasValidProxyHeader(req.headers) && !hasBearerToken) {
-      return reply.code(403).send({
-        ok: false,
-        error: 'Unauthorized internal transfer request',
-      });
+    const authHeader = req.headers.authorization;
+    const bearerToken =
+      typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
+        ? authHeader.slice('Bearer '.length).trim()
+        : null;
+    if (!hasValidProxyHeader(req.headers)) {
+      if (bearerToken) {
+        // Pub/Sub push carries a Google-signed OIDC token; merely having a
+        // bearer header is not proof of origin, so always verify it.
+        // The push subscription sets no explicit audience, so Pub/Sub uses the push
+        // endpoint URL (`${site uri}/internal/transfer`), whose host is the Host header.
+        const audience = transferPushAudiences(req.headers.host);
+        let verified = false;
+        try {
+          verified = await verifyTransferPushToken(bearerToken, audience);
+        } catch (err) {
+          logAsyncError('transfer push token verification', err);
+          verified = false;
+        }
+        if (!verified) {
+          return reply.code(403).send({
+            ok: false,
+            error: 'Invalid Pub/Sub push token',
+          });
+        }
+      } else if (requireProxyAuth) {
+        return reply.code(403).send({
+          ok: false,
+          error: 'Unauthorized internal transfer request',
+        });
+      }
     }
     const body = req.body as Record<string, unknown> | null;
     if (!body || typeof body !== 'object') {
@@ -2578,6 +3640,7 @@ export async function createSiteServer(
     }
 
     const createdOrder = receiveTransfer(world, transfer);
+    pruneReceivedTransferIds(world);
     return reply.code(200).send({
       ok: true,
       duplicate: createdOrder === null,
@@ -2587,13 +3650,45 @@ export async function createSiteServer(
   });
 
   app.post('/internal/wake', async (req, reply) => {
-    if (requireProxyAuth && !hasValidProxyHeader(req.headers)) {
+    const query = (req.query || {}) as { site?: string };
+    const body = (req.body || {}) as { immediate?: boolean; siteId?: string };
+    const rawTarget = query.site ?? body.siteId ?? siteId;
+    const targetSiteId: SiteId = isValidSiteId(rawTarget) ? rawTarget : siteId;
+
+    if (requireProxyAuth && !hasValidProxyHeader(req.headers, targetSiteId)) {
       return reply.code(403).send({
         ok: false,
         error: 'Unauthorized internal wake request',
       });
     }
-    const body = (req.body || {}) as { immediate?: boolean };
+
+    if (targetSiteId !== siteId) {
+      const annex = await getOrCreateAnnex(targetSiteId);
+      if (body.immediate) {
+        setPhase(annex.world, 'running');
+      } else if (
+        annex.world.phase === 'break' ||
+        annex.world.phase === 'winding_down'
+      ) {
+        setPhase(annex.world, 'resuming');
+      }
+      annex.broadcast({
+        type: 'phase',
+        phase: annex.world.phase,
+        resumesAt:
+          annex.world.phase === 'resuming'
+            ? Date.now() + Math.round(annex.world.resumeCountdown * 1000)
+            : undefined,
+      });
+      await annex.flushHeartbeat();
+      return {
+        ok: true,
+        siteId: annex.siteId,
+        phase: annex.world.phase,
+        resumeCountdown: annex.world.resumeCountdown,
+      };
+    }
+
     lastHumanActiveAtMs = Date.now();
     windingDownStartedAtMs = null;
 
@@ -2633,32 +3728,34 @@ export async function createSiteServer(
 
   let tickInFlight = false;
   if (options.enableIntervals) {
-    void flushHeartbeat(Date.now());
-    void flushSnapshot(Date.now());
+    flushHeartbeat(Date.now()).catch((err) => logAsyncError('initial heartbeat', err));
+    flushSnapshot(Date.now()).catch((err) => logAsyncError('initial snapshot', err));
 
     let lastTickWallMs = Date.now();
     tickTimer = setInterval(() => {
       if (tickInFlight) return;
       const now = Date.now();
       const elapsedMs = now - lastTickWallMs;
-      const dueTicks = Math.min(3, Math.max(1, Math.floor(elapsedMs / 100)));
-      lastTickWallMs = elapsedMs >= 100 ? lastTickWallMs + dueTicks * 100 : now;
-      if (now - lastTickWallMs > 300) {
+      const dueTicks = Math.min(3, Math.max(1, Math.floor(elapsedMs / SITE_TICK_MS)));
+      lastTickWallMs = elapsedMs >= SITE_TICK_MS ? lastTickWallMs + dueTicks * SITE_TICK_MS : now;
+      if (now - lastTickWallMs > 3 * SITE_TICK_MS) {
         lastTickWallMs = now;
       }
       tickInFlight = true;
-      void (async () => {
+      (async () => {
         for (let i = 0; i < dueTicks; i++) {
           await stepTick(Date.now(), true);
         }
-      })().finally(() => {
+      })()
+        .catch((err) => logAsyncError('tick', err))
+        .finally(() => {
         tickInFlight = false;
       });
-    }, 100);
+    }, SITE_TICK_MS);
     tickTimer.unref?.();
 
     heartbeatTimer = setInterval(() => {
-      void flushHeartbeat(Date.now());
+      flushHeartbeat(Date.now()).catch((err) => logAsyncError('heartbeat', err));
       broadcast(
         brainScheduler.getBrainHealthMessage(
           Date.now(),
@@ -2670,14 +3767,16 @@ export async function createSiteServer(
 
     relocationSweepTimer = setInterval(() => {
       if (world.phase === 'running') {
-        void checkSurgeRelocation(Date.now());
+        checkSurgeRelocation(Date.now()).catch((err) =>
+          logAsyncError('surge relocation sweep', err),
+        );
       }
     }, 10_000);
     relocationSweepTimer.unref?.();
 
     snapshotTimer = setInterval(() => {
       if (world.phase === 'running') {
-        void flushSnapshot(Date.now());
+        flushSnapshot(Date.now()).catch((err) => logAsyncError('snapshot', err));
       }
     }, 30_000);
     snapshotTimer.unref?.();
@@ -2686,6 +3785,11 @@ export async function createSiteServer(
   async function gracefulShutdown(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
+
+    for (const annex of annexServers.values()) {
+      await annex.close();
+    }
+    annexServers.clear();
 
     if (tickTimer) clearInterval(tickTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -2700,8 +3804,22 @@ export async function createSiteServer(
       pendingPresenceTimer = null;
     }
 
-    await flushSnapshot(Date.now());
-    await flushHeartbeat(Date.now());
+    try {
+      await flushSnapshot(Date.now());
+    } catch (err) {
+      logAsyncError('shutdown snapshot', err);
+    }
+    try {
+      await flushHeartbeat(Date.now());
+    } catch (err) {
+      logAsyncError('shutdown heartbeat', err);
+    }
+    try {
+      // Persist buffered Gemini budget increments before the instance exits.
+      await persistence.flushUsage?.();
+    } catch (err) {
+      logAsyncError('shutdown budget flush', err);
+    }
 
     for (const c of clients) {
       if (c.authTimer) clearTimeout(c.authTimer);
@@ -2731,6 +3849,7 @@ export async function createSiteServer(
     brainScheduler,
     nlPipeline,
     clients,
+    annexServers,
     stepTick,
     checkFactoryBreakPhase,
     checkSurgeRelocation,

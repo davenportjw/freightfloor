@@ -1,34 +1,68 @@
-# Warehouse Distribution Network
+<div align="center">
+  <img src="docs/assets/freightfloor-logo.svg" alt="Freight Floor — Grab pallets. Thread the aisles. Beat the 3-minute clock." width="100%" />
 
-An always-running, multiplayer isometric forklift logistics game and production AI engineering sandbox built on **Google Cloud Run**, **Vertex AI (`gemini-3.5-flash-lite`)**, **Google Cloud Model Armor**, **Firestore**, and **Pub/Sub**.
+  <p>
+    <strong>An arcade-style multiplayer forklift game on a live, bustling warehouse floor.</strong><br />
+    Snatch rush pallets off the receiving dock, weave past twenty rival forklifts, chain Speedy delivery combos, and call shift-wide dispatch plays before the 3-minute clock runs out.
+  </p>
+
+  <p>
+    <a href="https://freightfloor.com"><strong>Play Live at freightfloor.com →</strong></a>
+    &nbsp;·&nbsp;
+    <a href="docs/gameplay.md">Gameplay Guide</a>
+    &nbsp;·&nbsp;
+    <a href="docs/architecture.md">Architecture</a>
+    &nbsp;·&nbsp;
+    <a href="docs/security.md">Prompt Armor &amp; Security</a>
+    &nbsp;·&nbsp;
+    <a href="docs/protocol.md">Wire Protocol</a>
+  </p>
+
+  <img src="docs/assets/freightfloor-gameplay.gif" alt="Freight Floor Live Gameplay — Isometric Forklift Driving, AI Fleet & HUD v3" width="900" />
+</div>
 
 ---
 
-## What It Is
+## Overview of the Game
 
-**Warehouse Distribution Network** drops human players and autonomous AI forklift fleets onto shared, authoritative **10 Hz** warehouse floors across four regional distribution hubs:
+**Freight Floor** drops human players and autonomous AI forklift fleets onto shared, authoritative **10 Hz** warehouse floors across four regional distribution hubs:
 
 | Site ID | Regional Facility | Theme & Cargo | Default Fleet & Scaling |
 |---|---|---|---|
-| **`den-1`** | **Rocky Mountain Freight Hub** (Denver, CO) | Classic 3×2 freight racks, banded shipping cartons (`DEN-*`) | **24/7 Home Shard** (`min=1`, `IDLE_POLICY=run`, 20 AI agents) |
-| **`slc-2`** | **Bonneville Hydroponics & Nursery** (Salt Lake City, UT) | 4×2 botanical conservatory, terracotta planters & living foliage (`BOT-*`) | **Overflow Shard** (`min=0`, `IDLE_POLICY=break`, 12 AI agents) |
-| **`phx-3`** | **Sonoran Silicon & Solar Fab** (Phoenix, AZ) | 2×3 cleanroom wafer fab, FOUP wafer pods & cryo Dewars (`FAB-*`) | **Overflow Shard** (`min=0`, `IDLE_POLICY=break`, 12 AI agents) |
-| **`abq-4`** | **Mesa Verde Kiln & Artisan Works** (Albuquerque, NM) | Asymmetric 3×3 artisan kiln floor, turquoise-glazed ceramics (`KLN-*`) | **Overflow Shard** (`min=0`, `IDLE_POLICY=break`, 12 AI agents) |
+| **`den-1`** | **Rocky Mountain Freight Hub** (Denver, CO) | Classic 3×2 freight racks, banded shipping cartons (`DEN-*`) | **Primary Hub** (`min=0`, `IDLE_POLICY=break`, 20 AI agents, wakes on join) |
+| **`slc-2`** | **Bonneville Hydroponics & Nursery** (Salt Lake City, UT) | 4×2 botanical conservatory, terracotta planters & living foliage (`BOT-*`) | **Regional Shard** (`min=0`, `IDLE_POLICY=break`, 12 AI agents, wakes on join) |
+| **`phx-3`** | **Sonoran Silicon & Solar Fab** (Phoenix, AZ) | 2×3 cleanroom wafer fab, FOUP wafer pods & cryo Dewars (`FAB-*`) | **Regional Shard** (`min=0`, `IDLE_POLICY=break`, 12 AI agents, wakes on join) |
+| **`abq-4`** | **Mesa Verde Kiln & Artisan Works** (Albuquerque, NM) | Asymmetric 3×3 artisan kiln floor, turquoise-glazed ceramics (`KLN-*`) | **Regional Shard** (`min=0`, `IDLE_POLICY=break`, 12 AI agents, wakes on join) |
 
-Players steer forklifts in real time (`WASD` / arrow keys or click-to-drive autopilot), pick up inbound pallets from west receiving docks or storage racks, weave through traffic, charge batteries before running dry, clear damaged **Returns & QA (`RET`)** spills, and deliver freight to colour-matched east shipping bays—or ship cross-site pallets (`→ network`) over Google Cloud Pub/Sub to sibling warehouses for a **+5 pt** stowage bonus.
+### Core Gameplay Loop (`Drive` Mode & `Floor` Mode)
 
-At the same time, players act as **Shift Managers**: dealing shift policy cards, triggering rush waves, placing traffic cones, and issuing natural-language manager commands (`nlCommand`) that are screened by **Google Cloud Model Armor** and translated into structured actions by **Vertex AI Gemini 3.5 Flash-Lite**.
+- **⚡ 3-Minute Blitz & Free Range Modes**: Jump straight into a **3-Minute Blitz** shift to chase a Personal Best (with your ghost forklift replaying alongside you at `0.85×` pace), or switch to **Free Range** from the `☰` menu for an untimed open shift.
+- **🕹️ Tactile Forklift Driving (`WASD` / Arrows / Click-to-Drive)**:
+  - Steer through busy aisles (`WASD` or arrow keys), hold `Space` to **Boost** (`1.45×` speed), and press `E` to pick up or drop pallets within reach.
+  - Watch battery state-of-charge—glide onto a glowing **Charger Pad** before hitting `0%` (which triggers an automatic emergency tow & `-8 pt` penalty), and swerve around **Returns & QA (`RET`)** floor spills or clear them for bonus points.
+- **📦 Fares, Par Times, Combos & Cross-Docking**:
+  - Every order computes an A\* **Par Time** from pickup to its colour-matched east shipping bay (`Zone A` Red, `Zone B` Blue, `Zone C` Yellow, `Zone D` Green, `HazMat` Purple).
+  - Beat `0.75 × par` for a **Speedy (`1.5×`)** fare rating and climb the **Combo Ladder** (`×1.0 → ×1.25 → ×1.5 → ×2.0 → ×2.5 → ×3.0`).
+  - Deliver newly arrived west-dock pallets directly to an east bay within the **Hot Cross-Dock (`⚡ XDOCK`)** window for `+8 pts`, stow inbound dock freight into racks for `+6 pts` (**Putaway**), or ship cross-site pallets (`→ network`) over Google Cloud Pub/Sub to sibling warehouses for `+5 pts`.
+- **🃏 Run Contracts, Skill Cards & Dispatcher's Call (`A2UI`)**:
+  - **Contracts**: Choose **2 of 3** shift contracts before the clock starts (e.g., *Zone Specialist*, *Speed Demon*, *Clean Floor*, *Cross-Docker*), plus an automatic **Last Call** bonus contract during the final 45 seconds.
+  - **Skill Cards**: Every points milestone deals stackable forklift perks (*Turbo Forks*, *Lithium Cell*, *Regen Brakes*, *Wide Reach*, *Combo Lock*, *Overclock*).
+  - **Dispatcher's Call (`A2UI` Minigame)**: Once per Blitz run, **Vertex AI Gemini 3.5 Flash-Lite** analyzes live warehouse bottlenecks (spills, `P0` surges, trailer fill, hazmat backlogs, dock congestion) and presents a two-option tactical call (`1` / `2`) with a 30-second team throughput bonus worth up to `+25 pts`.
+- **🔭 Floor View, AI Archetypes & Shift Manager Controls**:
+  - Press `F` (or `Esc` → *Watch the Floor*) to switch from **Drive HUD** to **Floor View**, or hold `Tab` / press `B` to inspect **Live Team Standings**.
+  - Five autonomous AI driver archetypes (**Sprinter**, **Steady**, **Batcher**, **Opportunist**, **Strategist**) compete across strategy cohorts, Periodically consulting **Vertex AI (`gemini-3.5-flash-lite`)** for tactical weight adjustments and shift policy cards.
+  - Issue natural-language manager orders (`nlCommand`), star priority **Floor Orders (`★ P0`)**, place traffic cones (`3`), or inspect every Gemini prompt, latency measurement, token count, and **Google Cloud Model Armor** verdict in the live **Dispatch & Brain Log** drawer (`4`).
+- **🔑 Portable Resume Codes (`wr1_…`)**: No sign-up required—copy an HMAC-signed resume code from the `☰` menu to restore your callsign, lifetime career totals, and Personal Best on any device.
 
 ---
 
-## Why We Made It
+## Why We Built It
 
-1. **Because driving a forklift is fun.** Snatching a high-priority `P0` pallet off a busy dock, threading a narrow aisle past twenty autonomous forklifts, and sliding onto a charger pad at `8%` battery with a 3D isometric PixiJS v8 renderer is immediately tactile and rewarding.
-2. **To have a real, high-frequency sandbox for building and testing AI features.** Most AI demos are turn-based chat boxes. We wanted an always-on, multiplayer environment with real physics, contention, latency budgets, and untrusted public users where we can design and benchmark production AI patterns end-to-end:
-   - **Hybrid Neuro-Symbolic Agent Control**: High-level tactical reasoning (`gemini-3.5-flash-lite` choosing strategy weights, shift cards, and natural-language command routing with strict JSON schemas) paired with deterministic 10 Hz physics, occupancy reservations, and A\* pathfinding (`packages/sim`).
-   - **Live Multi-Agent Strategy Evaluation**: Every AI forklift is assigned to one of four strategy cohorts (**Balanced**, **Speed First**, **Safety First**, **Zone Specialist**) and benchmarked live alongside **Human Drivers** on the Strategy Board (`Orders/hr`, `On-time %`, `Incidents`, `kWh/order`, and `Value Created`).
-   - **Adversarial Prompt Defense in Public Multiplayer**: Untrusted natural-language manager orders pass through a **7-layer Prompt Armor pipeline** (`packages/armor`) combining Unicode hygiene, **Google Cloud Model Armor** (`sanitizeUserPrompt` + `sanitizeModelResponse`), cryptographic nonce-fenced least-privilege parsing, Zod command validation, and per-player governance clamps.
-   - **Real-Time AI Observability & Hard Cost Guardrails**: Every Gemini decision, token count, latency measurement, and prompt-armor verdict is streamed to the in-game **Brain Log** inspector and persisted to a TTL-indexed Firestore journal, governed by a transactional daily spend ledger (`$12.50/day` global AI brain cap + `$1.50/day` isolated `nlCommand` slice) and an automatic **Factory Break** state machine that scales idle overflow shards to zero.
+1. **Because driving an isometric forklift is genuinely fun.** Snatching a `P0` rush pallet off a crowded receiving dock, threading a narrow aisle past twenty autonomous forklifts with `Space` boost, and sliding onto a charger pad at `8%` battery on a custom 2:1 isometric Canvas2D + 3D sprite-atlas renderer is immediately tactile and rewarding.
+2. **To have a real, high-frequency multiplayer sandbox for production AI engineering.** Most AI demos are turn-based chat boxes. We wanted an always-on, authoritative 10 Hz environment with real physics, contention, strict latency budgets, and untrusted public input where we can benchmark production AI patterns end-to-end:
+   - **Hybrid Neuro-Symbolic Control**: High-level tactical reasoning (`gemini-3.5-flash-lite` choosing strategy weights, shift cards, Dispatcher's Call proposals, and natural-language command routing with strict JSON schemas) paired with deterministic 10 Hz physics, occupancy reservations, and A\* pathfinding (`packages/sim`).
+   - **7-Layer Adversarial Prompt Defense (`@warehouse/armor`)**: Untrusted natural-language manager orders and player callsigns pass through Unicode hygiene, **Google Cloud Model Armor** (`sanitizeUserPrompt` + `sanitizeModelResponse`), cryptographic nonce-fenced least-privilege parsing, Zod schema validation, and per-player strike/governance clamps.
+   - **Real-Time AI Observability & Hard Cost Guardrails**: Every Gemini decision and armor verdict is streamed to the in-game **Brain Log** and persisted to a TTL-indexed Firestore journal, governed by a transactional daily spend ledger (`$12.50/day` global AI brain cap + `$1.50/day` isolated `nlCommand` slice) and an automatic **Factory Break** state machine that scales idle shards to zero.
 
 ---
 
@@ -38,12 +72,12 @@ Only the **frontend gateway (`warehouse-lobby`)** is publicly accessible on the 
 
 ```mermaid
 flowchart LR
-  subgraph Browser["Browser Client (Vite + PixiJS v8)"]
-    UI["Isometric Stage + HUD + Inspector"]
+  subgraph Browser["Browser Client (Vite + Isometric Canvas2D + HUD v3)"]
+    UI["2:1 Isometric Stage + Drive & Floor HUD"]
   end
   subgraph PublicGateway["Public Cloud Run: warehouse-lobby (allUsers)"]
     STATIC["Static Client Assets + Strict CSP"]
-    API["POST /api/join & GET /api/network"]
+    API["POST /api/join · GET /api/network · /api/queue*"]
     WSPROXY["Authenticated WS Reverse Proxy (/ws?site=<siteId>)"]
   end
   subgraph PrivateBackends["Private Cloud Run Shards (No Public Access)"]
@@ -66,11 +100,11 @@ flowchart LR
 ```
 
 ### Defense-in-Depth Highlights
-- **Private Backend Game Engines**: `site-*` Cloud Run services do **not** grant `roles/run.invoker` to `allUsers`. Only the `warehouse-lobby` service account (for WebSocket proxying) and the `warehouse-pubsub-push` service account (for cross-site pallet transfers on `/internal/transfer`) can invoke backend shards.
-- **Dual-Layer Gateway Authentication (`OIDC` + `x-warehouse-proxy`)**: When `warehouse-lobby` proxies a client WebSocket connection (`/ws?site=<siteId>`) to a backend shard, it attaches both a Google-signed OIDC ID token (`Authorization: Bearer <idToken>`) and a short-lived, domain-separated HMAC proxy header (`x-warehouse-proxy` signed with `warehouse-proxy-header-v1:`). Direct external requests to backend shards or internal diagnostic routes (`/api/state`, `/api/status`, `/api/ticket`, `/api/journal`, `/internal/wake`) are rejected with `403 Forbidden`.
+- **Private Backend Game Engines**: `site-*` Cloud Run services do **not** grant `roles/run.invoker` to `allUsers`. Only the `warehouse-lobby` service account (for WebSocket proxying and on-demand shard wake) and the `warehouse-pubsub-push` service account (for cross-site pallet transfers on `/internal/transfer`) can invoke backend shards.
+- **Dual-Layer Gateway Authentication (`OIDC` + `x-warehouse-proxy`)**: When `warehouse-lobby` proxies a client WebSocket connection (`/ws?site=<siteId>`) to a backend shard, it attaches both a Google-signed OIDC ID token (`Authorization: Bearer <idToken>`) and a short-lived, domain-separated HMAC proxy header (`x-warehouse-proxy` signed with `warehouse-proxy-header-v1:`). Direct external requests to backend shards or internal routes (`/api/state`, `/api/status`, `/api/ticket`, `/api/journal`, `/internal/wake`) are rejected with `403 Forbidden`.
 - **60-Second HMAC Join Tickets**: `POST /api/join` issues a single-use, 60-second HMAC ticket (`warehouse-join-ticket-v1:`) binding `{ clientId, name, siteId, exp }` using a key stored in **Google Cloud Secret Manager (`ticket-hmac-key`)**.
 - **7-Layer Prompt Armor (`@warehouse/armor`)**: Protects `nlCommand` and player callsigns against prompt injection, jailbreaks, malicious URIs, XSS, and budget exhaustion. Validated against a 60-case adversarial red-team corpus (`packages/armor/redteam/corpus.jsonl`).
-- **Zero Hardcoded Secrets**: All authentication uses **Google Cloud Application Default Credentials (ADC)**, Least-Privilege Service Accounts, and Secret Manager. `.dockerignore` and `.gcloudignore` prevent local `.env` files or Terraform state files from ever entering build contexts or container images.
+- **Zero Hardcoded Secrets**: All cloud authentication uses **Google Cloud Application Default Credentials (ADC)**, Least-Privilege Service Accounts, and Secret Manager. `.gitignore`, `.dockerignore`, and `.gcloudignore` prevent local `.env` files, keys, or Terraform state/variable files from ever entering git history, build contexts, or container images.
 
 ---
 
@@ -80,19 +114,29 @@ flowchart LR
 warehouse/
 ├── packages/
 │   ├── protocol/       # Shared Zod wire schemas, quantized delta codecs, HMAC ticket & proxy header signing
-│   ├── sim/            # Deterministic 10 Hz warehouse physics, A* pathfinding, orders, factory break state machine
+│   ├── sim/            # Deterministic 10 Hz warehouse physics, A* pathfinding, fares/par, contracts & AI archetypes
 │   └── armor/          # 7-layer Prompt Armor hygiene, nonce fencing, governance clamp & red-team corpus
 ├── apps/
-│   ├── client/         # PixiJS v8 isometric frontend, HUD, Strategy Board, Brain Log & History drawer
-│   ├── lobby/          # Public HTTP/WebSocket gateway, shard placement directory & static asset server
-│   └── site/           # Private authoritative regional game engine shard, Vertex AI brains & Firestore store
+│   ├── client/         # Vite + hybrid 2:1 isometric Canvas2D renderer (Painter) & HUD v3 (Drive & Floor modes)
+│   ├── lobby/          # Public Fastify gateway, shard placement/queue directory & authenticated WS reverse proxy
+│   └── site/           # Private authoritative regional shard server, Vertex AI brains, Dispatcher's Call & Firestore
 ├── tools/
-│   ├── sprites/        # Deterministic procedural sprite & audio asset generator
+│   ├── sprites/        # Pure-TypeScript 96×96 isometric 3D sprite atlas generator (atlas.png + atlas.json)
 │   ├── smoke/          # Live HTTP/WS, Prompt Armor, and headless Chrome UI verification probes
-│   └── loadtest/       # 128-client load test harness (112 protocol bots + 16 Gemini 3.5 Flash-Lite pilots)
+│   ├── loadtest/       # 128-client Cloud Run Job load harness (112 protocol bots + 16 Gemini 3.5 Flash-Lite pilots)
+│   └── ast-sidecar/    # Multi-compiler AST & Cross-Layer Lineage GraphDB Sidecar (SCIP + SQLite LPG)
 ├── infra/              # Terraform IaC for Cloud Run, IAM, Secret Manager, Pub/Sub & Firestore TTL
-└── docs/               # Detailed architecture, protocol, simulation, security & operations reference docs
+└── docs/               # Detailed gameplay, architecture, protocol, simulation, security & operations docs
 ```
+
+---
+
+## Environment Configuration
+
+All sensitive values and deployment-specific settings are controlled via environment variables (and Terraform variables for cloud provisioning):
+
+- **[`.env.example`](.env.example)** — Documented template for local development, secret signing (`TICKET_SECRET`), Vertex AI (`GCP_PROJECT_ID`, `GEMINI_MODEL`, `GEMINI_LOCATION`), Model Armor (`MODEL_ARMOR_TEMPLATE`), regional shard toggles (`SITE_ID`, `AGENTS`, `IDLE_POLICY`, `ENABLE_DISPATCHERS_CALL`), and gateway routing (`SITE_URLS_JSON`).
+- **[`infra/terraform.tfvars.example`](infra/terraform.tfvars.example)** — Documented template for self-deploying to your own Google Cloud project (`project_id`, `region`, `suffix`, scaling caps, and feature flags).
 
 ---
 
@@ -100,7 +144,7 @@ warehouse/
 
 ### Prerequisites
 - **Node.js 22+** and **npm**
-- *(Optional for live Gemini / Model Armor / Firestore integration)*: `gcloud` CLI authenticated via Application Default Credentials:
+- *(Optional for live Vertex AI Gemini / Model Armor / Firestore integration)*: `gcloud` CLI authenticated via Application Default Credentials:
   ```bash
   gcloud auth application-default login
   ```
@@ -110,7 +154,7 @@ warehouse/
 npm install
 npm run build
 ```
-*(Builds are orchestrated and cached via [Wireit](https://github.com/google/wireit), including procedural sprite generation in `tools/sprites`.)*
+*(Builds are orchestrated and cached via [Wireit](https://github.com/google/wireit), including deterministic 96×96 3D sprite atlas generation in `tools/sprites`.)*
 
 ### 2. Run the Fast Offline Test Suite
 All unit and integration tests run completely offline in a few seconds without requiring cloud credentials:
@@ -118,17 +162,21 @@ All unit and integration tests run completely offline in a few seconds without r
 npm test
 ```
 
-### 3. Start a Local Site Engine & Lobby Gateway
-Copy `.env.example` to `.env` (or export environment variables directly) and run a local backend shard (bound to `127.0.0.1:8081`) plus the public lobby gateway (`http://127.0.0.1:8080`):
+### 3. Configure `.env` & Start a Local Site Engine + Lobby Gateway
+Copy `.env.example` to `.env` (or pass environment variables inline) so the local shard (`127.0.0.1:8081`) and lobby gateway (`http://127.0.0.1:8080`) share a `TICKET_SECRET`:
+
+```bash
+cp .env.example .env
+```
 
 ```bash
 # Terminal 1: Start local DEN-1 game engine shard on 127.0.0.1:8081
-SITE_ID=den-1 PORT=8081 HOST=127.0.0.1 TICKET_SECRET=local-dev-secret-change-me \
+SITE_ID=den-1 PORT=8081 HOST=127.0.0.1 TICKET_SECRET=local-dev-secret-32-chars-minimum \
   node apps/site/dist/index.js
 
 # Terminal 2: Start local lobby gateway on http://127.0.0.1:8080 (proxies /ws?site=den-1 -> 127.0.0.1:8081)
-PORT=8080 HOST=127.0.0.1 TICKET_SECRET=local-dev-secret-change-me \
-  SITE_WS_URLS='{"den-1":"ws://127.0.0.1:8081/ws"}' \
+PORT=8080 HOST=127.0.0.1 TICKET_SECRET=local-dev-secret-32-chars-minimum \
+  SITE_URLS_JSON='{"den-1":"http://127.0.0.1:8081"}' \
   node apps/lobby/dist/index.js
 ```
 
@@ -142,16 +190,18 @@ You can deploy the entire 4-shard distribution network and public lobby gateway 
 
 ### Prerequisites
 1. A Google Cloud project with billing enabled.
-2. **Firestore Native** database (`(default)`) created in your target region (default `us-central1`).
-3. Authenticate your local CLI:
+2. **Firestore Native** database (`(default)`) created in your target region (default `us-central1`):
    ```bash
    export PROJECT_ID="your-gcp-project-id"
    export REGION="us-central1"
    gcloud config set project "${PROJECT_ID}"
    gcloud auth login
    gcloud auth application-default login
+
+   # Create the default Firestore Native database if not already created:
+   gcloud firestore databases create --location="${REGION}" --type=firestore-native
    ```
-4. Enable the base bootstrap APIs (Terraform will enable the rest automatically):
+3. Enable the bootstrap APIs (Terraform will also manage the service list automatically):
    ```bash
    gcloud services enable \
      cloudbuild.googleapis.com \
@@ -163,9 +213,14 @@ You can deploy the entire 4-shard distribution network and public lobby gateway 
      aiplatform.googleapis.com \
      modelarmor.googleapis.com
    ```
+4. *(Optional)* Copy the Terraform variables template if you prefer using `infra/terraform.tfvars` instead of CLI `-var` flags:
+   ```bash
+   cp infra/terraform.tfvars.example infra/terraform.tfvars
+   # Edit infra/terraform.tfvars and set project_id = "your-gcp-project-id"
+   ```
 
 ### Step 1: Create the Artifact Registry Repository & Build Container Images
-Create the Docker repository (or let `terraform apply -target=google_artifact_registry_repository.warehouse` create it first) and submit the multi-stage build to Google Cloud Build:
+Provision the Docker repository in your project and submit the multi-stage container build (`site`, `lobby`, and `loadtest` images) to Google Cloud Build:
 
 ```bash
 terraform -chdir=infra init
@@ -178,7 +233,7 @@ gcloud builds submit --config=cloudbuild.yaml --project="${PROJECT_ID}" .
 ```
 
 ### Step 2: Provision Cloud Run Shards, IAM, Pub/Sub & Secret Manager
-Validate and apply the full Terraform configuration:
+Validate and apply the full Terraform configuration (`site_image`, `lobby_image`, and `loadtest_image` automatically resolve to `${REGION}-docker.pkg.dev/${PROJECT_ID}/warehouse/{site,lobby,loadtest}:latest` when left default):
 
 ```bash
 terraform -chdir=infra fmt
@@ -189,7 +244,7 @@ terraform -chdir=infra apply \
   -var="suffix="
 ```
 
-Terraform will provision:
+Terraform provisions:
 - **Secret Manager**: `ticket-hmac-key` with a cryptographically generated 64-character secret.
 - **Least-Privilege Service Accounts**:
   - `warehouse-site`: Runs the 4 regional shards (`roles/datastore.user`, `roles/pubsub.publisher`, `roles/aiplatform.user`, `roles/modelarmor.user`, plus read access to `ticket-hmac-key`).
@@ -198,12 +253,22 @@ Terraform will provision:
 - **4 Private Cloud Run Site Services** (`site-den-1`, `site-slc-2`, `site-phx-3`, `site-abq-4`) with `REQUIRE_PROXY_AUTH=1` and zero public `allUsers` access.
 - **1 Public Cloud Run Lobby Gateway** (`warehouse-lobby`) with `allUsers` invoker access and 3600s WebSocket proxy timeout.
 
+*(Optional — Google Cloud Model Armor Template)*: To enable remote Layer-2/Layer-5 Model Armor screening in addition to the local 7-layer deterministic regex/heuristic armor, create the `warehouse-orders` template in your region:
+```bash
+gcloud model-armor templates create warehouse-orders \
+  --location="${REGION}" \
+  --project="${PROJECT_ID}" \
+  --pi-and-jailbreak-filter-settings-enforcement=ENABLED \
+  --pi-and-jailbreak-filter-settings-confidence-level=LOW_AND_ABOVE \
+  --malicious-uri-filter-settings-enforcement=ENABLED
+```
+
 ### Step 3: Verify Your Live Deployment
 ```bash
 LOBBY_URL=$(terraform -chdir=infra output -raw lobby_url)
 
-# 1. Probe public gateway health
-curl -fsS "${LOBBY_URL}/healthz"
+# 1. Probe public gateway health (trailing slash: GFE intercepts exact `/healthz` on *.a.run.app)
+curl -fsS "${LOBBY_URL}/healthz/"
 
 # 2. Run end-to-end gameplay + cross-site transfer smoke test
 node tools/smoke/live.mjs "${LOBBY_URL}"
@@ -216,6 +281,7 @@ node tools/smoke/armor.mjs "${LOBBY_URL}"
 
 ## Documentation Reference
 
+- [**Gameplay & Scoring (`docs/gameplay.md`)**](docs/gameplay.md) — 3-Minute Blitz vs. Free Range, Fares & Par times, Combo ladder, Skill Cards, Contracts, and Dispatcher's Call (`A2UI`).
 - [**Architecture & Sharding (`docs/architecture.md`)**](docs/architecture.md) — Regional site themes, gateway routing, factory break state machine, Pub/Sub pallet transfers, and Firestore schema.
 - [**Security & Prompt Armor (`docs/security.md`)**](docs/security.md) — Threat model, frontend-only exposure boundary, 7-layer Prompt Armor pipeline, canonical `ArmorReasonCode` table, and red-team corpus guide.
 - [**Wire Protocol (`docs/protocol.md`)**](docs/protocol.md) — Client/server WebSocket messages, quantized 10 Hz light/full delta fan-out, and HMAC join tickets.

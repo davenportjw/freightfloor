@@ -206,6 +206,10 @@ describe('@warehouse/smoke end-to-end verification (in-process Lobby + 2 Sites)'
     expect(liveReport.errors).toEqual([]);
     expect(liveReport.ok).toBe(true);
     expect(liveReport.lobbyHealthOk).toBe(true);
+    expect(liveReport.lobbyHealthPath).toBe('/healthz/');
+    expect(liveReport.siteAuthMode).toBe('lobby-proxy');
+    expect(liveReport.siteAuthNote).toContain('local http lobby');
+    expect(liveReport.siteHealthPath).toBe('/healthz/');
     expect(liveReport.joinedSiteId).toBe('den-1');
     expect(liveReport.secondarySiteId).toBe('slc-2');
     expect(liveReport.welcomeReceived).toBe(true);

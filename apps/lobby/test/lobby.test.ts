@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { SiteStatusSchema, verifyTicket } from '@warehouse/protocol';
+import { LeaderboardEntrySchema, SiteStatusSchema, verifyTicket } from '@warehouse/protocol';
 import {
   buildLobbyServer,
   CSP_HEADER,
   InMemoryLobbyStore,
   MAX_DRIVERS_PER_SITE,
+  normalizePpm,
+  publicIdFor,
   type StoredSiteDoc,
 } from '../src/index.js';
 
@@ -68,6 +70,8 @@ describe('@warehouse/lobby — M6 placement, ticket signing, and network directo
         name: body.name,
         siteId: 'den-1',
         isBot: false,
+        role: 'driver',
+        jti: expect.any(String),
         exp: NOW + 60_000,
       },
     });
@@ -396,7 +400,7 @@ describe('@warehouse/lobby — M6 placement, ticket signing, and network directo
     expect(sites.find((s) => s.id === 'slc-2')?.drivers).toBe(0);
   });
 
-  it('9. Assigns non-overlapping Adj-Noun callsigns to human players and supports resuming a previous callsign', async () => {
+  it('9. Assigns non-overlapping Adj-Noun callsigns, supports finding/switching to existing callsigns or resume codes, and rejects adding new custom names', async () => {
     const store = new InMemoryLobbyStore([makeSite('den-1', { drivers: 1 })]);
     const app = await buildLobbyServer({
       store,
@@ -424,36 +428,78 @@ describe('@warehouse/lobby — M6 placement, ticket signing, and network directo
     expect(join1Again.statusCode).toBe(200);
     expect(join1Again.json().name).toBe(body1.name);
 
-    // Another client attempting to claim body1.name gets a different non-overlapping callsign
+    // Passing a custom name in `name` is ignored for human players (server assigns its own callsign)
     const join2 = await app.inject({
       method: 'POST',
       url: '/api/join',
-      payload: { clientId: 'client-human-202', name: body1.name },
+      payload: { clientId: 'client-human-202', name: 'Custom-New-Handle' },
     });
     expect(join2.statusCode).toBe(200);
     const body2 = join2.json();
+    expect(body2.name).not.toBe('Custom-New-Handle');
     expect(body2.name).not.toBe(body1.name);
 
-    // Resuming body1.name from a new browser session restores client-human-101 and its callsign
+    // Searching existing callsigns via GET /api/callsigns returns matching existing human callsigns
+    const searchRes = await app.inject({
+      method: 'GET',
+      url: `/api/callsigns?q=${encodeURIComponent(body1.name.slice(0, 5))}`,
+    });
+    expect(searchRes.statusCode).toBe(200);
+    expect(searchRes.json().callsigns).toContain(body1.name);
+
+    // Typing an existing callsign in `resume` finds and returns that existing callsign
+    const lookupRes = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'new-browser-session-id', resume: body1.name.toUpperCase() },
+    });
+    expect(lookupRes.statusCode).toBe(200);
+    expect(lookupRes.json().name).toBe(body1.name);
+    expect(lookupRes.json().clientId).toBe('client-human-101');
+
+    // Resuming with the secret resume code from a new browser session also restores client-human-101
+    expect(body1.resumeToken).toMatch(/^wr1_[A-Za-z0-9_-]{32}$/);
     const resumeRes = await app.inject({
       method: 'POST',
       url: '/api/join',
-      payload: { clientId: 'new-browser-session-id', resume: body1.name },
+      payload: { clientId: 'new-browser-session-id', resume: body1.resumeToken },
     });
     expect(resumeRes.statusCode).toBe(200);
     const resumed = resumeRes.json();
     expect(resumed.name).toBe(body1.name);
     expect(resumed.clientId).toBe('client-human-101');
 
-    // Resuming an unknown callsign returns 404 unknown_callsign
+    // Attempting to enter a non-existent callsign returns 404 invalid_resume_code and never adds it
     const unknownRes = await app.inject({
       method: 'POST',
       url: '/api/join',
       payload: { clientId: 'new-browser-session-id', resume: 'Nonexistent-Callsign' },
     });
     expect(unknownRes.statusCode).toBe(404);
-    expect(unknownRes.json().error).toBe('unknown_callsign');
+    expect(unknownRes.json().error).toBe('invalid_resume_code');
+    const afterUnknownSearch = await app.inject({
+      method: 'GET',
+      url: '/api/callsigns?q=Nonexistent',
+    });
+    expect(afterUnknownSearch.json().callsigns).toEqual([]);
 
+    // Malformed / injection resume lookups are rejected with 400 invalid_name before querying the store
+    let lookups = 0;
+    const originalResolve = store.resolvePlayerIdentity.bind(store);
+    store.resolvePlayerIdentity = async (params) => {
+      lookups += 1;
+      return originalResolve(params);
+    };
+    for (const bad of ['<script>alert(1)</script>', 'https://evil.example', 'bad!@#name']) {
+      const blockedRes = await app.inject({
+        method: 'POST',
+        url: '/api/join',
+        payload: { clientId: 'new-browser-session-id', resume: bad },
+      });
+      expect(blockedRes.statusCode).toBe(400);
+      expect(blockedRes.json().error).toBe('invalid_name');
+    }
+    expect(lookups).toBe(0);
 
     await app.close();
   });
@@ -527,6 +573,422 @@ describe('@warehouse/lobby — M6 placement, ticket signing, and network directo
 
     await app.close();
   });
+
+  it('11. /api/network passes through nonnegative ppm from player stats and omits missing/invalid values', async () => {
+    const store = new InMemoryLobbyStore(
+      [makeSite('den-1', { drivers: 2 })],
+      [
+        { clientId: 'h-ppm', name: 'Ada Lovelace', siteId: 'den-1', points: 900, deliveries: 40, ppm: 3.4 },
+        { clientId: 'h-zero', name: 'Grace Hopper', siteId: 'den-1', points: 500, deliveries: 2, ppm: 0 },
+        { clientId: 'h-none', name: 'Alan Turing', siteId: 'den-1', points: 300, deliveries: 9 },
+        { clientId: 'h-neg', name: 'Edsger Dijkstra', siteId: 'den-1', points: 100, deliveries: 1, ppm: -2 },
+      ],
+    );
+    const app = await buildLobbyServer({ store, ticketSecret: TEST_SECRET, now: () => NOW });
+
+    const res = await app.inject({ method: 'GET', url: '/api/network' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    const byId = new Map<string, Record<string, unknown>>(
+      body.leaderboard.map((p: Record<string, unknown>) => [p.clientId as string, p]),
+    );
+    // Leaderboard rows are keyed by the opaque publicId, never the raw clientId.
+    const pub = (id: string) => publicIdFor(id, TEST_SECRET);
+    expect(byId.get(pub('h-ppm'))?.ppm).toBe(3.4);
+    expect(byId.get(pub('h-zero'))?.ppm).toBe(0);
+    expect(byId.get(pub('h-none'))).not.toHaveProperty('ppm');
+    expect(byId.get(pub('h-neg'))).not.toHaveProperty('ppm');
+    expect(byId.has('h-ppm')).toBe(false);
+    for (const entry of body.leaderboard) {
+      expect(LeaderboardEntrySchema.safeParse(entry).success).toBe(true);
+    }
+
+    expect(normalizePpm(1.5)).toBe(1.5);
+    expect(normalizePpm(Number.NaN)).toBeUndefined();
+    expect(normalizePpm('4')).toBeUndefined();
+
+    await app.close();
+  });
+
+  it('12. /healthz/ trailing-slash alias returns lobby health JSON (GFE intercepts exact /healthz on *.a.run.app)', async () => {
+    const store = new InMemoryLobbyStore([makeSite('den-1')]);
+    const app = await buildLobbyServer({ store, ticketSecret: TEST_SECRET, now: () => NOW });
+    for (const url of ['/healthz', '/healthz/']) {
+      const res = await app.inject({ method: 'GET', url });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, service: 'lobby' });
+    }
+    await app.close();
+  });
+
+  it('13. Stage 2B Test 1 — >128 Player Queue Admission: 129th POST /api/join returns spectator with queue.state=queued, position=1, totalQueued=1, and valid seatLeaseId', async () => {
+    const store = new InMemoryLobbyStore([
+      makeSite('den-1', { drivers: 32 }),
+      makeSite('slc-2', { drivers: 32 }),
+      makeSite('phx-3', { drivers: 32 }),
+      makeSite('abq-4', { drivers: 32 }),
+    ]);
+    const app = await buildLobbyServer({
+      store,
+      ticketSecret: TEST_SECRET,
+      now: () => NOW,
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: {
+        clientId: 'client-queue-129',
+        name: 'Player129',
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.role).toBe('spectator');
+    expect(body.queue).toBeDefined();
+    expect(body.queue.state).toBe('queued');
+    expect(body.queue.position).toBe(1);
+    expect(body.queue.totalQueued).toBe(1);
+    expect(typeof body.queue.seatLeaseId).toBe('string');
+    expect(body.queue.seatLeaseId.length).toBeGreaterThanOrEqual(8);
+
+    const verified = verifyTicket(body.ticket, TEST_SECRET, NOW + 1_000);
+    expect(verified.ok).toBe(true);
+    if (verified.ok) {
+      expect(verified.payload.role).toBe('spectator');
+      expect(verified.payload.jti).toEqual(expect.any(String));
+    }
+
+    const netRes = await app.inject({ method: 'GET', url: '/api/network' });
+    expect(netRes.statusCode).toBe(200);
+    expect(netRes.json().queueSize).toBe(1);
+
+    await app.close();
+  });
+
+  it('14. Stage 2B Test 2 — Strict FIFO Promotion & Seat Lease Reservation: promotes position #1 to ready when a seat opens while #2 and #3 remain queued, then claims driver ticket', async () => {
+    let clock = NOW;
+    const store = new InMemoryLobbyStore([
+      makeSite('den-1', { drivers: 32 }),
+      makeSite('slc-2', { drivers: 32 }),
+      makeSite('phx-3', { drivers: 32 }),
+      makeSite('abq-4', { drivers: 32 }),
+    ]);
+    const app = await buildLobbyServer({
+      store,
+      ticketSecret: TEST_SECRET,
+      now: () => clock,
+    });
+
+    // Enqueue 3 players in FIFO order
+    const joinA = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'client-fifo-a', name: 'Alpha' },
+    });
+    clock += 100;
+    const joinB = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'client-fifo-b', name: 'Bravo' },
+    });
+    clock += 100;
+    const joinC = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'client-fifo-c', name: 'Charlie' },
+    });
+
+    expect(joinA.json().queue.position).toBe(1);
+    expect(joinB.json().queue.position).toBe(2);
+    expect(joinC.json().queue.position).toBe(3);
+
+    // 1 driver seat opens on den-1 (31/32)
+    store.setSite(makeSite('den-1', { drivers: 31, updatedAt: clock }));
+
+    // Poll status for #1 -> promoted to ready on den-1
+    const statusA = await app.inject({
+      method: 'GET',
+      url: '/api/queue/status?clientId=client-fifo-a',
+    });
+    expect(statusA.statusCode).toBe(200);
+    const statusABody = statusA.json();
+    expect(statusABody.state).toBe('ready');
+    expect(statusABody.assignedSiteId).toBe('den-1');
+    expect(statusABody.leaseExpiresAt).toBe(clock + 20_000);
+
+    // #2 and #3 remain queued at positions 1 and 2
+    const statusB = await app.inject({
+      method: 'GET',
+      url: '/api/queue/status?clientId=client-fifo-b',
+    });
+    const statusC = await app.inject({
+      method: 'GET',
+      url: '/api/queue/status?clientId=client-fifo-c',
+    });
+    expect(statusB.json().state).toBe('queued');
+    expect(statusB.json().position).toBe(1);
+    expect(statusC.json().state).toBe('queued');
+    expect(statusC.json().position).toBe(2);
+
+    // Player #1 claims their reserved seat via POST /api/queue/claim
+    const claimA = await app.inject({
+      method: 'POST',
+      url: '/api/queue/claim',
+      payload: {
+        clientId: 'client-fifo-a',
+        seatLeaseId: statusABody.seatLeaseId,
+      },
+    });
+    expect(claimA.statusCode).toBe(200);
+    const claimABody = claimA.json();
+    expect(claimABody.role).toBe('driver');
+    expect(claimABody.siteId).toBe('den-1');
+    expect(claimABody.queue.state).toBe('claimed');
+
+    const verifiedClaim = verifyTicket(claimABody.ticket, TEST_SECRET, clock + 1_000);
+    expect(verifiedClaim.ok).toBe(true);
+    if (verifiedClaim.ok) {
+      expect(verifiedClaim.payload.role).toBe('driver');
+      expect(verifiedClaim.payload.seatLeaseId).toBe(statusABody.seatLeaseId);
+      expect(verifiedClaim.payload.jti).toEqual(expect.any(String));
+    }
+
+    await app.close();
+  });
+
+  it('15. Stage 2B Test 3 — Lease Expiration & Re-Allocation: expires un-claimed ready lease after 20s and promotes next player in FIFO queue', async () => {
+    let clock = NOW;
+    const store = new InMemoryLobbyStore([
+      makeSite('den-1', { drivers: 32 }),
+      makeSite('slc-2', { drivers: 32 }),
+      makeSite('phx-3', { drivers: 32 }),
+      makeSite('abq-4', { drivers: 32 }),
+    ]);
+    const app = await buildLobbyServer({
+      store,
+      ticketSecret: TEST_SECRET,
+      now: () => clock,
+      seatClaimLeaseMs: 20_000,
+      queueHeartbeatTtlMs: 60_000,
+    });
+
+    const join1 = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'client-lease-1', name: 'LeaseOne' },
+    });
+    clock += 50;
+    await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'client-lease-2', name: 'LeaseTwo' },
+    });
+
+    // Open 1 seat on slc-2
+    store.setSite(makeSite('slc-2', { drivers: 31, updatedAt: clock }));
+
+    // Player 1 becomes ready
+    const readyRes1 = await app.inject({
+      method: 'GET',
+      url: '/api/queue/status?clientId=client-lease-1',
+    });
+    expect(readyRes1.json().state).toBe('ready');
+    expect(readyRes1.json().assignedSiteId).toBe('slc-2');
+    const leaseId1 = join1.json().queue.seatLeaseId;
+
+    // Advance clock past 20s lease TTL without Player 1 claiming; keep slc-2 heartbeat fresh
+    clock += 21_000;
+    for (const id of ['den-1', 'phx-3', 'abq-4'] as const) {
+      store.setSite(makeSite(id, { drivers: 32, updatedAt: clock }));
+    }
+    store.setSite(makeSite('slc-2', { drivers: 31, updatedAt: clock }));
+
+    // Player 2 polls status -> Player 1's expired lease is pruned and Player 2 is promoted to ready on slc-2
+    const readyRes2 = await app.inject({
+      method: 'GET',
+      url: '/api/queue/status?clientId=client-lease-2',
+    });
+    expect(readyRes2.statusCode).toBe(200);
+    expect(readyRes2.json().state).toBe('ready');
+    expect(readyRes2.json().assignedSiteId).toBe('slc-2');
+
+    // Player 1 attempting to claim the expired lease gets 410 Gone
+    const lateClaim1 = await app.inject({
+      method: 'POST',
+      url: '/api/queue/claim',
+      payload: {
+        clientId: 'client-lease-1',
+        seatLeaseId: leaseId1,
+      },
+    });
+    expect(lateClaim1.statusCode).toBe(410);
+    expect(lateClaim1.json().error).toBe('lease_expired');
+
+    await app.close();
+  });
+
+  it('16. Stage 2B Test 4 — Re-Queue After Eviction (4010ShiftEnded / 4009IdleTimeout): POST /api/join with requeue: true places player at tail of FIFO queue or admits immediately if seats open with fresh jti and seatLeaseId', async () => {
+    let clock = NOW;
+    const store = new InMemoryLobbyStore([
+      makeSite('den-1', { drivers: 32 }),
+      makeSite('slc-2', { drivers: 32 }),
+      makeSite('phx-3', { drivers: 32 }),
+      makeSite('abq-4', { drivers: 32 }),
+    ]);
+    const app = await buildLobbyServer({
+      store,
+      ticketSecret: TEST_SECRET,
+      now: () => clock,
+    });
+
+    // Enqueue Player A (#1) and Player B (#2)
+    const firstA = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'client-evict-a', name: 'EvictedDriver' },
+    });
+    clock += 100;
+    await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'client-evict-b', name: 'WaitingDriver' },
+    });
+
+    const firstBodyA = firstA.json();
+    const firstVerifiedA = verifyTicket(firstBodyA.ticket, TEST_SECRET, clock);
+    expect(firstVerifiedA.ok).toBe(true);
+
+    // Player A calls POST /api/join with requeue: true when all sites are full -> placed at tail (#2 behind B) with fresh jti & seatLeaseId
+    clock += 100;
+    const requeueFullA = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'client-evict-a', name: 'EvictedDriver', requeue: true },
+    });
+    expect(requeueFullA.statusCode).toBe(200);
+    const requeueBodyA = requeueFullA.json();
+    expect(requeueBodyA.role).toBe('spectator');
+    expect(requeueBodyA.queue.state).toBe('queued');
+    expect(requeueBodyA.queue.position).toBe(2);
+    expect(requeueBodyA.queue.seatLeaseId).not.toBe(firstBodyA.queue.seatLeaseId);
+
+    const secondVerifiedA = verifyTicket(requeueBodyA.ticket, TEST_SECRET, clock);
+    expect(secondVerifiedA.ok).toBe(true);
+    if (firstVerifiedA.ok && secondVerifiedA.ok) {
+      expect(secondVerifiedA.payload.jti).not.toBe(firstVerifiedA.payload.jti);
+    }
+
+    // Now clear queue and open seats on den-1 -> requeue: true admits immediately as driver
+    await app.inject({
+      method: 'POST',
+      url: '/api/queue/leave',
+      payload: { clientId: 'client-evict-b' },
+    });
+    store.setSite(makeSite('den-1', { drivers: 20, updatedAt: clock }));
+
+    const requeueOpenA = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'client-evict-a', name: 'EvictedDriver', requeue: true },
+    });
+    expect(requeueOpenA.statusCode).toBe(200);
+    expect(requeueOpenA.json().role).toBe('driver');
+    expect(requeueOpenA.json().siteId).toBe('den-1');
+
+    await app.close();
+  });
+
+  it('17. Stage 2B Test 5 — Elastic Overflow Warehouse Scaling: wakes den-2 when queued players reach queueScaleThreshold, includes den-2 in /api/network, and promotes queued players to ready on den-2', async () => {
+    let clock = NOW;
+    const store = new InMemoryLobbyStore([
+      makeSite('den-1', { drivers: 32 }),
+      makeSite('slc-2', { drivers: 32 }),
+      makeSite('phx-3', { drivers: 32 }),
+      makeSite('abq-4', { drivers: 32 }),
+    ]);
+    const app = await buildLobbyServer({
+      store,
+      ticketSecret: TEST_SECRET,
+      now: () => clock,
+      maxWarehouses: 8,
+      queueScaleThreshold: 4,
+    });
+
+    const clientIds = ['scale-p1', 'scale-p2', 'scale-p3', 'scale-p4'];
+    for (const cid of clientIds) {
+      clock += 50;
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/join',
+        payload: { clientId: cid },
+      });
+      expect(res.statusCode).toBe(200);
+    }
+
+    // Verify lobby auto-scaler woke overflow shard den-2
+    expect(store.wokenSites).toContain('den-2');
+
+    // Verify GET /api/network includes den-2 as a live warehouse
+    const netRes = await app.inject({ method: 'GET', url: '/api/network' });
+    expect(netRes.statusCode).toBe(200);
+    const netBody = netRes.json();
+    expect(netBody.maxWarehouses).toBe(8);
+    const den2 = netBody.sites.find((s: { id: string }) => s.id === 'den-2');
+    expect(den2).toBeDefined();
+    expect(den2.state).toBe('live');
+
+    // Verify all 4 queued players are promoted to state: 'ready' with assignedSiteId: 'den-2'
+    for (const cid of clientIds) {
+      const statusRes = await app.inject({
+        method: 'GET',
+        url: `/api/queue/status?clientId=${cid}`,
+      });
+      expect(statusRes.statusCode).toBe(200);
+      const statusBody = statusRes.json();
+      expect(statusBody.state).toBe('ready');
+      expect(statusBody.assignedSiteId).toBe('den-2');
+    }
+
+    await app.close();
+  });
+
+  it('18. POST /api/join with runMode: "freerange" (without mode) mints a ticket with runMode === "freerange" and applies Free Range capacity routing', async () => {
+    const store = new InMemoryLobbyStore([
+      makeSite('den-1', { drivers: 27 }),
+      makeSite('slc-2', { drivers: 8 }),
+    ]);
+    const app = await buildLobbyServer({
+      store,
+      ticketSecret: TEST_SECRET,
+      now: () => NOW,
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: {
+        clientId: 'client-freerange-runmode',
+        name: 'Runner Run 2',
+        runMode: 'freerange',
+        requeue: true,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // Free Range soft-cap (drivers >= 26 on den-1) routes to slc-2
+    expect(body.siteId).toBe('slc-2');
+    expect(body.role).toBe('driver');
+
+    const verified = verifyTicket(body.ticket, TEST_SECRET, NOW);
+    expect(verified.ok).toBe(true);
+    if (verified.ok) {
+      expect(verified.payload.runMode).toBe('freerange');
+    }
+
+    await app.close();
+  });
 });
+
 
 

@@ -147,7 +147,6 @@ export function createDraftFromVehicle(v: Vehicle | null): AgentDraft {
     (v?.directive?.persona as Archetype | undefined) ??
     (v?.directive?.strategy as Archetype | undefined) ??
     v?.strategy ??
-    v?.strat ??
     'Steady';
   const baseTactics = defaultTacticsFor(persona);
   const t = { ...baseTactics, ...(v?.tactics ?? {}), ...(v?.directive?.tactics ?? {}) };
@@ -227,15 +226,15 @@ export function buildAgentDirectiveFromDraft(draft: AgentDraft): AgentDirective 
 }
 
 export function formatDirectiveSummary(
-  v: Pick<Vehicle, 'autopilot' | 'strategy' | 'strat' | 'directive' | 'tactics'> | null | undefined,
+  v: Pick<Vehicle, 'autopilot' | 'strategy' | 'directive' | 'tactics'> | null | undefined,
 ): string {
   if (!v) return 'No vehicle assigned';
   if (!v.autopilot) {
     if (v.directive?.summary) return `Manual (WASD) · Saved: ${v.directive.summary}`;
-    return 'Manual (WASD) · Press Esc or G to engage Co-Pilot';
+    return 'Manual (WASD) · Press C to engage Co-Pilot';
   }
   if (v.directive?.summary) return v.directive.summary;
-  const persona = v.directive?.persona ?? v.directive?.strategy ?? v.strategy ?? v.strat ?? 'Steady';
+  const persona = v.directive?.persona ?? v.directive?.strategy ?? v.strategy ?? 'Steady';
   const zones =
     v.directive?.focusZones && v.directive.focusZones.length > 0
       ? ` · Zones ${v.directive.focusZones.join(',')}`
@@ -561,17 +560,32 @@ export function mountAgentDesigner(overlay: HTMLElement, ctx: UiCtx): UiModule {
 
   function syncFormControlsFromDraft(): void {
     for (const [id, b] of personaButtons) {
-      b.classList.toggle('active', id === draft.persona);
+      const on = id === draft.persona;
+      b.classList.toggle('active', on);
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
     }
     for (const [id, b] of priorityButtons) {
-      b.classList.toggle('active', id === draft.priority);
+      const on = id === draft.priority;
+      b.classList.toggle('active', on);
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
     }
-    allZonesBtn.classList.toggle('active', draft.focusZones.length === 0);
+    const allZonesOn = draft.focusZones.length === 0;
+    allZonesBtn.classList.toggle('active', allZonesOn);
+    allZonesBtn.classList.toggle('on', allZonesOn);
+    allZonesBtn.setAttribute('aria-pressed', String(allZonesOn));
     for (const [z, b] of zoneButtons) {
-      b.classList.toggle('active', draft.focusZones.includes(z));
+      const on = draft.focusZones.includes(z);
+      b.classList.toggle('active', on);
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
     }
     for (const [id, b] of taskButtons) {
-      b.classList.toggle('active', id === draft.immediateTask);
+      const on = id === draft.immediateTask;
+      b.classList.toggle('active', on);
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
     }
     speedInput.value = String(draft.speed);
     speedVal.textContent = `${draft.speed.toFixed(2)}×`;
@@ -698,7 +712,7 @@ export function mountAgentDesigner(overlay: HTMLElement, ctx: UiCtx): UiModule {
       el('footer', { class: 'ad-footer' }, [
         el('div', {
           class: 'ad-footer-note',
-          text: 'Tip: Press WASD or Arrow keys at any time on the floor to take manual control instantly. Press Esc to hand back to Co-Pilot.',
+          text: 'Tip: Press WASD or Arrow keys at any time on the floor to take manual control instantly. Press C to hand back to Co-Pilot.',
         }),
         el('div', { class: 'ad-footer-actions' }, [manualBtn, deployBtn]),
       ]),
@@ -749,13 +763,11 @@ export function mountAgentDesigner(overlay: HTMLElement, ctx: UiCtx): UiModule {
         nlSendBtn.disabled = false;
         const echo = store.ui.lastAgentEcho;
         if (echo) {
-          const msg = echo.summary ?? echo.reason ?? echo.raw ?? '';
+          const msg = echo.summary ?? echo.reason ?? echo.text ?? '';
           const ok = echo.status !== 'rejected' && echo.executed !== false;
           echoStatusText.textContent = ok ? `✓ ${msg}` : `⚠ ${msg}`;
           echoStatusText.className = `ad-echo-line ${ok ? 'ok' : 'err'}`;
         } else {
-          echoStatusText.textContent =
-            'Ready · Changes take effect immediately on your vehicle while keeping your driver lease and score.';
           echoStatusText.textContent =
             'Ready · Changes take effect immediately on your vehicle while keeping your driver lease and score.';
           echoStatusText.className = 'ad-echo-line';

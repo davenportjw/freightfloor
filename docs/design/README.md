@@ -16,6 +16,7 @@ Source-of-truth design material for the Warehouse client and protocol. Open the 
 - Full-bleed canvas with collapsible floating panels and a slide-out right drawer. Panel state persists per browser.
 - No speed buttons and no "Reset world", because the floor is shared and server-authoritative. Difficulty stays a vote.
 - Strict no-fake-data rule: show "—" or real errors until real data arrives.
+- Every interactive `<button>` and control primitive must follow the **Button, Pill & Control Visual Specification** in [contracts.md](contracts.md#button-pill--control-visual-specification-qa-invariants): never mix underlined text-link styling (`text-decoration: underline`) with pill/button containers, always reset native OS button chrome (`appearance: none`), and enforce strict active/disabled states across all HUD overlays and modals.
 
 ### history/
 Earlier design rounds, kept for context:

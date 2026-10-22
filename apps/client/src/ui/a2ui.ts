@@ -15,12 +15,76 @@ import type {
 } from '@warehouse/protocol';
 import type { UiCtx, UiModule } from './context.js';
 import { button, el, KeyedView } from './dom.js';
+import {
+  dcCanPick,
+  dcRevealLine,
+  dcSecondsLeft,
+  dcTimeLeft,
+  dcVisible,
+  type DispatchersCallCard,
+} from './dispatchersCall.js';
+
+/** Dispatcher's Call card: question, countdown ring, option chips, then the reveal line. */
+function renderDispatchersCall(
+  dc: DispatchersCallCard,
+  canPick: boolean,
+  secs: number,
+  pick: (idx: number) => void,
+): HTMLElement[] {
+  const m = dc.minigame;
+  const ring = el('div', {
+    class: 'dc-ring num',
+    text: dc.reveal || dc.picked != null ? '✓' : String(secs),
+    attrs: { 'aria-label': `${secs} seconds left` },
+  });
+  const header = el('div', { class: 'a2ui-head' }, [
+    el('div', { class: 'a2ui-head__titles' }, [
+      el('div', { class: 'a2ui-badge', text: "DISPATCHER'S CALL" }),
+      el('h3', { class: 'a2ui-title', text: m.question }),
+    ]),
+    ring,
+  ]);
+  const chips = el(
+    'div',
+    { class: 'a2ui-presets__grid' },
+    m.options.map((o) => {
+      const mine = dc.picked === o.idx;
+      const gem = dc.reveal != null && dc.reveal.geminiIdx === o.idx;
+      const b = button(
+        gem ? `${o.label} · Gemini` : o.label,
+        `btn a2ui-preset dc-option${mine ? ' on' : ''}${gem ? ' dc-gemini' : ''}`,
+        () => pick(o.idx),
+        o.desc,
+      );
+      b.disabled = !canPick;
+      return b;
+    }),
+  );
+  const status = dc.reveal
+    ? el('p', { class: `a2ui-subtitle dc-reveal${dc.reveal.agreed ? ' agreed' : ''}`, text: dcRevealLine(dc.reveal) })
+    : dc.picked != null
+      ? el('p', { class: 'a2ui-subtitle', text: 'Dispatched. Waiting for Gemini…' })
+      : canPick
+        ? null
+        : el('p', { class: 'a2ui-subtitle', text: "Time's up." });
+  return status ? [header, chips, status] : [header, chips];
+}
+
+/**
+ * Honest attribution for the pre-filled dispatch (`a2uiScreen.recommendedSource`): only a
+ * model-proposed draft says Gemini; a keyword-match draft says so; absent shows nothing.
+ */
+export function recommendedSourceLabel(source: A2uiScreenMessage['recommendedSource']): string | null {
+  if (source === 'model') return 'Suggested by Gemini';
+  if (source === 'heuristic') return 'Pre-filled from your words (keyword match)';
+  return null;
+}
 
 function defaultDraftFromScreen(screen: A2uiScreenMessage): DispatchParams {
   let sourceZone: DispatchSourceZone = 'haz';
   let targetBay: DispatchTargetBay = 'RET';
-  let priority: DispatchPriority = 'rush';
-  const mode: DispatchMode = 'nearest';
+  let priority: DispatchPriority = 'p0';
+  const mode: DispatchMode = 'reroute_and_spawn';
   let count = 2;
 
   for (const sel of screen.selectors) {
@@ -57,8 +121,8 @@ export function mountA2ui(zone: HTMLElement, ctx: UiCtx): UiModule {
   let draft: DispatchParams = {
     sourceZone: 'haz',
     targetBay: 'RET',
-    priority: 'rush',
-    mode: 'nearest',
+    priority: 'p0',
+    mode: 'reroute_and_spawn',
     count: 2,
   };
 
@@ -66,6 +130,24 @@ export function mountA2ui(zone: HTMLElement, ctx: UiCtx): UiModule {
 
   return {
     update() {
+      // Dispatcher's Call minigame card takes the zone while it is open.
+      const now = Date.now();
+      if (store.dispatchersCall && !dcVisible(store.dispatchersCall, now)) {
+        store.dispatchersCall = null;
+      }
+      const dc = store.dispatchersCall;
+      if (dc) {
+        root.hidden = false;
+        activeScreenId = null;
+        const canPick = dcCanPick(dc, now);
+        const secs = dcSecondsLeft(dc, now);
+        const key = JSON.stringify(['dc', dc.minigame.id, dc.picked, dc.reveal?.id ?? null, canPick, secs]);
+        view.render(key, () => renderDispatchersCall(dc, canPick, secs, (idx) => actions.pickDispatchersCall(idx)));
+        const ring = root.querySelector<HTMLElement>('.dc-ring');
+        if (ring) ring.style.setProperty('--dc-left', String(dcTimeLeft(dc, now)));
+        return;
+      }
+
       const screen = store.activeA2ui;
       if (!screen) {
         root.hidden = true;
@@ -87,14 +169,19 @@ export function mountA2ui(zone: HTMLElement, ctx: UiCtx): UiModule {
         draft.priority,
         draft.count,
         screen.telemetry,
+        screen.recommendedSource ?? null,
       ]);
 
+      const sourceLabel = recommendedSourceLabel(screen.recommendedSource);
       view.render(key, () => {
         const header = el('div', { class: 'a2ui-head' }, [
           el('div', { class: 'a2ui-head__titles' }, [
             el('div', { class: 'a2ui-badge', text: 'A2UI · FLOOR OBJECTIVE BUILDER' }),
             el('h3', { class: 'a2ui-title', text: screen.title }),
             el('p', { class: 'a2ui-subtitle', text: screen.subtitle }),
+            ...(sourceLabel
+              ? [el('p', { class: 'hint a2ui-source', text: sourceLabel, attrs: { 'data-source': screen.recommendedSource ?? '' } })]
+              : []),
           ]),
           button(
             '✕',
@@ -130,11 +217,11 @@ export function mountA2ui(zone: HTMLElement, ctx: UiCtx): UiModule {
             screen.presets.map((p) => {
               const btn = button(
                 p.label,
-                `btn a2ui-preset${p.tone === 'warn' ? ' warn' : p.tone === 'accent' ? ' drive' : ''}`,
+                `btn a2ui-preset${p.dispatch?.priority === 'p0' ? ' warn' : p.managerOp ? ' drive' : ''}`,
                 () => {
                   actions.submitA2ui(p.id, p.dispatch, p.managerOp);
                 },
-                p.description,
+                p.desc,
               );
               return btn;
             }),
@@ -189,7 +276,7 @@ export function mountA2ui(zone: HTMLElement, ctx: UiCtx): UiModule {
           }),
         );
 
-        const summaryText = `Route ${draft.count} order(s) from ${draft.sourceZone.toUpperCase()} → ${draft.targetBay} (${draft.priority.toUpperCase()})`;
+        const summaryText = `Route ${draft.count} order(s) from ${draft.sourceZone.toUpperCase()} → ${draft.targetBay} (${(draft.priority ?? 'auto').toUpperCase()})`;
         const footer = el('div', { class: 'a2ui-foot' }, [
           el('span', { class: 'a2ui-summary num', text: summaryText }),
           el('div', { class: 'a2ui-foot__actions' }, [

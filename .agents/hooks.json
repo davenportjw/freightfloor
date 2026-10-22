@@ -1,0 +1,24 @@
+{
+  "warehouse-ast-graph-sync": {
+    "enabled": true,
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node tools/ast-sidecar/dist/hook-handler.js session-start",
+        "timeout": 15
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "write_to_file|replace_file_content|multi_replace_file_content",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node tools/ast-sidecar/dist/hook-handler.js post-tool-use",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

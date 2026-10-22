@@ -7,10 +7,9 @@ import type { BoardRow, ValueSample } from '@warehouse/protocol';
 import { createWorld, type Card, type CardHand, type Vehicle } from '@warehouse/sim';
 import { clockLine, onTimeText, DASH } from '../../src/ui/format.js';
 import { initialOfferSel, keepIds, keepLabel, toggleOfferSel } from '../../src/ui/cards.js';
-import { commandBarView } from '../../src/ui/commandBar.js';
 import { fleetView } from '../../src/ui/fleet.js';
 import { kpiSummary } from '../../src/ui/kpiBar.js';
-import { sortBoard, boardSummary } from '../../src/ui/strategyBoard.js';
+import { sortBoard, boardSummary } from '../../src/ui/teamStandings.js';
 import { valueChartModel } from '../../src/ui/valueChart.js';
 import { resolvePanelState, readStoredPanelState, writeStoredPanelState, AUTO_COLLAPSE_WIDTH } from '../../src/ui/panel.js';
 import { resolveHotkey, isTypingTarget, type HotkeyContext } from '../../src/ui/hotkeys.js';
@@ -186,20 +185,42 @@ describe('hotkeys', () => {
   };
   const key = (code: string, k = '') => ({ code, key: k });
 
-  it('maps the documented keys', () => {
-    expect(resolveHotkey(key('Tab'), base)).toBe('hideHud');
+  it('maps the documented keys (HUD v3 floor view)', () => {
+    expect(resolveHotkey(key('Tab'), base)).toBe('standings');
     expect(resolveHotkey(key('KeyH'), base)).toBe('drawer');
     expect(resolveHotkey(key('KeyB'), base)).toBe('board');
+    expect(resolveHotkey(key('KeyM'), base)).toBe('menu');
+    expect(resolveHotkey(key('KeyV'), base)).toBe('hudMinimal');
     expect(resolveHotkey(key('KeyL'), base)).toBe('leaderboardModal');
-    expect(resolveHotkey(key('Digit2'), base)).toBe('layer:traffic');
-    expect(resolveHotkey(key('KeyC'), base)).toBe('cones');
+    expect(resolveHotkey(key('Digit1'), base)).toBe('order:rush');
+    expect(resolveHotkey(key('Digit2'), base)).toBe('order:p0');
+    expect(resolveHotkey(key('Digit3'), base)).toBe('order:cones');
+    expect(resolveHotkey(key('Digit4'), base)).toBe('order:dispatch');
+    expect(resolveHotkey(key('Digit2'), { ...base, overlay: 'pick' })).toBe('pick:2');
+    expect(resolveHotkey(key('Digit2'), { ...base, driving: true })).toBeNull();
+    expect(resolveHotkey(key('KeyC'), base)).toBeNull();
     expect(resolveHotkey(key('Slash', '?'), base)).toBe('help');
     expect(resolveHotkey(key('KeyT'), base)).toBeNull();
     expect(resolveHotkey(key('KeyT'), { ...base, selectedVid: 'v3' })).toBe('takeWheel');
   });
 
-  it('Esc: hand back > leaderboardModal > exit cone > deselect', () => {
-    expect(resolveHotkey(key('Escape'), { ...base, canHandBack: true, coneMode: true })).toBe('handBack');
+  it('Enter: pick sheet keeps, results plays again, dispatch sends, else chat', () => {
+    expect(resolveHotkey(key('Enter'), { ...base, overlay: 'pick' })).toBe('pick:keep');
+    expect(resolveHotkey(key('Enter'), { ...base, overlay: 'results' })).toBe('results:again');
+    expect(resolveHotkey(key('Enter'), { ...base, dispatchOpen: true })).toBe('dispatch:send');
+    expect(resolveHotkey(key('Enter'), base)).toBe('chat');
+  });
+
+  it('Esc closes sheets / flyouts / dispatch before cones and selection', () => {
+    expect(resolveHotkey(key('Escape'), { ...base, overlay: 'pick', coneMode: true })).toBe('closeOverlay');
+    expect(resolveHotkey(key('Escape'), { ...base, flyoutOpen: true, selectedVid: 'v1' })).toBe('closeOverlay');
+    expect(resolveHotkey(key('Escape'), { ...base, dispatchOpen: true })).toBe('closeOverlay');
+  });
+
+  it('Esc: leaderboardModal > exit cone > hand back > deselect', () => {
+    // HUD v3: cone placing is a Floor-view tool, so Esc finishes it before handing a vehicle back.
+    expect(resolveHotkey(key('Escape'), { ...base, canHandBack: true, coneMode: true })).toBe('exitCone');
+    expect(resolveHotkey(key('Escape'), { ...base, canHandBack: true, selectedVid: 'v1' })).toBe('handBack');
     expect(resolveHotkey(key('Escape'), { ...base, leaderboardModalOpen: true, coneMode: true })).toBe('closeLeaderboardModal');
     expect(resolveHotkey(key('Escape'), { ...base, coneMode: true, selectedVid: 'v1' })).toBe('exitCone');
     expect(resolveHotkey(key('Escape'), { ...base, selectedVid: 'v1' })).toBe('deselect');
@@ -334,7 +355,7 @@ describe('driving input controller', () => {
   });
 });
 
-describe('KPI summary, Fleet panel view, and Command bar view', () => {
+describe('KPI summary, Fleet panel view, and network sync', () => {
   it('kpiSummary returns DASH before welcome and rich clock/shipped/on-time when welcomed', () => {
     expect(kpiSummary({ clock: DASH, shipped: DASH, onTime: DASH })).toBe(DASH);
     expect(kpiSummary({ clock: 'Day 1 · 08:15 · Shift A', shipped: '18', onTime: '94%' })).toBe(
@@ -354,50 +375,6 @@ describe('KPI summary, Fleet panel view, and Command bar view', () => {
     expect(v.detail).toBe('2 AI agents · 1 human drivers · Wing 1/4');
     expect(v.canAdd).toBe(true);
     expect(v.canRemove).toBe(true);
-  });
-
-  it('commandBarView reflects active Rush wave countdown, open P0 count, cone mode, and ops guide state', () => {
-    const idle = commandBarView({
-      welcomed: true,
-      conn: { status: 'open', text: '' },
-      coneMode: false,
-      world: {
-        t: 100,
-        rushUntil: 90,
-        orders: [{ p0: true, state: 'delivered' as const }, { p0: false, state: 'open' as const }],
-      },
-      isDriving: () => false,
-      ui: { opsGuideOpen: false },
-    });
-    expect(idle.ready).toBe(true);
-    expect(idle.rushActive).toBe(false);
-    expect(idle.rushText).toBe('⚡ Rush wave');
-    expect(idle.p0Active).toBe(false);
-    expect(idle.p0Text).toBe('★ P0 order');
-
-    const active = commandBarView({
-      welcomed: true,
-      conn: { status: 'open', text: '' },
-      coneMode: true,
-      world: {
-        t: 100,
-        rushUntil: 118.2,
-        orders: [
-          { p0: true, state: 'open' as const },
-          { p0: true, state: 'claimed' as const },
-          { p0: true, state: 'delivered' as const },
-        ],
-      },
-      isDriving: () => true,
-      ui: { opsGuideOpen: true },
-    });
-    expect(active.rushActive).toBe(true);
-    expect(active.rushText).toBe('⚡ Rush (19m)');
-    expect(active.p0Active).toBe(true);
-    expect(active.p0Text).toBe('★ P0 (2/4)');
-    expect(active.conesActive).toBe(true);
-    expect(active.opsGuideOpen).toBe(true);
-    expect(active.driving).toBe(true);
   });
 
   it('isDriverEntry and reconcileNetworkSites synchronize Presence and Network driver/spectator counts', async () => {
@@ -626,6 +603,25 @@ describe('computeSillyAwards (Full-Screen Leaderboard Silly Superlatives)', () =
     expect(brakeAward.holder).toContain('Turbo-Badger');
     expect(brakeAward.mine).toBe(true);
   });
+
+  it('renders Silly Superlatives as a structured table with matching styles', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const modalSrc = readFileSync(
+      resolve(import.meta.dirname, '../../src/ui/leaderboardModal.ts'),
+      'utf8',
+    );
+    const cssSrc = readFileSync(resolve(import.meta.dirname, '../../src/styles.css'), 'utf8');
+
+    expect(modalSrc).toContain('silly-awards-table');
+    expect(modalSrc).toContain("'data-role': 'silly-awards-table'");
+    expect(modalSrc).toContain('silly-award-row');
+    expect(modalSrc).not.toContain('silly-awards-grid');
+    expect(modalSrc).not.toContain('silly-award-card');
+
+    expect(cssSrc).toContain('.silly-award-row');
+    expect(cssSrc).toContain('.lb-driver-cell');
+  });
 });
 
 describe('Co-Pilot & Agent Designer helpers, hotkeys, and autopilot InputController', () => {
@@ -675,7 +671,7 @@ describe('Co-Pilot & Agent Designer helpers, hotkeys, and autopilot InputControl
     expect(QUICK_INTENT_PILLS.length).toBeGreaterThanOrEqual(5);
   });
 
-  it('maps KeyG to agentDesigner and Escape to closeAgentDesigner or engageCopilot when manual driving', () => {
+  it('maps KeyG to agentDesigner, C to toggleCopilot, and Escape only closes things', () => {
     const base: HotkeyContext = {
       typing: false,
       canHandBack: false,
@@ -691,8 +687,11 @@ describe('Co-Pilot & Agent Designer helpers, hotkeys, and autopilot InputControl
     expect(
       resolveHotkey({ code: 'Escape', key: 'Escape' }, { ...base, agentDesignerOpen: true }),
     ).toBe('closeAgentDesigner');
-    expect(resolveHotkey({ code: 'Escape', key: 'Escape' }, base)).toBe('engageCopilot');
-    // When already in autopilot, Esc falls through to deselect
+    // Co-Pilot is C (toggle) — Esc never engages it; it just closes / deselects.
+    expect(resolveHotkey({ code: 'KeyC', key: 'c' }, base)).toBe('toggleCopilot');
+    expect(resolveHotkey({ code: 'KeyC', key: 'c' }, { ...base, autopilot: true })).toBe('toggleCopilot');
+    expect(resolveHotkey({ code: 'Escape', key: 'Escape' }, base)).toBe('deselect');
+    expect(resolveHotkey({ code: 'Escape', key: 'Escape' }, { ...base, selectedVid: null })).toBeNull();
     expect(
       resolveHotkey({ code: 'Escape', key: 'Escape' }, { ...base, autopilot: true }),
     ).toBe('deselect');
@@ -729,13 +728,493 @@ describe('Co-Pilot & Agent Designer helpers, hotkeys, and autopilot InputControl
   it('formatBlitzRemaining converts 10 Hz sim-minutes (1 sim-min = 1 real second) into MM:SS countdown', async () => {
     const { formatBlitzRemaining } = await import('../../src/ui/commandBar.js');
     expect(formatBlitzRemaining(300)).toBe('05:00');
+    expect(formatBlitzRemaining(180)).toBe('03:00');
     expect(formatBlitzRemaining(60)).toBe('01:00');
     expect(formatBlitzRemaining(15)).toBe('00:15');
-    expect(formatBlitzRemaining({ runMode: 'blitz', runStartedAt: 100, runEndsAt: 400 }, 100)).toBe('05:00');
-    expect(formatBlitzRemaining({ runMode: 'blitz', runStartedAt: 100, runEndsAt: 400 }, 340)).toBe('01:00');
-    expect(formatBlitzRemaining({ runMode: 'blitz', runStartedAt: null, runEndsAt: null }, 100)).toBe('05:00');
+    expect(formatBlitzRemaining({ runMode: 'blitz', runStartedAt: 100, runEndsAt: 280 }, 100)).toBe('03:00');
+    expect(formatBlitzRemaining({ runMode: 'blitz', runStartedAt: 100, runEndsAt: 280 }, 220)).toBe('01:00');
+    expect(formatBlitzRemaining({ runMode: 'blitz', runStartedAt: null, runEndsAt: null }, 100)).toBe('03:00');
   });
 });
 
+describe('Shift Briefing / Help modal (mountHelp, How to Play + "How the AI works" link)', () => {
+  class MiniNode {
+    children: Array<MiniElement | MiniText> = [];
+    get textContent(): string {
+      return this.children.map((c) => c.textContent).join('');
+    }
+    set textContent(v: string) {
+      this.children = v ? [new MiniText(String(v))] : [];
+    }
+  }
 
+  class MiniText extends MiniNode {
+    constructor(public raw: string) {
+      super();
+    }
+    override get textContent(): string {
+      return this.raw;
+    }
+    override set textContent(v: string) {
+      this.raw = String(v);
+    }
+  }
+
+  class MiniElement extends MiniNode {
+    tagName: string;
+    className = '';
+    title = '';
+    type = '';
+    value = '';
+    disabled = false;
+    hidden = false;
+    private attrs = new Map<string, string>();
+    private listeners = new Map<string, Array<(ev: unknown) => void>>();
+    readonly dataset: Record<string, string>;
+    readonly style = {
+      props: new Map<string, string>(),
+      setProperty(k: string, v: string) {
+        this.props.set(k, v);
+      },
+    };
+    readonly classList: {
+      contains: (cls: string) => boolean;
+      add: (cls: string) => void;
+      remove: (cls: string) => void;
+      toggle: (cls: string, force?: boolean) => boolean;
+    };
+
+    constructor(tag: string) {
+      super();
+      this.tagName = tag.toUpperCase();
+      const self = this;
+      this.dataset = new Proxy({} as Record<string, string>, {
+        set(_t, prop: string, val: string) {
+          const kebab = prop.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
+          self.attrs.set(`data-${kebab}`, String(val));
+          return true;
+        },
+        get(_t, prop: string) {
+          const kebab = prop.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
+          return self.attrs.get(`data-${kebab}`);
+        },
+      });
+      this.classList = {
+        contains: (cls: string) => self.className.split(/\s+/).filter(Boolean).includes(cls),
+        add: (cls: string) => {
+          const set = new Set(self.className.split(/\s+/).filter(Boolean));
+          set.add(cls);
+          self.className = [...set].join(' ');
+        },
+        remove: (cls: string) => {
+          const set = new Set(self.className.split(/\s+/).filter(Boolean));
+          set.delete(cls);
+          self.className = [...set].join(' ');
+        },
+        toggle: (cls: string, force?: boolean) => {
+          const has = self.classList.contains(cls);
+          const next = force !== undefined ? force : !has;
+          if (next) self.classList.add(cls);
+          else self.classList.remove(cls);
+          return next;
+        },
+      };
+    }
+
+    setAttribute(k: string, v: string): void {
+      this.attrs.set(k, String(v));
+    }
+
+    getAttribute(k: string): string | null {
+      return this.attrs.has(k) ? (this.attrs.get(k) as string) : null;
+    }
+
+    append(...nodes: Array<MiniElement | MiniText | string>): void {
+      for (const n of nodes) {
+        this.children.push(typeof n === 'string' ? new MiniText(n) : n);
+      }
+    }
+
+    replaceChildren(...nodes: Array<MiniElement | MiniText | string>): void {
+      this.children = [];
+      this.append(...nodes);
+    }
+
+    addEventListener(type: string, fn: (ev: unknown) => void): void {
+      const list = this.listeners.get(type) ?? [];
+      list.push(fn);
+      this.listeners.set(type, list);
+    }
+
+    click(): void {
+      for (const fn of this.listeners.get('click') ?? []) {
+        fn({ target: this, preventDefault() {} });
+      }
+    }
+
+    focus(): void {}
+
+    queryAll(pred: (el: MiniElement) => boolean): MiniElement[] {
+      const out: MiniElement[] = [];
+      const walk = (node: MiniElement | MiniText) => {
+        if (node instanceof MiniElement) {
+          if (pred(node)) out.push(node);
+          for (const ch of node.children) walk(ch);
+        }
+      };
+      walk(this);
+      return out;
+    }
+  }
+
+  it('defaults to How to Play, opens AI Inside + Decision Lifecycle behind one "How the AI works" link, and renders validated personas, 2-lane SVG lifecycle diagram, and 3-row mode comparison matrix', async () => {
+    const prevDoc = (globalThis as Record<string, unknown>).document;
+    (globalThis as Record<string, unknown>).document = {
+      createElement: (tag: string) => new MiniElement(tag),
+      createElementNS: (_ns: string, tag: string) => new MiniElement(tag),
+      createTextNode: (text: string) => new MiniText(text),
+    };
+
+    try {
+      const { mountHelp } = await import('../../src/ui/help.js');
+      const { ClientStore } = await import('../../src/state.js');
+      const { PERSONA_OPTIONS } = await import('../../src/ui/agentDesigner.js');
+      const { STRATEGIES } = await import('@warehouse/sim');
+
+      const overlay = new MiniElement('div');
+      const store = new ClientStore();
+      store.ui.helpOpen = true;
+      const ctx = {
+        store,
+        actions: {
+          showHelp: (open: boolean) => {
+            store.ui.helpOpen = open;
+          },
+          quickDrive: () => {},
+        },
+      } as unknown as import('../../src/ui/context.js').UiCtx;
+
+      const help = mountHelp(overlay as unknown as HTMLElement, ctx, {
+        getCallsign: () => 'Forklift-Ace',
+      });
+      help.update();
+
+      // One "🧠 How the AI works" link (data-intro-tab="ai") + a hidden "← How to Play" back link.
+      const links = overlay.queryAll((e) => e.dataset.introTab !== undefined);
+      expect(links.map((t) => t.dataset.introTab)).toEqual(['ai', 'play']);
+      const [aiLink, backLink] = links as [MiniElement, MiniElement];
+      expect(aiLink.textContent).toBe('🧠 How the AI works');
+      expect(aiLink.hidden).toBe(false);
+      expect(backLink.hidden).toBe(true);
+      expect(overlay.queryAll((e) => e.getAttribute('role') === 'tab')).toHaveLength(0);
+
+      const playPane = overlay.queryAll((e) => e.getAttribute('data-pane') === 'rules')[0]!;
+      const aiPane = overlay.queryAll((e) => e.getAttribute('data-pane') === 'ai-concepts')[0]!;
+      const lifecyclePane = overlay.queryAll((e) => e.getAttribute('data-pane') === 'decision-lifecycle')[0]!;
+      expect(playPane).toBeDefined();
+      expect(aiPane).toBeDefined();
+      expect(lifecyclePane).toBeDefined();
+      expect(playPane.hidden).toBe(false);
+      expect(aiPane.hidden).toBe(true);
+      expect(lifecyclePane.hidden).toBe(true);
+
+      // The link opens the AI view: AI Inside and Decision Lifecycle stacked.
+      aiLink.click();
+      expect(playPane.hidden).toBe(true);
+      expect(aiPane.hidden).toBe(false);
+      expect(lifecyclePane.hidden).toBe(false);
+      expect(aiLink.hidden).toBe(true);
+      expect(backLink.hidden).toBe(false);
+
+      // Verify 'The AI Inside' content: 4 cards, all 5 real archetypes, no stale Hauler/Sentinel, Game Engine vs. Gemini
+      const aiCards = aiPane.queryAll((e) => e.classList.contains('ai-concept-card'));
+      expect(aiCards).toHaveLength(4);
+      const aiText = aiPane.textContent;
+      expect(Object.keys(STRATEGIES)).toHaveLength(5);
+      for (const persona of PERSONA_OPTIONS) {
+        expect(aiText).toContain(persona.id);
+      }
+      expect(aiText).not.toContain('Hauler');
+      expect(aiText).not.toContain('Sentinel');
+      expect(aiText).toContain('Game Engine (10 Hz)');
+      expect(aiText).toContain('gemini-3.5-flash-lite');
+      expect(aiText).toContain('zero silent fallbacks');
+      expect(aiText).toContain('7-layer Model Armor screening');
+      // Ensure internal TypeScript identifiers are not exposed in user-facing UI
+      for (const jargon of ['stepHuman', 'scoreOrdersFor', 'buildOccupancy', 'findPath', 'FacilityGovernor', 'thinkingBudget: 0']) {
+        expect(aiText).not.toContain(jargon);
+      }
+
+      // 'lifecycle' is an alias for the same AI view.
+      help.switchTab('lifecycle');
+      expect(playPane.hidden).toBe(true);
+      expect(aiPane.hidden).toBe(false);
+      expect(lifecyclePane.hidden).toBe(false);
+
+      // Verify Part 1: 2-Lane Swimlane SVG Visual Diagram (svg.lifecycle-svg inside .lifecycle-diagram-card)
+      const diagramCards = lifecyclePane.queryAll((e) => e.classList.contains('lifecycle-diagram-card'));
+      expect(diagramCards).toHaveLength(1);
+      const svgs = lifecyclePane.queryAll((e) => e.tagName === 'SVG' && e.classList.contains('lifecycle-svg'));
+      expect(svgs).toHaveLength(1);
+      expect(svgs[0]!.getAttribute('viewBox')).toBe('0 0 760 250');
+      expect(svgs[0]!.getAttribute('role')).toBe('img');
+
+      const svgText = svgs[0]!.textContent;
+      expect(svgText).toContain('10 Hz GAME ENGINE');
+      expect(svgText).toContain('GEMINI 3.5 FLASH-LITE');
+      expect(svgText).toContain('1. Drive & Avoid');
+      expect(svgText).toContain('2. Trigger & Pre-Score');
+      expect(svgText).toContain('3a. Priority Queue (Max 4)');
+      expect(svgText).toContain('3b. Persona Decision');
+      expect(svgText).toContain('4. Validate & Deliver');
+      expect(svgText).toContain('Low Battery (< chargeAt)');
+      expect(svgText).toContain('Async JSON (Top 6)');
+      expect(svgText).toContain('Chosen Order ID');
+      expect(svgText).toContain('0 Mock Fallbacks');
+
+      // Verify Part 2: Compact 3-Row Visual Comparison Matrix (.lifecycle-matrix & .lifecycle-matrix-row)
+      const matrices = lifecyclePane.queryAll((e) => e.classList.contains('lifecycle-matrix'));
+      expect(matrices).toHaveLength(1);
+      const matrixRows = lifecyclePane.queryAll((e) => e.classList.contains('lifecycle-matrix-row'));
+      expect(matrixRows).toHaveLength(3);
+      const chips = lifecyclePane.queryAll((e) => e.classList.contains('lc-chip'));
+      expect(chips).toHaveLength(9);
+
+      const lifecycleText = lifecyclePane.textContent;
+      expect(lifecycleText).toContain('Who Calls Gemini vs. Game Engine?');
+      expect(lifecycleText).toContain('AI Fleet (F-01..F-20)');
+      expect(lifecycleText).toContain('Player Manual (Drive / Take Wheel)');
+      expect(lifecycleText).toContain('Player Co-Pilot (Autopilot ON)');
+      expect(lifecycleText).toContain('No Fallback');
+      expect(lifecycleText).toContain('0 LLM Calls');
+      expect(lifecycleText).toContain('1.0s Fallback');
+      for (const jargon of ['stepHuman', 'scoreOrdersFor', 'buildOccupancy', 'findPath', 'FacilityGovernor', 'thinkingBudget: 0']) {
+        expect(lifecycleText).not.toContain(jargon);
+      }
+
+      // "← How to Play" goes back.
+      backLink.click();
+      expect(playPane.hidden).toBe(false);
+      expect(aiPane.hidden).toBe(true);
+      expect(lifecyclePane.hidden).toBe(true);
+      expect(aiLink.hidden).toBe(false);
+      expect(backLink.hidden).toBe(true);
+    } finally {
+      (globalThis as Record<string, unknown>).document = prevDoc;
+    }
+  });
+
+  it('handles ClientStore.applyRunEvicted, mountRunEnd slot release & Get Back in Line, and mountFloorView queue banner states', async () => {
+    const prevDoc = (globalThis as Record<string, unknown>).document;
+    const byId = new Map<string, MiniElement>();
+    (globalThis as Record<string, unknown>).document = {
+      createElement: (tag: string) => new MiniElement(tag),
+      createElementNS: (_ns: string, tag: string) => new MiniElement(tag),
+      createTextNode: (text: string) => new MiniText(text),
+      getElementById: (id: string) => {
+        if (!byId.has(id)) byId.set(id, new MiniElement('div'));
+        return byId.get(id)!;
+      },
+    };
+
+    try {
+      const { ClientStore } = await import('../../src/state.js');
+      const { mountRunEnd } = await import('../../src/ui/runEnd.js');
+      const { mountFloorView } = await import('../../src/ui/floorView.js');
+
+      const store = new ClientStore();
+      store.welcomed = true;
+      store.siteId = 'den-1';
+      store.myVid = 'DRV-01';
+      store.world.vehicles.push({
+        id: 'DRV-01',
+        type: 'forklift',
+        strategy: 'Steady',
+        x: 10,
+        y: 10,
+        tx: 10,
+        ty: 10,
+        vx: 0,
+        vy: 0,
+        heading: 0,
+        speedNow: 0,
+        bat: 88,
+        state: 'idle',
+        cargo: [],
+        OrderId: null,
+        pts: 180,
+        sPts: 180,
+        deliv: 6,
+        onTime: 5,
+        late: 1,
+        dist: 40,
+        stuns: 0,
+        fork: 0,
+        human: true,
+        isPlayerVehicle: true,
+        driver: 'Turbo-Badger',
+        runMode: 'blitz',
+        runPts: 180,
+        runDeliveries: 6,
+        runOnTime: 5,
+        runIncidents: 0,
+        streak: 3,
+        bestStreak: 4,
+        combo: 1.5,
+        comboBest: 1.5,
+        speedyTrips: 3,
+        fareTrips: 6,
+      } as unknown as import('@warehouse/sim').Vehicle);
+
+      store.applyRunEvicted({
+        type: 'runEvicted',
+        vid: 'DRV-01',
+        reason: 'idle_timeout',
+        pts: 180,
+        shipped: 6,
+        incidents: 0,
+        bestStreak: 4,
+        runMode: 'blitz',
+      });
+
+      expect(store.myVid).toBeNull();
+      expect(store.vehicle('DRV-01')).toBeNull();
+      expect(store.evictedReason).toBe('idle_timeout');
+      expect(store.ui.runEnd).not.toBeNull();
+      expect(store.ui.runEnd?.reason).toBe('idle_timeout');
+
+      let retried = 0;
+      const retriedModes: Array<string | undefined> = [];
+      let claimed = 0;
+      let leftQueue = 0;
+      let droveFromFloor = 0;
+      const ctx = {
+        store,
+        actions: {
+          retryNewRun: (mode?: string) => {
+            retried++;
+            retriedModes.push(mode);
+          },
+          dismissRunEnd: () => {
+            store.ui.runEnd = null;
+          },
+          showLeaderboardModal: () => {},
+          claimQueueSeat: () => {
+            claimed++;
+          },
+          leaveQueue: () => {
+            leftQueue++;
+          },
+          toggleAutoClaimSeat: () => {
+            store.autoClaimSeat = !store.autoClaimSeat;
+          },
+          driveFromFloor: () => {
+            droveFromFloor++;
+          },
+          panTo: () => {},
+        },
+      } as unknown as import('../../src/ui/context.js').UiCtx;
+
+      // 1. mountRunEnd shows eviction reason, "Run again ↵" (when not queued), "Get Back in Line ↵" (when queued), and ghost secondary buttons ("Full Standings", "Watch the floor", "Free Range")
+      expect(store.ui.runEnd?.leaderboardRows?.length).toBeGreaterThan(0);
+      expect(store.ui.runEnd?.humanRank).toBe(1);
+      expect(store.ui.runEnd?.totalHumanRuns).toBeGreaterThanOrEqual(1);
+      const runEndHost = new MiniElement('div');
+      const runEndView = mountRunEnd(runEndHost as unknown as HTMLElement, ctx);
+      runEndView.update();
+
+      const fullStandingsBtn = runEndHost.queryAll((e) => e.dataset.role === 'full-standings')[0]!;
+      expect(fullStandingsBtn.className).toBe('ghost');
+
+      const watchFloorBtn = runEndHost.queryAll((e) => e.dataset.role === 'watch-floor')[0]!;
+      expect(watchFloorBtn.className).toBe('ghost');
+
+      const tryAgainBtn = runEndHost.queryAll((e) => e.dataset.role === 'play-again')[0]!;
+      expect(tryAgainBtn.textContent).toBe('Run again ↵');
+      tryAgainBtn.click();
+      expect(retried).toBe(1);
+      expect(retriedModes[0]).toBe('blitz');
+
+      const freeRangeBtn = runEndHost.queryAll((e) => e.dataset.role === 'go-freerange')[0]!;
+      expect(freeRangeBtn).toBeDefined();
+      expect(freeRangeBtn.className).toBe('ghost');
+      expect(freeRangeBtn.textContent).toBe('Free Range');
+      freeRangeBtn.click();
+      expect(retried).toBe(2);
+      expect(retriedModes[1]).toBe('freerange');
+
+      store.setQueue({ state: 'queued', position: 3, totalQueued: 9, estimatedWaitSec: 35 });
+      runEndView.update();
+
+      const slotStatus = runEndHost.queryAll((e) => e.dataset.role === 'slot-status')[0]!;
+      expect(slotStatus.hidden).toBe(false);
+      expect(slotStatus.textContent).toContain('Session ended due to inactivity');
+
+      const queueStatus = runEndHost.queryAll((e) => e.dataset.role === 'queue-status')[0]!;
+      expect(queueStatus.hidden).toBe(false);
+      expect(queueStatus.textContent).toContain('#3');
+
+      const againBtn = runEndHost.queryAll((e) => e.dataset.role === 'play-again')[0]!;
+      expect(againBtn.textContent).toBe('Get Back in Line ↵');
+      againBtn.click();
+      expect(retried).toBe(3);
+      expect(retriedModes[2]).toBe('blitz');
+
+      // 2. mountFloorView #floorBanner in queued, ready, and full states
+      store.ui.runEnd = null;
+      const kpisEl = new MiniElement('div');
+      const banner = new MiniElement('div');
+      const feedEl = new MiniElement('div');
+      const floorView = mountFloorView(
+        kpisEl as unknown as HTMLElement,
+        banner as unknown as HTMLElement,
+        feedEl as unknown as HTMLElement,
+        ctx,
+      );
+
+      // Queued state
+      floorView.update();
+      expect(banner.hidden).toBe(false);
+      expect(banner.textContent).toContain('Waiting in line · #3 of 9');
+      const leaveBtn = banner.queryAll((e) => e.dataset.role === 'leave-queue')[0]!;
+      expect(leaveBtn).toBeDefined();
+      leaveBtn.click();
+      expect(leftQueue).toBe(1);
+
+      // Ready state (20s seat claim lease)
+      store.setQueue({
+        state: 'ready',
+        position: 1,
+        totalQueued: 4,
+        assignedSiteId: 'slc-2',
+        leaseExpiresAt: Date.now() + 18_000,
+      });
+      floorView.update();
+      expect(banner.textContent).toContain('Forklift Ready on SLC-2');
+      const claimBtn = banner.queryAll((e) => e.dataset.role === 'claim-seat')[0]!;
+      expect(claimBtn.textContent).toContain('🚜 Take the Wheel ↵');
+      claimBtn.click();
+      expect(claimed).toBe(1);
+
+      // Full shard state with no active queue -> "🕒 Join Waiting Line F"
+      store.setQueue(null);
+      store.limits = { maxDrivers: 32, maxPlayersPerSite: 32, maxBotsPerSite: 28 };
+      store.presence = Array.from({ length: 32 }, (_, i) => ({
+        clientId: `c-${i}`,
+        name: `Driver-${i}`,
+        vid: `DRV-${i}`,
+        points: 0,
+        role: 'driver' as const,
+      }));
+      floorView.update();
+      const joinLineBtn = banner.queryAll((e) => e.dataset.role === 'drive-floor')[0]!;
+      expect(joinLineBtn.disabled).toBe(false);
+      expect(joinLineBtn.textContent).toBe('🕒 Join Waiting Line F');
+      joinLineBtn.click();
+      expect(droveFromFloor).toBe(1);
+    } finally {
+      (globalThis as Record<string, unknown>).document = prevDoc;
+    }
+  });
+});
 

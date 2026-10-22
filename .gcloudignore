@@ -9,7 +9,10 @@ dist/
 **/dist/
 build/
 **/build/
+.wireit/
+**/.wireit/
 *.tsbuildinfo
+**/*.tsbuildinfo
 
 # Environment & Secrets (NEVER upload to Cloud Build)
 .env
@@ -37,6 +40,7 @@ coverage/
 playwright-report/
 test-results/
 tools/smoke/out/
+.ast-graph/
 *.log
 .DS_Store
 .idea/

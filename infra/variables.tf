@@ -17,21 +17,21 @@ variable "suffix" {
 }
 
 variable "site_image" {
-  description = "Container image URI for warehouse-site"
+  description = "Container image URI for warehouse-site (defaults to <region>-docker.pkg.dev/<project_id>/warehouse/site:latest when empty)"
   type        = string
-  default     = "us-central1-docker.pkg.dev/davenport-boutique/warehouse/site:latest"
+  default     = ""
 }
 
 variable "lobby_image" {
-  description = "Container image URI for warehouse-lobby"
+  description = "Container image URI for warehouse-lobby (defaults to <region>-docker.pkg.dev/<project_id>/warehouse/lobby:latest when empty)"
   type        = string
-  default     = "us-central1-docker.pkg.dev/davenport-boutique/warehouse/lobby:latest"
+  default     = ""
 }
 
 variable "loadtest_image" {
-  description = "Container image URI for loadtest-128 job"
+  description = "Container image URI for loadtest-128 job (defaults to <region>-docker.pkg.dev/<project_id>/warehouse/loadtest:latest when empty)"
   type        = string
-  default     = "us-central1-docker.pkg.dev/davenport-boutique/warehouse/loadtest:latest"
+  default     = ""
 }
 
 variable "enable_edge_lb" {
@@ -51,3 +51,29 @@ variable "firestore_database_id" {
   type        = string
   default     = "(default)"
 }
+
+variable "max_warehouses" {
+  description = "Maximum number of regional warehouse shards (including dynamic overflow warehouses)"
+  type        = number
+  default     = 8
+}
+
+variable "queue_scale_threshold" {
+  description = "Queued driver count threshold before dynamic overflow warehouse shards are provisioned"
+  type        = number
+  default     = 8
+}
+
+variable "enable_rack_lift_minigame" {
+  description = "Opt-in feature flag to enable the Rack Height Fork-Lift Minigame on regional site shards"
+  type        = bool
+  default     = false
+}
+
+variable "enable_dispatchers_call" {
+  description = "Dispatcher's Call A2UI minigame (one Gemini-proposed dispatch choice per Blitz run) on regional site shards"
+  type        = bool
+  default     = true
+}
+
+

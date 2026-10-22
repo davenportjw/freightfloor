@@ -29,6 +29,7 @@ crash.log
 crash.*.log
 *.tfvars
 *.tfvars.json
+!*.tfvars.example
 override.tf
 override.tf.json
 *_override.tf
@@ -46,3 +47,6 @@ terraform.rc
 
 # UI smoke screenshots
 tools/smoke/out/
+
+# AST GraphDB Sidecar storage & exports
+.ast-graph/

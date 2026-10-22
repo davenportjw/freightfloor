@@ -259,6 +259,59 @@ describe('render/scenery & multi-site visual themes', () => {
     expect(phxParts).not.toEqual(denParts);
     expect(abqParts).not.toEqual(denParts);
   });
+
+  it('resolves regional cargo and conveyor sprite keys and blits via Painter.sprite when atlas is loaded', async () => {
+    const {
+      drawCargoItem,
+      drawConveyorItem,
+      resolveCargoSpriteKey,
+      resolveConveyorSpriteKey,
+    } = await import('../src/render/scenery.js');
+    const { Painter } = await import('../src/render/painter.js');
+
+    expect(resolveCargoSpriteKey({ id: 3, p0: false, card: false } as any, 'den-1')).toBe('cargo_boxes_0');
+    expect(resolveCargoSpriteKey({ id: 4, p0: false, card: true } as any, 'slc-2')).toBe('cargo_plants_1');
+    expect(resolveCargoSpriteKey({ id: 5, p0: true, card: false } as any, 'phx-3')).toBe('cargo_tech_p0');
+    expect(resolveCargoSpriteKey({ id: 6, p0: false, card: false, isTransfer: true } as any, 'abq-4')).toBe(
+      'cargo_artisan_net',
+    );
+
+    expect(resolveConveyorSpriteKey(0, 'den-1')).toBe('conv_boxes_0');
+    expect(resolveConveyorSpriteKey(3, 'slc-2')).toBe('conv_plants_1');
+    expect(resolveConveyorSpriteKey(2, 'phx-3')).toBe('conv_tech_0');
+    expect(resolveConveyorSpriteKey(1, 'abq-4')).toBe('conv_artisan_1');
+
+    const drawnImages: Array<{ sx: number; sy: number; sw: number; sh: number; dx: number; dy: number; dw: number; dh: number }> = [];
+    const mockCtx: any = {
+      drawImage: (_img: unknown, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, dw: number, dh: number) => {
+        drawnImages.push({ sx, sy, sw, sh, dx, dy, dw, dh });
+      },
+    };
+    const cam: Camera = { x: 500, y: 300, zoom: 1.25 };
+    const painter = new Painter(mockCtx, cam);
+
+    // Without atlas loaded, sprite() returns false so procedural 3D primitives run
+    expect(painter.hasSprite('cargo_boxes_0')).toBe(false);
+    expect(painter.sprite('cargo_boxes_0', 10, 5, 0)).toBe(false);
+
+    // Attach atlas frames and dummy image source
+    painter.setAtlas({} as any, {
+      cargo_boxes_0: { frame: { x: 96, y: 192, w: 96, h: 96 }, anchor: { x: 0.5, y: 0.62 } },
+      conv_plants_1: { frame: { x: 192, y: 288, w: 96, h: 96 }, anchor: { x: 0.5, y: 0.62 } },
+    });
+
+    expect(painter.hasSprite('cargo_boxes_0')).toBe(true);
+    drawCargoItem(painter, 9, 5, 0, { id: 3, p0: false, card: false } as any, 'den-1');
+    drawConveyorItem(painter, 12, 8, 8.5, 3, 'slc-2');
+
+    expect(drawnImages.length).toBe(2);
+    expect(drawnImages[0]!.sx).toBe(96);
+    expect(drawnImages[0]!.sy).toBe(192);
+    expect(drawnImages[0]!.dw).toBeCloseTo(96 * 1.25, 5);
+    expect(drawnImages[1]!.sx).toBe(192);
+    expect(drawnImages[1]!.sy).toBe(288);
+  });
 });
+
 
 

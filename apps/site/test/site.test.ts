@@ -16,6 +16,7 @@ import {
   emitContractRequestIfNeeded,
   emitHazardRequestIfNeeded,
   emitTacticsRequest,
+  serialize,
 } from '@warehouse/sim';
 import { ArmorGuard } from '@warehouse/armor';
 import {
@@ -35,11 +36,16 @@ import {
   DEFAULT_TICKET_SECRET,
   MAX_DRIVERS,
   MAX_SOCKETS,
+  CHOOSE_ORDER_COOLDOWN_SEC,
   type SiteServerInstance,
   type BrainModelClient,
   type ModelArmorClient,
   type NlOrderParserClient,
 } from '../src/index.js';
+import { publicIdFor } from '../src/public-id.js';
+
+/** Site → client payloads carry opaque publicIds, never raw clientIds. */
+const pid = (clientId: string): string => publicIdFor(clientId, DEFAULT_TICKET_SECRET);
 
 interface WsClientHelper {
   ws: WebSocket;
@@ -363,10 +369,11 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     expect(server.world.vehicles.some((v) => v.id === welcome2.you.vid)).toBe(false);
   });
 
-  it('enforces 2-drivers-per-clientId cap, 32-driver site cap (spectator fallback), 300-socket cap, and 4 KB frame limit', async () => {
+  it('enforces 1-driver-per-clientId cap, 32-driver site cap (spectator fallback), 300-socket cap, and 4 KB frame limit', async () => {
     const { server, wsUrl } = await bootServer();
 
-    // Connect 3 sockets with the SAME clientId -> first 2 get driver role, 3rd becomes spectator
+    // Connect 3 sockets with the SAME clientId -> only the first drives (one seat per
+    // client, MAX_DRIVERS_PER_CLIENT=1); later tabs fall back to spectator
     const sameClientId = 'same-client-id-1234';
     const tA = makeTicket(sameClientId, 'TabOne');
     const tB = makeTicket(sameClientId, 'TabTwo');
@@ -382,7 +389,7 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     const wC = await cC.waitForType('welcome');
 
     expect(wA.you.vid).toMatch(/^DRV-\d+$/);
-    expect(wB.you.vid).toMatch(/^DRV-\d+$/);
+    expect(wB.you.vid).toBeNull(); // 2nd tab falls back to spectator
     expect(wC.you.vid).toBeNull(); // 3rd tab falls back to spectator
 
     // Close cA, cB, cC before testing 32-driver cap
@@ -421,13 +428,22 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
       right: false,
       pad: 'X'.repeat(5000),
     });
+    // Register the close waiter before sending so a fast close can't slip past it. Both the
+    // application path (checkFrameSize → error + close(1009)) and the ws protocol path
+    // (maxPayload → 1009) end in 1009; under parallel suite load the close handshake can
+    // take well over the 3 s default, so wait with a generous local timeout.
+    const frameClosePromise = overflowClient.waitForClose(15_000);
     overflowClient.ws.send(hugePayload);
-    const frameClose = await overflowClient.waitForClose();
+    const frameClose = await frameClosePromise;
     expect(frameClose.code).toBe(1009);
 
     // 300-socket cap check: simulate full server.clients set at MAX_SOCKETS
+    // Over-fill by the number of real sockets still tracked: under parallel load, sockets from
+    // earlier in the test can finish closing (and leave `clients`) while capClient connects,
+    // which would drop the set below the cap and let capClient in (then 4003 auth timeout).
     const fakeEntries: any[] = [];
-    while (server.clients.size < MAX_SOCKETS) {
+    const fillTarget = MAX_SOCKETS + server.clients.size;
+    while (server.clients.size < fillTarget) {
       const dummy = {
         authenticated: false,
         role: 'spectator',
@@ -440,7 +456,8 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
 
     const capClient = await connectWsClient(wsUrl);
     activeClients.push(capClient);
-    const capClose = await capClient.waitForClose();
+    // Same parallel-load allowance as the frame-limit close above.
+    const capClose = await capClient.waitForClose(15_000);
     expect(capClose.code).toBe(4008);
 
     for (const d of fakeEntries) {
@@ -1033,6 +1050,12 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
       });
       expect(res.executed).toBe(false);
       expect(res.code).toBe('armor_blocked');
+      // The echo carries the real armor layer / stage / filter + strike count (🛡 shield card).
+      // The local regex/heuristic filter now runs before the cloud call, so it
+      // attributes the block to its own `pi_and_jailbreak` filter.
+      expect(res.echo.reason).toBe('armor_blocked');
+      expect(res.echo.armor).toMatchObject({ layer: 2, stage: 'sanitizeUserPrompt', filter: 'pi_and_jailbreak' });
+      expect(res.echo.armor?.strikes).toBe(s);
     }
 
     // 4th attempt with a benign order from the same clientId OR same IP is muted for 15 minutes
@@ -1334,7 +1357,7 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     expect(welcomeSpec.you.vid).toBeNull();
     const presWithSpec = await clientA1.waitForType('presence');
     expect(presWithSpec.players).toHaveLength(2);
-    expect(presWithSpec.players.find((p) => p.clientId === 'sync-client-spec')?.role).toBe(
+    expect(presWithSpec.players.find((p) => p.clientId === pid('sync-client-spec'))?.role).toBe(
       'spectator',
     );
 
@@ -1349,7 +1372,7 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     clientA1.messages.length = 0;
     clientSpec.send({ type: 'takeWheel', vid: 'FL-01' });
     const presSpecDriving = await clientA1.waitForType('presence');
-    const specEntryDriving = presSpecDriving.players.find((p) => p.clientId === 'sync-client-spec');
+    const specEntryDriving = presSpecDriving.players.find((p) => p.clientId === pid('sync-client-spec'));
     expect(specEntryDriving?.role).toBe('driver');
     expect(specEntryDriving?.vid).toBe('FL-01');
 
@@ -1365,7 +1388,7 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     clientSpec.send({ type: 'release' });
     const presSpecReleased = await clientA1.waitForType('presence');
     const specEntryReleased = presSpecReleased.players.find(
-      (p) => p.clientId === 'sync-client-spec',
+      (p) => p.clientId === pid('sync-client-spec'),
     );
     expect(specEntryReleased?.role).toBe('spectator');
     expect(specEntryReleased?.vid).toBeNull();
@@ -1428,7 +1451,7 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     );
     activeClients.push(proxiedClient);
     const welcome = await proxiedClient.waitForType('welcome');
-    expect(welcome.you.clientId).toBe('proxy-test-client');
+    expect(welcome.you.clientId).toBe(pid('proxy-test-client'));
   });
 
   it('24. handles setRunMode, surge relocation offers at FREE_RANGE_SOFT_CAP, acceptRelocation (+75 pts), and carry-over ticket restoration', async () => {
@@ -1518,7 +1541,438 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     expect(slcVeh.deliveries).toBe(6);
     expect(slcVeh.streak).toBe(4);
   });
-});
 
+  it('25. streams fareOffer/rivalId for the driver and handles rate-limited chooseOrder', async () => {
+    const { server, wsUrl } = await bootServer();
+    const ticket = makeTicket('driver-choice-1234', 'Chooser');
+    const client = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(ticket)}`);
+    activeClients.push(client);
+    const welcome = await client.waitForType('welcome');
+    const myVid = welcome.you.vid!;
+    const v = server.world.vehicles.find((x) => x.id === myVid)!;
+    v.battery = 100;
+    for (let i = 0; i < 6; i++) postOrder(server.world, { force: true });
+
+    client.messages.length = 0;
+    await server.stepTick(Date.now());
+    const delta = await client.waitForType('delta');
+    const mine = delta.vehicles.find((x) => x.id === myVid)!;
+    expect(mine.fareOffer).toBeTruthy();
+    const offer = mine.fareOffer!;
+    expect(offer.options.length).toBeGreaterThan(0);
+    expect(offer.options[0]!.orderId).toBe(offer.copilotId);
+    expect(offer.reason).toMatch(/^Recommended #\d+: /);
+    expect(mine.rivalId).toBe(v.rivalId ?? null);
+    expect(mine.rivalId).toMatch(/^FL-\d+$/);
+    // AI vehicles never carry order-choice state.
+    expect(delta.vehicles.find((x) => x.id === 'FL-01')?.fareOffer).toBeUndefined();
+
+    const pick = offer.options[offer.options.length - 1]!;
+    client.send({ type: 'chooseOrder', orderId: pick.orderId });
+    client.send({ type: 'chooseOrder', orderId: pick.orderId });
+    const limited = await client.waitForType('error');
+    expect(limited.code).toBe('governance_limit');
+    await new Promise((r) => setTimeout(r, 30));
+    const o = server.world.orders.find((x) => x.id === pick.orderId)!;
+    expect(o.claimant).toBe(myVid);
+    expect(o.state).toBe('claimed');
+    expect(v.fareOffer).toBeNull();
+
+    await new Promise((r) => setTimeout(r, 300));
+    client.send({ type: 'chooseOrder', orderId: 999999 });
+    const failed = await client.waitForType('error');
+    expect(failed.code).toBe('choose_order_failed');
+    expect(failed.message).toBe('No order choice is open.');
+  });
+
+  it('26. FacilityGovernor.tryChooseOrder allows one pick per CHOOSE_ORDER_COOLDOWN_SEC per player', () => {
+    const gov = new FacilityGovernor();
+    const world = createWorld({ seed: 4, agents: 0 });
+    expect(gov.tryChooseOrder(world, 'a', 1_000).ok).toBe(true);
+    const r = gov.tryChooseOrder(world, 'a', 1_100);
+    expect(r.ok).toBe(false);
+    expect(gov.tryChooseOrder(world, 'b', 1_100).ok).toBe(true);
+    expect(gov.tryChooseOrder(world, 'a', 1_000 + CHOOSE_ORDER_COOLDOWN_SEC * 1000).ok).toBe(true);
+  });
+
+  it('27. persists ppm = max(existing, run ppm) only for non-bot humans with deliveries', async () => {
+    const { server, wsUrl } = await bootServer();
+    const store = server.persistence;
+    const join = async (cid: string, name: string, isBot = false) => {
+      const client = await connectWsClient(
+        `${wsUrl}?ticket=${encodeURIComponent(makeTicket(cid, name, { isBot }))}`,
+      );
+      activeClients.push(client);
+      const welcome = await client.waitForType('welcome');
+      return server.world.vehicles.find((x) => x.id === welcome.you.vid)!;
+    };
+    const seed = async (cid: string, name: string, ppm: number | undefined) =>
+      store.upsertPlayerStats({
+        clientId: cid,
+        name,
+        isBot: false,
+        totalDeliveries: 0,
+        totalScore: 0,
+        ...(ppm !== undefined ? { ppm } : {}),
+        shiftsPlayed: 0,
+        lastSiteId: 'den-1',
+        updatedAt: 0,
+      });
+    // Finished run of 120 game-min (= 2 real minutes) with `deliveries` pallets.
+    const finishRun = (v: (typeof server.world.vehicles)[number], deliveries: number) => {
+      v.runStartedAt = server.world.t - 120;
+      v.runEndsAt = server.world.t;
+      v.runFinished = true;
+      v.runDeliveries = deliveries;
+      v.deliveries = deliveries;
+    };
+
+    const better = await join('ppm-human-better', 'Better');
+    const worse = await join('ppm-human-worse', 'Worse');
+    const idleWithBest = await join('ppm-human-idle', 'Idle');
+    const idleFresh = await join('ppm-human-fresh', 'Fresh');
+    const bot = await join('ppm-bot-1', 'BotDriver', true);
+    expect(bot.isBot).toBe(true);
+    await seed('ppm-human-better', 'Better', 1.5);
+    await seed('ppm-human-worse', 'Worse', 4.5);
+    await seed('ppm-human-idle', 'Idle', 2);
+    finishRun(better, 6); // 6 pallets / 2 real min = 3.0 > 1.5
+    finishRun(worse, 2); // 1.0 < 4.5 → keeps the stored best
+    finishRun(idleWithBest, 0);
+    finishRun(idleFresh, 0);
+    finishRun(bot, 10);
+    bot.sPts = 50;
+
+    await server.stepTick(Date.now());
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect((await store.getPlayerStats('ppm-human-better'))?.ppm).toBe(3);
+    expect((await store.getPlayerStats('ppm-human-worse'))?.ppm).toBe(4.5);
+    // Zero-delivery runs never raise or invent a ppm; an existing best is preserved unchanged.
+    expect((await store.getPlayerStats('ppm-human-idle'))?.ppm).toBe(2);
+    expect((await store.getPlayerStats('ppm-human-fresh'))?.ppm).toBeUndefined();
+    // Bots are never given a ppm, however many pallets they ship.
+    const botDoc = await store.getPlayerStats('ppm-bot-1');
+    expect(botDoc).not.toBeNull();
+    expect(botDoc?.ppm).toBeUndefined();
+  });
+
+  it('28. restores a break-phase snapshot with enableIntervals without hanging and honors IDLE_POLICY=run', async () => {
+    const store = new InMemoryPersistenceStore();
+    const breakWorld = createWorld({ siteId: 'den-1', seed: 42, agents: 14 });
+    breakWorld.phase = 'break';
+    breakWorld.orders = [];
+    await store.saveSnapshot('den-1', serialize(breakWorld));
+
+    const stubBrain: BrainModelClient = {
+      async generateDecision() {
+        return {
+          text: JSON.stringify({
+            speed: 1.0,
+            buffer: 2,
+            respect: 0.6,
+            chargeAt: 20,
+            batch: 1,
+            note: 'Stub',
+          }),
+          tokensIn: 20,
+          tokensOut: 10,
+        };
+      },
+    };
+
+    // 1. Default IDLE_POLICY (scale-to-zero shard): restoring a 'break' snapshot with enableIntervals=true
+    // must NOT spin infinitely in the order-seeding while loop when open orders < 8.
+    const prevPolicy = process.env.IDLE_POLICY;
+    delete process.env.IDLE_POLICY;
+    try {
+      const srvBreak = await createSiteServer({
+        siteId: 'den-1',
+        persistence: store,
+        restoreFromPersistence: true,
+        enableIntervals: true,
+        brainClient: stubBrain,
+      });
+      await srvBreak.close();
+      expect(srvBreak.world.phase).toBe('break');
+
+      // 2. IDLE_POLICY='run' (like den-1 in Cloud Run Terraform): wakes restored 'break' snapshot to 'running'
+      // and seeds 8 open orders, and checkFactoryBreakPhase never puts it back to break.
+      process.env.IDLE_POLICY = 'run';
+      const srvRun = await createSiteServer({
+        siteId: 'den-1',
+        persistence: store,
+        restoreFromPersistence: true,
+        enableIntervals: true,
+        brainClient: stubBrain,
+      });
+      expect(srvRun.world.phase).toBe('running');
+      expect(srvRun.world.orders.filter((o) => o.state === 'open').length).toBeGreaterThanOrEqual(8);
+      await srvRun.checkFactoryBreakPhase(Date.now() + 600_000);
+      expect(srvRun.world.phase).toBe('running');
+      await srvRun.close();
+    } finally {
+      if (prevPolicy === undefined) {
+        delete process.env.IDLE_POLICY;
+      } else {
+        process.env.IDLE_POLICY = prevPolicy;
+      }
+    }
+  });
+
+  it('29. evicts Blitz driver to spectator on run completion, emits runEvicted, blocks takeWheel without requeue, and enforces single-use ticket jti', async () => {
+    const { server, wsUrl } = await bootServer();
+    const now = Date.now();
+    const blitzTicket = signTicket(
+      {
+        clientId: 'blitz-evict-client-1',
+        siteId: 'den-1',
+        name: 'BlitzDriver',
+        exp: now + 60_000,
+        isBot: false,
+        role: 'driver',
+        jti: 'jti-blitz-single-use-001',
+        runMode: 'blitz',
+      },
+      DEFAULT_TICKET_SECRET,
+    );
+
+    const client = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(blitzTicket)}`);
+    activeClients.push(client);
+    const welcome = await client.waitForType('welcome');
+    expect(welcome.you.role).toBe('driver');
+    const myVid = welcome.you.vid!;
+    expect(myVid).toBeTruthy();
+
+    const v = server.world.vehicles.find((x) => x.id === myVid)!;
+    expect(v).toBeDefined();
+    v.runPts = 140;
+    v.sPts = 140;
+    v.runDeliveries = 7;
+    v.deliveries = 7;
+    v.sShipped = 7;
+    v.bestStreak = 5;
+    // Advance runEndsAt so next tick completes the Blitz run
+    v.runStartedAt = server.world.t - 180;
+    v.runEndsAt = server.world.t;
+
+    await server.stepTick(Date.now());
+
+    const evictedMsg = await client.waitForType('runEvicted');
+    expect(evictedMsg.reason).toBe('run_complete');
+    expect(evictedMsg.pts).toBe(140);
+    expect(evictedMsg.shipped).toBe(7);
+    expect(evictedMsg.bestStreak).toBe(5);
+    expect(evictedMsg.runMode).toBe('blitz');
+
+    // Vehicle removed from world and driver seat freed
+    expect(server.world.vehicles.find((x) => x.id === myVid)).toBeUndefined();
+    const conn = Array.from(server.clients).find((c) => c.clientId === 'blitz-evict-client-1')!;
+    expect(conn.role).toBe('spectator');
+    expect(conn.vid).toBeNull();
+    expect(conn.evictedReason).toBe('run_complete');
+
+    // Attempting takeWheel on an evicted connection is rejected with REQUEUE_REQUIRED
+    client.send({ type: 'takeWheel', vid: 'FL-01' });
+    const wheelErr = await client.waitForType('error');
+    expect(wheelErr.code).toBe('REQUEUE_REQUIRED');
+
+    // Reusing the same jti on hello is rejected with REQUEUE_REQUIRED
+    client.send({ type: 'hello', ticket: blitzTicket });
+    const replayErr = await client.waitForType('error');
+    expect(replayErr.code).toBe('REQUEUE_REQUIRED');
+
+    // Attempting a new WS connection with the already-consumed jti is also rejected
+    const replayClient = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(blitzTicket)}`);
+    activeClients.push(replayClient);
+    const replayConnErr = await replayClient.waitForType('error');
+    expect(replayConnErr.code).toBe('REQUEUE_REQUIRED');
+  });
+
+  it('30. starts a 5-minute Free-Range contention lease at >= 26 active drivers and evicts with session_lease_expired on expiry', async () => {
+    const { server, wsUrl } = await bootServer();
+    const now = Date.now();
+
+    // Connect 1 Free-Range driver first (below soft cap -> runEndsAt is null)
+    const frTicket = signTicket(
+      {
+        clientId: 'fr-driver-main',
+        siteId: 'den-1',
+        name: 'FreeRanger',
+        exp: now + 60_000,
+        isBot: false,
+        role: 'driver',
+        jti: 'jti-fr-main',
+        runMode: 'freerange',
+      },
+      DEFAULT_TICKET_SECRET,
+    );
+    const frClient = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(frTicket)}`);
+    activeClients.push(frClient);
+    const wFr = await frClient.waitForType('welcome');
+    const frVid = wFr.you.vid!;
+    const frVeh = server.world.vehicles.find((x) => x.id === frVid)!;
+    expect(frVeh.runMode).toBe('freerange');
+    expect(frVeh.runEndsAt).toBeNull();
+
+    // Connect 25 more drivers so active drivers reach FREE_RANGE_SOFT_CAP (26)
+    for (let i = 0; i < 25; i++) {
+      const t = makeTicket(`fill-driver-${i}`, `Filler${i}`);
+      const c = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(t)}`);
+      activeClients.push(c);
+      await c.waitForType('welcome');
+    }
+
+    // Next stepTick detects contention (>= 26 drivers) and sets a 5-min (300 game-min) lease
+    await server.stepTick(Date.now());
+    expect(frVeh.runEndsAt).not.toBeNull();
+    expect(frVeh.runEndsAt! - server.world.t).toBeCloseTo(300, 0);
+
+    // Advance world clock to the lease expiry and step tick
+    frVeh.runPts = 95;
+    frVeh.sPts = 95;
+    frVeh.runDeliveries = 4;
+    frVeh.deliveries = 4;
+    frVeh.runEndsAt = server.world.t;
+    await server.stepTick(Date.now());
+
+    const evicted = await frClient.waitForType('runEvicted');
+    expect(evicted.reason).toBe('session_lease_expired');
+    expect(evicted.runMode).toBe('freerange');
+    expect(evicted.pts).toBe(95);
+    expect(server.world.vehicles.find((x) => x.id === frVid)).toBeUndefined();
+  });
+
+  it('31. evicts AFK drivers after 60s of no real movement even when spamming zero-movement input keepalives', async () => {
+    const { server, wsUrl } = await bootServer({ idleEvictionMs: 60_000 });
+    const t0 = Date.now();
+    const ticket = makeTicket('afk-driver-01', 'SleepyDriver');
+    const client = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(ticket)}`);
+    activeClients.push(client);
+    const welcome = await client.waitForType('welcome');
+    const myVid = welcome.you.vid!;
+    expect(welcome.you.role).toBe('driver');
+
+    // Send zero-movement keepalive frames (both boolean and dx/dy forms)
+    client.send({ type: 'input', seq: 1, up: false, down: false, left: false, right: false });
+    await client.waitForType('ack');
+    client.send({ type: 'input', dx: 0, dy: 0 });
+    await client.waitForType('ack');
+
+    // At +30s, driver is still present
+    await server.stepTick(t0 + 30_000);
+    expect(server.world.vehicles.find((x) => x.id === myVid)).toBeDefined();
+
+    // At +61s, zero-movement keepalives did not reset lastHumanActivityAt -> evicted for idle_timeout
+    await server.stepTick(t0 + 61_000);
+    const evicted = await client.waitForType('runEvicted');
+    expect(evicted.reason).toBe('idle_timeout');
+    expect(server.world.vehicles.find((x) => x.id === myVid)).toBeUndefined();
+  });
+
+  it('32. dynamically spawns an in-process annex world on POST /internal/wake and routes /ws?site=den-2 upgrades to it', async () => {
+    const { server, baseUrl, wsUrl } = await bootServer();
+
+    // Wake den-2 on the den-1 server instance
+    const wakeRes = await fetch(`${baseUrl}/internal/wake?site=den-2`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ immediate: true, siteId: 'den-2' }),
+    });
+    expect(wakeRes.status).toBe(200);
+    const wakeJson = (await wakeRes.json()) as { ok: boolean; siteId: string; phase: string };
+    expect(wakeJson.ok).toBe(true);
+    expect(wakeJson.siteId).toBe('den-2');
+    expect(wakeJson.phase).toBe('running');
+    expect(server.annexServers.has('den-2')).toBe(true);
+
+    // Verify heartbeat was written to persistence for den-2
+    const heartbeats = await server.persistence.getHeartbeats();
+    const den2Hb = heartbeats.find((h) => h.siteId === 'den-2');
+    expect(den2Hb).toBeDefined();
+    expect(den2Hb?.phase).toBe('running');
+
+    // Connect a driver with a den-2 ticket to the same server's /ws endpoint
+    const den2Ticket = makeTicket('annex-driver-1', 'AnnexPilot', { siteId: 'den-2' });
+    const annexClient = await connectWsClient(
+      `${wsUrl}?site=den-2&ticket=${encodeURIComponent(den2Ticket)}`,
+    );
+    activeClients.push(annexClient);
+    const welcome = await annexClient.waitForType('welcome');
+    expect(welcome.snapshot.siteId).toBe('den-2');
+    expect(welcome.you.role).toBe('driver');
+    expect(welcome.you.vid).toBeTruthy();
+
+    const annex = server.annexServers.get('den-2')!;
+    expect(annex.world.vehicles.some((v) => v.id === welcome.you.vid)).toBe(true);
+    expect(server.world.vehicles.some((v) => v.id === welcome.you.vid)).toBe(false);
+  });
+
+  it('33. starts Blitz clock immediately on sub-tick movement input, preserves sub-tick forward/reverse slices, and protects active Co-Pilot runs from idle_timeout', async () => {
+    const { server, wsUrl } = await bootServer({ idleEvictionMs: 60_000 });
+    const t0 = Date.now();
+    const ticket = makeTicket('subtick-blitz-01', 'SubTickPilot Run 1');
+    const client = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(ticket)}`);
+    activeClients.push(client);
+    const welcome = await client.waitForType('welcome');
+    const myVid = welcome.you.vid!;
+    const v = server.world.vehicles.find((x) => x.id === myVid)!;
+    expect(v.runMode).toBe('blitz');
+    expect(v.runStartedAt).toBeNull();
+    expect(v.runEndsAt).toBeNull();
+
+    // Send a brief sub-tick forward input press followed by release before stepTick runs
+    client.send({
+      type: 'input',
+      seq: 1,
+      dt: 0.05,
+      up: true,
+      down: false,
+      left: false,
+      right: false,
+    });
+    await client.waitForType('ack');
+    expect(v.runStartedAt).toBe(server.world.t);
+    expect(v.runEndsAt).toBeCloseTo(server.world.t + 180, 1);
+    expect(v.runGraceUntil).toBeNull();
+
+    client.send({
+      type: 'input',
+      seq: 2,
+      dt: 0.03,
+      up: false,
+      down: false,
+      left: false,
+      right: false,
+    });
+    await client.waitForType('ack');
+    // The sub-tick forward press slice must still be queued on v.inputQueue
+    expect(v.inputQueue?.some((q) => q.input.up === true && q.dt > 0)).toBe(true);
+
+    // Active manual Blitz run (with started runEndsAt) must NOT be evicted at 60s for idle_timeout
+    await server.stepTick(t0 + 65_000);
+    expect(server.world.vehicles.find((x) => x.id === myVid)).toBeDefined();
+
+    // Engage Co-Pilot (autopilot) and advance wall clock past another 65s
+    v.autopilot = true;
+    await server.stepTick(t0 + 130_000);
+    // Active Co-Pilot run must NOT be evicted for idle_timeout
+    expect(server.world.vehicles.find((x) => x.id === myVid)).toBeDefined();
+
+    // When the 5-minute Blitz timer reaches 00:00, the run finishes and emits runEvicted(run_complete)
+    v.runPts = 165;
+    v.sPts = 165;
+    v.runDeliveries = 6;
+    v.deliveries = 6;
+    server.world.t = v.runEndsAt!;
+    await server.stepTick(t0 + 66_000);
+
+    const evicted = await client.waitForType('runEvicted');
+    expect(evicted.reason).toBe('run_complete');
+    expect(evicted.pts).toBe(165);
+    expect(evicted.shipped).toBe(6);
+    expect(evicted.runMode).toBe('blitz');
+  });
+});
 
 

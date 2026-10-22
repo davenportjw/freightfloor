@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Freight Floor Icon">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f8fafc" />
+      <stop offset="100%" stop-color="#e2e8f0" />
+    </linearGradient>
+    <linearGradient id="amber" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24" />
+      <stop offset="100%" stop-color="#d97706" />
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#bg)" stroke="#cbd5e1" stroke-width="3" />
+  <g transform="translate(64, 72)">
+    <!-- Isometric Concrete Floor Tile -->
+    <polygon points="0,-38 54,-11 0,16 -54,-11" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.5" />
+    <polygon points="-54,-11 0,16 0,25 -54,-2" fill="#cbd5e1" />
+    <polygon points="54,-11 0,16 0,25 54,-2" fill="#94a3b8" />
+    <!-- Forklift Chassis -->
+    <g transform="translate(-14, -10)">
+      <polygon points="-6,-20 18,-8 0,1 -24,-11" fill="url(#amber)" />
+      <polygon points="-24,-11 0,1 0,14 -24,2" fill="#f59e0b" />
+      <polygon points="0,1 18,-8 18,5 0,14" fill="#b45309" />
+      <ellipse cx="-16" cy="6" rx="4.5" ry="4.5" fill="#0f172a" stroke="#475569" stroke-width="1.8" />
+      <ellipse cx="-2" cy="13" rx="4.5" ry="4.5" fill="#0f172a" stroke="#475569" stroke-width="1.8" />
+      <!-- ROPS -->
+      <path d="M-18,-12 L-16,-34 L0,-26 L-2,-4" fill="none" stroke="#334155" stroke-width="2.5" />
+      <polygon points="-6,-38 14,-28 0,-21 -20,-31" fill="#1e293b" />
+      <circle cx="-3" cy="-30" r="3" fill="#fbbf24" />
+      <!-- Mast & Forks -->
+      <line x1="13" y1="-34" x2="13" y2="8" stroke="#475569" stroke-width="3" stroke-linecap="round" />
+      <line x1="5" y1="-30" x2="5" y2="12" stroke="#64748b" stroke-width="3" stroke-linecap="round" />
+      <polygon points="5,4 30,16 34,14 9,2" fill="#64748b" />
+    </g>
+    <!-- Pallet & Carton -->
+    <g transform="translate(14, -2)">
+      <polygon points="0,-10 22,1 4,10 -18,-1" fill="#d99b52" />
+      <polygon points="-18,-1 4,10 4,14 -18,3" fill="#a66d29" />
+      <polygon points="4,10 22,1 22,5 4,14" fill="#7c4f1a" />
+      <polygon points="0,-26 20,-16 4,-8 -16,-18" fill="#eab308" />
+      <polygon points="-16,-18 4,-8 4,8 -16,-2" fill="#ca8a04" />
+      <polygon points="4,-8 20,-16 20,0 4,8" fill="#a16207" />
+      <polygon points="-12,-11 -2,-6 -2,0 -12,-5" fill="#ef4444" />
+    </g>
+  </g>
+</svg>

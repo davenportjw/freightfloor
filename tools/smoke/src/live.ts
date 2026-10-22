@@ -1,6 +1,24 @@
 import WebSocket from 'ws';
 import { Firestore } from '@google-cloud/firestore';
-import { ServerMessageSchema, type ServerMessage } from '@warehouse/protocol';
+import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
+import { GoogleAuth } from 'google-auth-library';
+import {
+  PROXY_HEADER_NAME,
+  ServerMessageSchema,
+  SiteIdSchema,
+  signProxyHeader,
+  type ServerMessage,
+  type SiteId,
+} from '@warehouse/protocol';
+
+/**
+ * How the live smoke reaches site services (which are private on Cloud Run):
+ * - `idtoken`: directly at the site's Cloud Run URL with a Google-signed ID token
+ *   (requires ADC that can mint ID tokens, i.e. a service account / metadata server).
+ * - `lobby-proxy`: through the public lobby gateway routes `/sites/:siteId/...`
+ *   (used when ADC is a user account that cannot mint ID tokens, or for local http lobbies).
+ */
+export type SiteAuthMode = 'idtoken' | 'lobby-proxy';
 
 export interface LiveSmokeOptions {
   lobbyUrl: string;
@@ -11,11 +29,26 @@ export interface LiveSmokeOptions {
   firestoreProjectId?: string;
   firestorePrefix?: string;
   silent?: boolean;
+  /** Force a site auth mode instead of auto-detecting (default: auto). */
+  siteAuthMode?: SiteAuthMode;
+  /**
+   * HMAC secret for the `x-warehouse-proxy` header. When omitted and the lobby is https,
+   * it is read from TICKET_HMAC_SECRET or Secret Manager (TICKET_HMAC_SECRET_NAME, default
+   * `projects/<project>/secrets/ticket-hmac-key/versions/latest`). Never hardcode it.
+   */
+  proxySecret?: string;
 }
 
 export interface LiveSmokeReport {
   ok: boolean;
   lobbyHealthOk: boolean;
+  /** Lobby path that answered the health check (`/healthz/` or `/api/network`). */
+  lobbyHealthPath: string;
+  siteAuthMode: SiteAuthMode | '';
+  /** Why the selected site auth mode was chosen (e.g. ID token minting error). */
+  siteAuthNote: string;
+  /** Site path that answered the health check (`/healthz/` or `/api/status`). */
+  siteHealthPath: string;
   joinedSiteId: string;
   secondarySiteId: string;
   welcomeReceived: boolean;
@@ -47,26 +80,39 @@ export function wsUrlToHttpUrl(wsUrl: string): string {
   return u.toString().replace(/\/$/, '');
 }
 
+/** Prefix every smoke-run identity uses (clientId and, where honoured, display name). */
+export const SMOKE_ID_PREFIX = 'smoke-';
+
+/**
+ * True when a `players` doc clearly belongs to a smoke run. `smoke-` is a reserved bot name
+ * prefix (`BOT_NAME_PREFIXES` in @warehouse/armor), so smoke joins keep their `smoke-…` name
+ * and the lobby writes no identity doc for them; a doc only appears when the site persists
+ * run stats (keyed by clientId). Every smoke tool therefore marks both the name and the
+ * clientId (live `smoke-client-*`, armor `smoke-armor-*`, UI `smoke-ui-*`); either matches.
+ */
+export function isSmokePlayerDoc(docId: string, data: unknown): boolean {
+  const rec = data && typeof data === 'object' ? (data as Record<string, unknown>) : {};
+  const name = typeof rec.name === 'string' ? rec.name : '';
+  const clientId = typeof rec.clientId === 'string' ? rec.clientId : '';
+  return [docId, clientId, name].some((v) => v.startsWith(SMOKE_ID_PREFIX));
+}
+
 export async function cleanupSmokePlayers(options: {
   projectId?: string;
   prefix?: string;
+  /** Collection suffix (lobby/site use `players${SUFFIX}`; '' in prod, '-stg' in staging). */
+  suffix?: string;
 }): Promise<number> {
   const projectId = options.projectId ?? process.env.GCP_PROJECT_ID ?? 'davenport-boutique';
   const prefix = options.prefix ?? process.env.FIRESTORE_PREFIX ?? '';
+  const suffix = options.suffix ?? process.env.SUFFIX ?? '';
   const db = new Firestore({ projectId });
-  const col = db.collection(`${prefix}players`);
+  const col = db.collection(`${prefix}players${suffix}`);
   const snap = await col.get();
   let deleted = 0;
   const batch = db.batch();
   for (const doc of snap.docs) {
-    const data = doc.data();
-    const name = typeof data?.name === 'string' ? data.name : '';
-    const clientId = typeof data?.clientId === 'string' ? data.clientId : '';
-    if (
-      doc.id.startsWith('smoke-') ||
-      name.startsWith('smoke-') ||
-      clientId.startsWith('smoke-')
-    ) {
+    if (isSmokePlayerDoc(doc.id, doc.data())) {
       batch.delete(doc.ref);
       deleted++;
     }
@@ -75,6 +121,212 @@ export async function cleanupSmokePlayers(options: {
     await batch.commit();
   }
   return deleted;
+}
+
+/** Resolves the `x-warehouse-proxy` HMAC secret from env or Secret Manager (never hardcoded). */
+export async function resolveProxySecret(projectId: string): Promise<string> {
+  const fromEnv =
+    process.env.TICKET_HMAC_SECRET || process.env.TICKET_HMAC_KEY || process.env.TICKET_SECRET;
+  if (fromEnv) return fromEnv;
+  const name =
+    process.env.TICKET_HMAC_SECRET_NAME ||
+    `projects/${projectId}/secrets/ticket-hmac-key/versions/latest`;
+  const client = new SecretManagerServiceClient();
+  const [version] = await client.accessSecretVersion({ name });
+  const payload = version.payload?.data
+    ? Buffer.from(version.payload.data).toString('utf8').trim()
+    : '';
+  if (payload.length < 16) {
+    throw new Error(`Secret ${name} is empty or too short to be the ticket HMAC key`);
+  }
+  return payload;
+}
+
+/** Converts a stored site URL (ws/wss/http/https, optional `/ws`) to its HTTP base URL. */
+export function siteUrlToHttpBase(raw: string): string {
+  const trimmed = raw.trim().replace(/\/ws(\?.*)?$/, '').replace(/\/$/, '');
+  if (trimmed.startsWith('wss://')) return `https://${trimmed.slice('wss://'.length)}`;
+  if (trimmed.startsWith('ws://')) return `http://${trimmed.slice('ws://'.length)}`;
+  return trimmed;
+}
+
+/**
+ * Resolves a site's direct Cloud Run base URL from SITE_URLS_JSON or the Firestore
+ * `sites` heartbeat docs. Returns null when no direct URL is known.
+ */
+export async function resolveDirectSiteHttpUrl(
+  siteId: SiteId,
+  projectId: string,
+  prefix: string,
+): Promise<string | null> {
+  const rawMap = process.env.SITE_URLS_JSON;
+  if (rawMap) {
+    const parsed = JSON.parse(rawMap) as Record<string, unknown>;
+    const v = parsed[siteId];
+    if (typeof v === 'string' && v) return siteUrlToHttpBase(v);
+  }
+  const db = new Firestore({ projectId });
+  const snap = await db.collection(`${prefix}sites`).get();
+  for (const doc of snap.docs) {
+    const data = doc.data();
+    const id = data.id || data.siteId || doc.id;
+    if (id !== siteId) continue;
+    const url =
+      typeof data.wsUrl === 'string'
+        ? data.wsUrl
+        : typeof data.url === 'string'
+          ? data.url
+          : '';
+    if (url && !url.includes('localhost') && !url.includes('127.0.0.1')) {
+      return siteUrlToHttpBase(url);
+    }
+  }
+  return null;
+}
+
+interface SiteAccessContext {
+  lobbyUrl: string;
+  mode: SiteAuthMode;
+  proxySecret?: string;
+  projectId: string;
+  prefix: string;
+  auth: GoogleAuth;
+}
+
+export interface SiteClient {
+  siteId: SiteId;
+  mode: SiteAuthMode;
+  baseUrl: string;
+  fetch(path: string, init?: { method?: string; body?: unknown }): Promise<Response>;
+}
+
+function headerValue(headers: unknown, key: string): string | undefined {
+  if (headers && typeof (headers as Headers).get === 'function') {
+    return (headers as Headers).get(key) ?? undefined;
+  }
+  const rec = headers as Record<string, string> | undefined;
+  return rec?.[key] ?? rec?.[key.toLowerCase()];
+}
+
+async function mintIdTokenHeader(auth: GoogleAuth, audience: string): Promise<string> {
+  const client = await auth.getIdTokenClient(audience);
+  const reqHeaders = await client.getRequestHeaders(audience);
+  const authz = headerValue(reqHeaders, 'Authorization');
+  if (!authz) throw new Error(`ID token client returned no Authorization header for ${audience}`);
+  return authz;
+}
+
+async function createSiteClient(ctx: SiteAccessContext, siteId: SiteId): Promise<SiteClient> {
+  let baseUrl = `${ctx.lobbyUrl}/sites/${siteId}`;
+  if (ctx.mode === 'idtoken') {
+    const direct = await resolveDirectSiteHttpUrl(siteId, ctx.projectId, ctx.prefix);
+    if (!direct) throw new Error(`No direct Cloud Run URL known for site ${siteId}`);
+    baseUrl = direct;
+  }
+  return {
+    siteId,
+    mode: ctx.mode,
+    baseUrl,
+    async fetch(path, init) {
+      const headers: Record<string, string> = {};
+      if (ctx.proxySecret) {
+        headers[PROXY_HEADER_NAME] = signProxyHeader(siteId, ctx.proxySecret);
+      }
+      if (ctx.mode === 'idtoken') {
+        headers.authorization = await mintIdTokenHeader(ctx.auth, baseUrl);
+      }
+      if (init?.body !== undefined) headers['content-type'] = 'application/json';
+      return fetch(`${baseUrl}${path}`, {
+        method: init?.method ?? 'GET',
+        headers,
+        body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
+      });
+    },
+  };
+}
+
+/**
+ * Picks the site auth mode: `idtoken` when ADC can mint an ID token for the site's direct
+ * Cloud Run URL, otherwise an explicit, logged fallback to `lobby-proxy`.
+ */
+async function selectSiteAuthMode(
+  ctx: Omit<SiteAccessContext, 'mode'>,
+  siteId: SiteId,
+  remote: boolean,
+  forced?: SiteAuthMode,
+): Promise<{ mode: SiteAuthMode; note: string }> {
+  if (forced) return { mode: forced, note: 'forced via options.siteAuthMode' };
+  if (!remote) {
+    return { mode: 'lobby-proxy', note: 'local http lobby: site checks routed via /sites/:siteId' };
+  }
+  try {
+    // Probe ID token capability first (audience = lobby origin) so user-account ADC
+    // falls back without touching Firestore.
+    await mintIdTokenHeader(ctx.auth, ctx.lobbyUrl);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { mode: 'lobby-proxy', note: `fallback: ADC cannot mint ID token (${msg.slice(0, 200)})` };
+  }
+  let direct: string | null;
+  try {
+    direct = await resolveDirectSiteHttpUrl(siteId, ctx.projectId, ctx.prefix);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      mode: 'lobby-proxy',
+      note: `fallback: could not resolve direct Cloud Run URL for ${siteId} (${msg.slice(0, 200)})`,
+    };
+  }
+  if (!direct) {
+    return {
+      mode: 'lobby-proxy',
+      note: `fallback: no direct Cloud Run URL for ${siteId} in SITE_URLS_JSON or Firestore sites docs`,
+    };
+  }
+  await mintIdTokenHeader(ctx.auth, direct);
+  return { mode: 'idtoken', note: `ADC minted ID token for ${direct}` };
+}
+
+export interface SiteAccessOptions {
+  lobbyUrl: string;
+  /** Site used to probe ID-token capability / direct URL resolution. */
+  probeSiteId: SiteId;
+  projectId?: string;
+  prefix?: string;
+  siteAuthMode?: SiteAuthMode;
+  proxySecret?: string;
+}
+
+export interface SiteAccess {
+  mode: SiteAuthMode;
+  note: string;
+  clientFor(siteId: SiteId): Promise<SiteClient>;
+}
+
+/**
+ * Shared authenticated access to private site services for every smoke tool: resolves the
+ * `x-warehouse-proxy` HMAC secret (env / Secret Manager) for https lobbies, selects
+ * `idtoken` vs explicit `lobby-proxy` fallback, and hands out per-site fetch clients.
+ */
+export async function openSiteAccess(opts: SiteAccessOptions): Promise<SiteAccess> {
+  const lobbyUrl = opts.lobbyUrl.replace(/\/$/, '');
+  const remote = lobbyUrl.startsWith('https://');
+  const projectId = opts.projectId ?? process.env.GCP_PROJECT_ID ?? 'davenport-boutique';
+  const prefix = opts.prefix ?? process.env.FIRESTORE_PREFIX ?? '';
+  const proxySecret = opts.proxySecret ?? (remote ? await resolveProxySecret(projectId) : undefined);
+  const auth = new GoogleAuth();
+  const selected = await selectSiteAuthMode(
+    { lobbyUrl, proxySecret, projectId, prefix, auth },
+    opts.probeSiteId,
+    remote,
+    opts.siteAuthMode,
+  );
+  const ctx: SiteAccessContext = { lobbyUrl, mode: selected.mode, proxySecret, projectId, prefix, auth };
+  return {
+    mode: selected.mode,
+    note: selected.note,
+    clientFor: (siteId) => createSiteClient(ctx, siteId),
+  };
 }
 
 async function connectAndWelcome(
@@ -147,6 +399,10 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
   const report: LiveSmokeReport = {
     ok: false,
     lobbyHealthOk: false,
+    lobbyHealthPath: '',
+    siteAuthMode: '',
+    siteAuthNote: '',
+    siteHealthPath: '',
     joinedSiteId: '',
     secondarySiteId: targetSecondarySite,
     welcomeReceived: false,
@@ -167,16 +423,27 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
   let primaryWs: WebSocket | null = null;
   let secondaryWs: WebSocket | null = null;
 
+  const projectId =
+    options.firestoreProjectId ?? process.env.GCP_PROJECT_ID ?? 'davenport-boutique';
+  const prefix = options.firestorePrefix ?? process.env.FIRESTORE_PREFIX ?? '';
+
   try {
-    // 1. Check <lobby-url>/healthz (fallback to /api/network when Google Frontend intercepts /healthz on *.a.run.app)
-    const lobbyHealthRes = await fetch(`${lobbyUrl}/healthz`);
-    if (lobbyHealthRes.status === 200) {
+    // 1. Check <lobby-url>/healthz/ — Google Front End intercepts the exact path `/healthz`
+    //    on *.a.run.app, so probe with a trailing slash. Older lobbies without the
+    //    `/healthz/` alias serve the SPA (HTML) or 404 there; fall back to /api/network
+    //    and record which path answered.
+    const lobbyHealthRes = await fetch(`${lobbyUrl}/healthz/`);
+    const lobbyHealthIsJson = (lobbyHealthRes.headers.get('content-type') ?? '').includes(
+      'application/json',
+    );
+    if (lobbyHealthRes.status === 200 && lobbyHealthIsJson) {
       const lobbyHealthBody = (await lobbyHealthRes.json()) as { ok?: boolean };
       if (!lobbyHealthBody.ok) {
-        throw new Error('Lobby /healthz did not return { ok: true }');
+        throw new Error('Lobby /healthz/ did not return { ok: true }');
       }
       report.lobbyHealthOk = true;
-    } else if (lobbyHealthRes.status === 404) {
+      report.lobbyHealthPath = '/healthz/';
+    } else if (lobbyHealthRes.status === 404 || lobbyHealthRes.status === 200) {
       const lobbyNetRes = await fetch(`${lobbyUrl}/api/network`);
       if (lobbyNetRes.status !== 200) {
         throw new Error(`Lobby /api/network returned HTTP ${lobbyNetRes.status}`);
@@ -186,8 +453,9 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
         throw new Error('Lobby /api/network did not return { sites: [...] }');
       }
       report.lobbyHealthOk = true;
+      report.lobbyHealthPath = '/api/network';
     } else {
-      throw new Error(`Lobby /healthz returned HTTP ${lobbyHealthRes.status}`);
+      throw new Error(`Lobby /healthz/ returned HTTP ${lobbyHealthRes.status}`);
     }
 
     // 2. Join Lobby as smoke-driver-1
@@ -254,14 +522,36 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
       report.errors.push('Expected >= 1 delta message during driving, received 0');
     }
 
-    // 5. Query <site-http-url>/healthz (or /api/status when GFE intercepts /healthz) and <site-http-url>/api/state
-    const primaryHttpUrl = wsUrlToHttpUrl(joinBody.wsUrl);
-    let siteHealthRes = await fetch(`${primaryHttpUrl}/healthz`);
+    // 5. Site checks. Site services are private on Cloud Run, so authenticate: ID token
+    //    directly to the site when ADC can mint one, else explicit fallback via the lobby
+    //    gateway (/sites/:siteId/...). Both paths carry the x-warehouse-proxy HMAC header
+    //    (secret from env/Secret Manager) required by the site's /api/* and /internal/*.
+    const primarySite = SiteIdSchema.parse(report.joinedSiteId);
+    const siteAccess = await openSiteAccess({
+      lobbyUrl,
+      probeSiteId: primarySite,
+      projectId,
+      prefix,
+      siteAuthMode: options.siteAuthMode,
+      proxySecret: options.proxySecret,
+    });
+    const selected = { mode: siteAccess.mode, note: siteAccess.note };
+    report.siteAuthMode = selected.mode;
+    report.siteAuthNote = selected.note;
+    const primarySiteClient = await siteAccess.clientFor(primarySite);
+
+    // Health: `/healthz/` (GFE intercepts exact `/healthz` on *.a.run.app); `/api/status`
+    // when the target has no trailing-slash health alias (direct site, or older lobby).
+    let siteHealthRes = await primarySiteClient.fetch('/healthz/');
+    report.siteHealthPath = '/healthz/';
     if (siteHealthRes.status === 404) {
-      siteHealthRes = await fetch(`${primaryHttpUrl}/api/status`);
+      siteHealthRes = await primarySiteClient.fetch('/api/status');
+      report.siteHealthPath = '/api/status';
     }
     if (siteHealthRes.status !== 200) {
-      report.errors.push(`Site health endpoint returned HTTP ${siteHealthRes.status}`);
+      report.errors.push(
+        `Site ${report.siteHealthPath} (${selected.mode}) returned HTTP ${siteHealthRes.status}: ${(await siteHealthRes.text()).slice(0, 200)}`,
+      );
     } else {
       const siteHealth = (await siteHealthRes.json()) as {
         ok?: boolean;
@@ -273,9 +563,11 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
       }
     }
 
-    const siteStateRes = await fetch(`${primaryHttpUrl}/api/state`);
+    const siteStateRes = await primarySiteClient.fetch('/api/state');
     if (siteStateRes.status !== 200) {
-      report.errors.push(`Site /api/state returned HTTP ${siteStateRes.status}`);
+      report.errors.push(
+        `Site /api/state (${selected.mode}) returned HTTP ${siteStateRes.status}: ${(await siteStateRes.text()).slice(0, 200)}`,
+      );
     } else {
       const siteState = (await siteStateRes.json()) as {
         ok?: boolean;
@@ -295,8 +587,9 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
 
     // 6. Cross-site transfer verification (e.g. den-1 -> slc-2)
     const netRes = await fetch(`${lobbyUrl}/api/network`);
-    let secWsUrl = '';
-    if (netRes.status === 200) {
+    if (netRes.status !== 200) {
+      report.errors.push(`Lobby /api/network returned HTTP ${netRes.status}`);
+    } else {
       const netBody = (await netRes.json()) as {
         sites?: Array<{ id: string; wsUrl?: string }>;
       };
@@ -305,20 +598,21 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
         netBody.sites?.find((s) => s.id !== report.joinedSiteId);
       if (foundSec) {
         report.secondarySiteId = foundSec.id;
-        if (foundSec.wsUrl) {
-          secWsUrl = foundSec.wsUrl;
-        }
       }
     }
 
-    // If we found secondary site wsUrl from /api/network, wake it first
-    if (secWsUrl) {
-      const secHttpWake = wsUrlToHttpUrl(secWsUrl);
-      await fetch(`${secHttpWake}/internal/wake`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ immediate: true }),
-      }).catch(() => undefined);
+    const secondarySite = SiteIdSchema.parse(report.secondarySiteId);
+    const secondarySiteClient = await siteAccess.clientFor(secondarySite);
+
+    // Wake the secondary site first (it may be idle on break).
+    const wakeRes = await secondarySiteClient.fetch('/internal/wake', {
+      method: 'POST',
+      body: { immediate: true },
+    });
+    if (wakeRes.status !== 200) {
+      report.errors.push(
+        `Secondary site POST /internal/wake (${selected.mode}) returned HTTP ${wakeRes.status}: ${(await wakeRes.text()).slice(0, 200)}`,
+      );
     }
 
     const joinSecRes = await fetch(`${lobbyUrl}/api/join`, {
@@ -338,22 +632,6 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
         wsUrl: string;
         ticket: string;
       };
-      const effectiveSecWsUrl =
-        joinSecBody.siteId === report.secondarySiteId || !secWsUrl
-          ? joinSecBody.wsUrl
-          : secWsUrl;
-      if (joinSecBody.siteId === report.secondarySiteId) {
-        report.secondarySiteId = joinSecBody.siteId;
-      }
-      const secondaryHttpUrl = wsUrlToHttpUrl(effectiveSecWsUrl);
-
-      // Ensure secondary site is awake
-      await fetch(`${secondaryHttpUrl}/internal/wake`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ immediate: true }),
-      }).catch(() => undefined);
-
       if (joinSecBody.siteId === report.secondarySiteId) {
         const secConn = await connectAndWelcome(joinSecBody.wsUrl, joinSecBody.ticket);
         secondaryWs = secConn.ws;
@@ -371,14 +649,13 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
         shippedAt: Math.floor(Date.now() / 1000),
         carrier: 'truck' as const,
       };
-      const xferRes = await fetch(`${secondaryHttpUrl}/internal/transfer`, {
+      const xferRes = await secondarySiteClient.fetch('/internal/transfer', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(transferPayload),
+        body: transferPayload,
       });
       if (xferRes.status !== 200) {
         report.errors.push(
-          `Secondary site POST /internal/transfer returned HTTP ${xferRes.status}`
+          `Secondary site POST /internal/transfer (${selected.mode}) returned HTTP ${xferRes.status}: ${(await xferRes.text()).slice(0, 200)}`
         );
       } else {
         const xferBody = (await xferRes.json()) as {
@@ -386,23 +663,29 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
           orderId?: string | null;
           transfersIn?: number;
         };
-        const secStateRes = await fetch(`${secondaryHttpUrl}/api/state`);
-        const secState = (await secStateRes.json()) as {
-          ok?: boolean;
-          snapshot?: {
-            stats?: { transfersIn?: number };
-            orders?: Array<{ id: string; fromSite?: string }>;
-          };
-        };
-        const hasTransferOrder = Boolean(
-          secState.snapshot?.orders?.some(
-            (o) => o.id === xferBody.orderId || o.fromSite === report.joinedSiteId
-          )
-        );
-        if (xferBody.ok && (hasTransferOrder || (secState.snapshot?.stats?.transfersIn ?? 0) >= 1)) {
-          report.transferVerified = true;
+        const secStateRes = await secondarySiteClient.fetch('/api/state');
+        if (secStateRes.status !== 200) {
+          report.errors.push(
+            `Secondary site /api/state (${selected.mode}) returned HTTP ${secStateRes.status}: ${(await secStateRes.text()).slice(0, 200)}`,
+          );
         } else {
-          report.errors.push('Cross-site transfer did not appear in secondary site state');
+          const secState = (await secStateRes.json()) as {
+            ok?: boolean;
+            snapshot?: {
+              stats?: { transfersIn?: number };
+              orders?: Array<{ id: string; fromSite?: string }>;
+            };
+          };
+          const hasTransferOrder = Boolean(
+            secState.snapshot?.orders?.some(
+              (o) => o.id === xferBody.orderId || o.fromSite === report.joinedSiteId
+            )
+          );
+          if (xferBody.ok && (hasTransferOrder || (secState.snapshot?.stats?.transfersIn ?? 0) >= 1)) {
+            report.transferVerified = true;
+          } else {
+            report.errors.push('Cross-site transfer did not appear in secondary site state');
+          }
         }
       }
     }
@@ -421,8 +704,11 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
           projectId: options.firestoreProjectId,
           prefix: options.firestorePrefix,
         });
-      } catch {
-        // Ignore Firestore cleanup error in environments without Firestore
+      } catch (err) {
+        // Cleanup was explicitly requested; surface the failure instead of skipping silently.
+        report.errors.push(
+          `Firestore smoke-* cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
   }

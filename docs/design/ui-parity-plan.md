@@ -292,3 +292,12 @@ What it draws:
 - Play one delivery: Drive → pick up → deliver.
 - Fold the panels to your liking, reload, and confirm your layout is remembered.
 - Try it at laptop width.
+
+### Mobile Touch Driving Controls & Compact Mobile HUD (`@media (max-width: 900px), (max-height: 500px)`)
+- **`touchControls.ts` (`#touchControls`):** Floating virtual 8-way thumbstick on the bottom-left (`[data-role="touch-stick"]`, Pointer Events with `setPointerCapture` and `touch-action: none`) plus `Boost` (`[data-role="touch-boost"]`) and contextual `Pick` / `Drop` / `Clear` / `Take #id` (`[data-role="touch-interact"]`) buttons on the bottom-right.
+- **`InputController` (`input.ts`):** Tracks keyboard (`keyHeld`) and touch (`touchHeld`) directional sets independently via `setTouchDirs` and `releaseTouch`, feeding the same 20 Hz prediction and server-reconciliation loop.
+- **Compact Mobile HUD (`styles.css`, `state.ts`, `contracts.ts`):**
+  - Uses dynamic viewport units (`100dvw`, `100dvh`) and `min-width: 0` on flex items to guarantee zero horizontal overflow on iPhone Portrait (`390×844`) and iPhone Landscape (`844×390`).
+  - Defaults `ui.contractsCollapsed = true` on mobile/coarse-pointer viewports (`defaultContractsCollapsed`) so `#contracts` renders as a compact top-right pill (`top: 8px; right: 8px`) and expands as a popover when tapped.
+  - Compacts `#run`, `.top-stack` (`#objective` + `.fare-row` at `top: 48px`), and `#dash` (`bottom: 10px`) so the center-screen forklift (`(195, 422)` in portrait, `(422, 195)` in landscape) is never obstructed.
+

@@ -31,6 +31,21 @@ describe('@warehouse/loadtest — 128-client full-flow load & Gemini pilot harne
   const sites = new Map<SiteId, { instance: SiteServerInstance; wsUrl: string }>();
   let lobbyServer: Awaited<ReturnType<typeof buildLobbyServer>>;
   let lobbyUrl = '';
+  let liveStore: LobbyStore;
+
+  /** Starts an extra lobby over the same live shards (fresh in-memory seat queue). */
+  async function startFreshLobby() {
+    const lobby = await buildLobbyServer({
+      store: liveStore,
+      ticketSecret,
+      armorClient: localArmorClient,
+      rateLimitPerMin: 2000,
+    });
+    await lobby.listen({ port: 0, host: '127.0.0.1' });
+    const addr = lobby.server.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    return { lobby, url: `http://127.0.0.1:${port}` };
+  }
 
   const localArmorClient: ModelArmorClient = {
     async sanitizeUserPrompt(text: string) {
@@ -114,17 +129,21 @@ describe('@warehouse/loadtest — 128-client full-flow load & Gemini pilot harne
     }
 
     // Live LobbyStore reading active driver & spectator counts from the 4 site shards
-    const liveStore: LobbyStore = {
+    liveStore = {
       async getSites(): Promise<StoredSiteDoc[]> {
         const now = Date.now();
         return SITE_IDS.map((id) => {
           const entry = sites.get(id)!;
           let drivers = 0;
           let spectators = 0;
+          // Mirrors the real site heartbeat (`sites/{id}.driverClientIds`): the lobby uses it so
+          // shared seat holds are not double-counted once the driver is visible on the shard.
+          const driverClientIds: string[] = [];
           for (const c of entry.instance.clients) {
             if (!c.authenticated) continue;
             if (c.role === 'driver' && c.vid !== null) {
               drivers++;
+              driverClientIds.push(c.clientId);
             } else {
               spectators++;
             }
@@ -138,6 +157,7 @@ describe('@warehouse/loadtest — 128-client full-flow load & Gemini pilot harne
             tier: entry.instance.world.UnlockedTier ?? 0,
             shipped: entry.instance.world.shipped ?? 0,
             wsUrl: entry.wsUrl,
+            driverClientIds,
             updatedAt: now,
           };
         });
@@ -290,6 +310,11 @@ describe('@warehouse/loadtest — 128-client full-flow load & Gemini pilot harne
   }, 60000);
 
   it('enforces strict no-mock error holding when Gemini pilot fails or exhausts budget', async () => {
+    // The previous test's 128 drivers just left; the lobby keeps their seats on a 45 s
+    // reconnect hold (SEAT_HOLD_MS), so a pilot joining through that lobby would be seated
+    // as a spectator and never plan. Use a lobby with a fresh seat queue so the pilots drive.
+    const { lobby: pilotLobby, url: lobbyUrl } = await startFreshLobby();
+    try {
     const failingModelClient: PilotModelClient = {
       async generatePlan() {
         throw new Error('Vertex AI transient quota error');
@@ -308,6 +333,7 @@ describe('@warehouse/loadtest — 128-client full-flow load & Gemini pilot harne
     await new Promise((r) => setTimeout(r, 120));
     await pilot.stop();
 
+    expect(pilot.metrics.role).toBe('driver');
     expect(pilot.metrics.pilotErrors).toBeGreaterThanOrEqual(1);
     expect(pilot.metrics.holdingPositionOnError).toBe(true);
     expect(pilot.metrics.plansSucceeded).toBe(0);
@@ -339,8 +365,12 @@ describe('@warehouse/loadtest — 128-client full-flow load & Gemini pilot harne
     await new Promise((r) => setTimeout(r, 80));
     await budgetPilot.stop();
 
+    expect(budgetPilot.metrics.role).toBe('driver');
     expect(budgetPilot.metrics.pilotErrors).toBeGreaterThanOrEqual(1);
     expect(budgetPilot.metrics.holdingPositionOnError).toBe(true);
+    } finally {
+      await pilotLobby.close();
+    }
   });
 
   it('cleans up loadtest-*, pilot-*, and smoke-* player docs while preserving real human players', async () => {

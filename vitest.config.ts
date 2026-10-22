@@ -14,9 +14,16 @@ export default defineConfig({
       '@warehouse/sprites': resolve(rootDir, 'tools/sprites/src/index.ts'),
       '@warehouse/lobby': resolve(rootDir, 'apps/lobby/src/index.ts'),
       '@warehouse/site': resolve(rootDir, 'apps/site/src/index.ts'),
+      '@warehouse/ast-sidecar': resolve(rootDir, 'tools/ast-sidecar/src/index.ts'),
     },
   },
   test: {
+    include: [
+      'packages/*/test/**/*.test.ts',
+      'apps/*/test/**/*.test.ts',
+      'tools/*/test/**/*.test.ts',
+      'test/**/*.test.ts',
+    ],
     testTimeout: 30000,
     hookTimeout: 30000,
     maxWorkers: 2,

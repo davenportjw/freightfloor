@@ -1,4 +1,4 @@
-import { Firestore, Timestamp } from '@google-cloud/firestore';
+import { FieldValue, Firestore, Timestamp } from '@google-cloud/firestore';
 import { PubSub } from '@google-cloud/pubsub';
 import type { ArmorReasonCode } from '@warehouse/armor';
 import type {
@@ -59,6 +59,8 @@ export interface PlayerProfileDoc {
   totalDeliveries: number;
   totalScore: number;
   bestBlitzPts?: number;
+  /** Best pallets-per-real-minute of a run (sim `computeDriverPpm`). */
+  ppm?: number;
   shiftsPlayed: number;
   lastSiteId: SiteId;
   updatedAt: number;
@@ -155,6 +157,54 @@ export interface PersistenceStore {
   getBudget(nowMs?: number): Promise<BudgetDayDoc>;
   setBudgetForTesting(overrides: Partial<BudgetDayDoc>, nowMs?: number): Promise<void>;
   publishTransfer(transfer: Transfer): Promise<string>;
+  /** Flush any locally buffered budget usage to durable storage (no-op for in-memory stores). */
+  flushUsage?(): Promise<void>;
+}
+
+/** How often buffered Gemini usage is written to the shared budget doc. */
+export const BUDGET_FLUSH_INTERVAL_MS = 10_000;
+/** Max age of the cached shared budget doc before `checkBudget` refreshes it in the background. */
+export const BUDGET_CACHE_TTL_MS = 10_000;
+
+interface UsageDelta {
+  agentSpentUsd: number;
+  agentTokensIn: number;
+  agentTokensOut: number;
+  agentCalls: number;
+  nlCommandSpentUsd: number;
+  nlTokensIn: number;
+  nlTokensOut: number;
+  nlCalls: number;
+}
+
+function emptyDelta(): UsageDelta {
+  return {
+    agentSpentUsd: 0,
+    agentTokensIn: 0,
+    agentTokensOut: 0,
+    agentCalls: 0,
+    nlCommandSpentUsd: 0,
+    nlTokensIn: 0,
+    nlTokensOut: 0,
+    nlCalls: 0,
+  };
+}
+
+function emptyBudgetDoc(key: string, nowMs: number): BudgetDayDoc {
+  return {
+    date: key,
+    agentSpentUsd: 0,
+    nlCommandSpentUsd: 0,
+    agentCapUsd: AGENT_DAILY_BUDGET_USD,
+    nlCommandCapUsd: NL_COMMAND_DAILY_BUDGET_USD,
+    agentTokensIn: 0,
+    agentTokensOut: 0,
+    nlTokensIn: 0,
+    nlTokensOut: 0,
+    agentCalls: 0,
+    nlCalls: 0,
+    updatedAt: nowMs,
+  };
 }
 
 export interface InMemoryPublishedTransfer {
@@ -306,6 +356,9 @@ export class InMemoryPersistenceStore implements PersistenceStore {
     };
   }
 
+  /** Usage is written synchronously in memory; nothing is ever buffered. */
+  async flushUsage(): Promise<void> {}
+
   async recordUsage(
     category: 'agent' | 'nlCommand',
     tokensIn: number,
@@ -366,6 +419,10 @@ export interface CloudPersistenceOptions {
   transfersTopic?: string;
   firestore?: Firestore;
   pubsub?: PubSub;
+  /** Budget usage flush cadence (default `BUDGET_FLUSH_INTERVAL_MS`); `0` disables the timer. */
+  budgetFlushIntervalMs?: number;
+  /** Budget doc cache TTL (default `BUDGET_CACHE_TTL_MS`). */
+  budgetCacheTtlMs?: number;
 }
 
 export class CloudPersistenceStore implements PersistenceStore {
@@ -374,8 +431,21 @@ export class CloudPersistenceStore implements PersistenceStore {
   private readonly suffix: string;
   private readonly transfersTopic: string;
   private readonly fallback = new InMemoryPersistenceStore();
+  private readonly budgetFlushIntervalMs: number;
+  private readonly budgetCacheTtlMs: number;
+  /** Usage recorded locally but not yet written to Firestore, keyed by UTC day. */
+  private readonly pendingUsage = new Map<string, UsageDelta>();
+  /** Usage currently being written (still counted by `checkBudget` until it lands in the cache). */
+  private readonly flushingUsage = new Map<string, UsageDelta>();
+  /** Last shared budget doc read from Firestore (all instances' flushed spend). */
+  private budgetCache: { key: string; doc: BudgetDayDoc; fetchedAtMs: number } | null = null;
+  private budgetRefresh: Promise<void> | null = null;
+  private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private flushInFlight: Promise<void> | null = null;
 
   constructor(opts: CloudPersistenceOptions = {}) {
+    this.budgetFlushIntervalMs = opts.budgetFlushIntervalMs ?? BUDGET_FLUSH_INTERVAL_MS;
+    this.budgetCacheTtlMs = opts.budgetCacheTtlMs ?? BUDGET_CACHE_TTL_MS;
     const projectId = opts.projectId ?? process.env.GCP_PROJECT_ID ?? 'davenport-boutique';
     this.suffix = opts.suffix ?? process.env.SUFFIX ?? '';
     this.transfersTopic =
@@ -509,11 +579,22 @@ export class CloudPersistenceStore implements PersistenceStore {
     return this.fallback.getJournal(siteId, limit);
   }
 
+  /**
+   * Budget check against the cached shared doc plus this instance's unflushed delta. No
+   * Firestore read on the hot path: a stale cache is refreshed in the background; only the
+   * very first check of a day (no cache yet) awaits the read.
+   */
   async checkBudget(
     category: 'agent' | 'nlCommand',
     nowMs: number = Date.now(),
   ): Promise<{ allowed: boolean; spentUsd: number; capUsd: number }> {
-    const doc = await this.getBudget(nowMs);
+    const key = formatUtcDateKey(nowMs);
+    if (!this.budgetCache || this.budgetCache.key !== key) {
+      await this.refreshBudgetCache(nowMs);
+    } else if (nowMs - this.budgetCache.fetchedAtMs >= this.budgetCacheTtlMs) {
+      void this.refreshBudgetCache(nowMs);
+    }
+    const doc = this.mergedBudget(nowMs);
     if (category === 'agent') {
       return {
         allowed: doc.agentSpentUsd < doc.agentCapUsd,
@@ -528,6 +609,11 @@ export class CloudPersistenceStore implements PersistenceStore {
     };
   }
 
+  /**
+   * Accumulates usage in memory (no Firestore transaction per call). Buffered deltas are
+   * written every `budgetFlushIntervalMs` with `FieldValue.increment`, so concurrent
+   * instances never contend on a read-modify-write and never abort.
+   */
   async recordUsage(
     category: 'agent' | 'nlCommand',
     tokensIn: number,
@@ -536,60 +622,150 @@ export class CloudPersistenceStore implements PersistenceStore {
     nowMs: number = Date.now(),
   ): Promise<BudgetDayDoc> {
     const key = formatUtcDateKey(nowMs);
-    const ref = this.db.collection(this.colName('budget')).doc(key);
     const deltaUsd = costUsd ?? estimateGeminiFlashCostUsd(tokensIn, tokensOut);
+    let pending = this.pendingUsage.get(key);
+    if (!pending) {
+      pending = emptyDelta();
+      this.pendingUsage.set(key, pending);
+    }
+    if (category === 'agent') {
+      pending.agentSpentUsd += deltaUsd;
+      pending.agentTokensIn += Math.max(0, tokensIn);
+      pending.agentTokensOut += Math.max(0, tokensOut);
+      pending.agentCalls += 1;
+    } else {
+      pending.nlCommandSpentUsd += deltaUsd;
+      pending.nlTokensIn += Math.max(0, tokensIn);
+      pending.nlTokensOut += Math.max(0, tokensOut);
+      pending.nlCalls += 1;
+    }
+    this.ensureFlushTimer();
+    return this.mergedBudget(nowMs);
+  }
 
-    await this.db.runTransaction(async (tx) => {
-      const snap = await tx.get(ref);
-      const current: BudgetDayDoc = snap.exists
-        ? (snap.data() as BudgetDayDoc)
-        : {
-            date: key,
-            agentSpentUsd: 0,
-            nlCommandSpentUsd: 0,
-            agentCapUsd: AGENT_DAILY_BUDGET_USD,
-            nlCommandCapUsd: NL_COMMAND_DAILY_BUDGET_USD,
-            agentTokensIn: 0,
-            agentTokensOut: 0,
-            nlTokensIn: 0,
-            nlTokensOut: 0,
-            agentCalls: 0,
-            nlCalls: 0,
-            updatedAt: nowMs,
-          };
-
-      current.agentCapUsd = AGENT_DAILY_BUDGET_USD;
-      current.nlCommandCapUsd = NL_COMMAND_DAILY_BUDGET_USD;
-      if (category === 'agent') {
-        current.agentSpentUsd = Number((current.agentSpentUsd + deltaUsd).toFixed(6));
-        current.agentTokensIn += Math.max(0, tokensIn);
-        current.agentTokensOut += Math.max(0, tokensOut);
-        current.agentCalls += 1;
-      } else {
-        current.nlCommandSpentUsd = Number((current.nlCommandSpentUsd + deltaUsd).toFixed(6));
-        current.nlTokensIn += Math.max(0, tokensIn);
-        current.nlTokensOut += Math.max(0, tokensOut);
-        current.nlCalls += 1;
+  /** Writes all buffered usage with atomic increments; failed deltas are re-queued. */
+  async flushUsage(): Promise<void> {
+    if (this.flushInFlight) {
+      await this.flushInFlight;
+    }
+    if (this.pendingUsage.size === 0) return;
+    const batch = [...this.pendingUsage.entries()];
+    this.pendingUsage.clear();
+    for (const [key, d] of batch) this.flushingUsage.set(key, d);
+    const run = (async () => {
+      let flushedAny = false;
+      for (const [key, d] of batch) {
+        const ref = this.db.collection(this.colName('budget')).doc(key);
+        try {
+          await ref.set(
+            {
+              date: key,
+              agentCapUsd: AGENT_DAILY_BUDGET_USD,
+              nlCommandCapUsd: NL_COMMAND_DAILY_BUDGET_USD,
+              agentSpentUsd: FieldValue.increment(Number(d.agentSpentUsd.toFixed(6))),
+              agentTokensIn: FieldValue.increment(d.agentTokensIn),
+              agentTokensOut: FieldValue.increment(d.agentTokensOut),
+              agentCalls: FieldValue.increment(d.agentCalls),
+              nlCommandSpentUsd: FieldValue.increment(Number(d.nlCommandSpentUsd.toFixed(6))),
+              nlTokensIn: FieldValue.increment(d.nlTokensIn),
+              nlTokensOut: FieldValue.increment(d.nlTokensOut),
+              nlCalls: FieldValue.increment(d.nlCalls),
+              updatedAt: Date.now(),
+            },
+            { merge: true },
+          );
+          flushedAny = true;
+        } catch (err) {
+          this.flushingUsage.delete(key);
+          const back = this.pendingUsage.get(key) ?? emptyDelta();
+          this.pendingUsage.set(key, sumDelta(back, d));
+          console.error(
+            `[persistence] budget flush failed for ${key}; re-queued: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
-      current.updatedAt = nowMs;
-      tx.set(ref, current, { merge: true });
-    });
+      if (flushedAny) {
+        // Re-read the shared doc (which now includes our increments) before dropping the
+        // in-flight delta, so `checkBudget` never under-counts in between.
+        if (this.budgetRefresh) await this.budgetRefresh;
+        await this.refreshBudgetCache(Date.now());
+      }
+      for (const [key] of batch) this.flushingUsage.delete(key);
+    })();
+    this.flushInFlight = run;
+    try {
+      await run;
+    } finally {
+      this.flushInFlight = null;
+    }
+  }
 
-    return this.fallback.recordUsage(category, tokensIn, tokensOut, costUsd, nowMs);
+  /** Stops the flush timer and writes any remaining buffered usage. */
+  async close(): Promise<void> {
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
+    await this.flushUsage();
+  }
+
+  private ensureFlushTimer(): void {
+    if (this.flushTimer || this.budgetFlushIntervalMs <= 0) return;
+    this.flushTimer = setInterval(() => {
+      void this.flushUsage().catch((err) => {
+        console.error(`[persistence] budget flush error: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }, this.budgetFlushIntervalMs);
+    this.flushTimer.unref?.();
+  }
+
+  private refreshBudgetCache(nowMs: number): Promise<void> {
+    if (this.budgetRefresh) return this.budgetRefresh;
+    const key = formatUtcDateKey(nowMs);
+    this.budgetRefresh = (async () => {
+      try {
+        const snap = await this.db.collection(this.colName('budget')).doc(key).get();
+        const data = snap.exists ? (snap.data() as Partial<BudgetDayDoc>) : null;
+        this.budgetCache = {
+          key,
+          doc: { ...emptyBudgetDoc(key, nowMs), ...(data ?? {}) },
+          fetchedAtMs: nowMs,
+        };
+      } catch (err) {
+        // Keep the previous value (or an empty doc for a new day) and retry on the next check.
+        console.error(
+          `[persistence] budget read failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        if (!this.budgetCache || this.budgetCache.key !== key) {
+          this.budgetCache = { key, doc: emptyBudgetDoc(key, nowMs), fetchedAtMs: 0 };
+        }
+      } finally {
+        this.budgetRefresh = null;
+      }
+    })();
+    return this.budgetRefresh;
+  }
+
+  /** Cached shared doc + this instance's unflushed delta, with the code-defined caps. */
+  private mergedBudget(nowMs: number): BudgetDayDoc {
+    const key = formatUtcDateKey(nowMs);
+    const base =
+      this.budgetCache && this.budgetCache.key === key
+        ? this.budgetCache.doc
+        : emptyBudgetDoc(key, nowMs);
+    let merged = { ...base };
+    const flushing = this.flushingUsage.get(key);
+    if (flushing) merged = addDelta(merged, flushing);
+    const pending = this.pendingUsage.get(key);
+    if (pending) merged = addDelta(merged, pending);
+    merged.agentCapUsd = AGENT_DAILY_BUDGET_USD;
+    merged.nlCommandCapUsd = NL_COMMAND_DAILY_BUDGET_USD;
+    return merged;
   }
 
   async getBudget(nowMs: number = Date.now()): Promise<BudgetDayDoc> {
-    const key = formatUtcDateKey(nowMs);
-    const snap = await this.db.collection(this.colName('budget')).doc(key).get();
-    if (!snap.exists) {
-      return this.fallback.getBudget(nowMs);
-    }
-    const data = snap.data() as BudgetDayDoc;
-    return {
-      ...data,
-      agentCapUsd: AGENT_DAILY_BUDGET_USD,
-      nlCommandCapUsd: NL_COMMAND_DAILY_BUDGET_USD,
-    };
+    await this.refreshBudgetCache(nowMs);
+    return this.mergedBudget(nowMs);
   }
 
   async setBudgetForTesting(
@@ -610,4 +786,31 @@ export class CloudPersistenceStore implements PersistenceStore {
       },
     });
   }
+}
+
+function sumDelta(a: UsageDelta, b: UsageDelta): UsageDelta {
+  return {
+    agentSpentUsd: a.agentSpentUsd + b.agentSpentUsd,
+    agentTokensIn: a.agentTokensIn + b.agentTokensIn,
+    agentTokensOut: a.agentTokensOut + b.agentTokensOut,
+    agentCalls: a.agentCalls + b.agentCalls,
+    nlCommandSpentUsd: a.nlCommandSpentUsd + b.nlCommandSpentUsd,
+    nlTokensIn: a.nlTokensIn + b.nlTokensIn,
+    nlTokensOut: a.nlTokensOut + b.nlTokensOut,
+    nlCalls: a.nlCalls + b.nlCalls,
+  };
+}
+
+function addDelta(doc: BudgetDayDoc, d: UsageDelta): BudgetDayDoc {
+  return {
+    ...doc,
+    agentSpentUsd: Number(((doc.agentSpentUsd ?? 0) + d.agentSpentUsd).toFixed(6)),
+    agentTokensIn: (doc.agentTokensIn ?? 0) + d.agentTokensIn,
+    agentTokensOut: (doc.agentTokensOut ?? 0) + d.agentTokensOut,
+    agentCalls: (doc.agentCalls ?? 0) + d.agentCalls,
+    nlCommandSpentUsd: Number(((doc.nlCommandSpentUsd ?? 0) + d.nlCommandSpentUsd).toFixed(6)),
+    nlTokensIn: (doc.nlTokensIn ?? 0) + d.nlTokensIn,
+    nlTokensOut: (doc.nlTokensOut ?? 0) + d.nlTokensOut,
+    nlCalls: (doc.nlCalls ?? 0) + d.nlCalls,
+  };
 }

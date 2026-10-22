@@ -89,7 +89,7 @@ export function difficultyLabel(key: string): string {
   return d?.label ?? key;
 }
 
-/** Event-type → accent colour (from the mock's TOAST_COLOR). */
+/** Event-type → accent colour (from the mock's TOAST_COLOR; used by the day-history drawer). */
 export const TOAST_COLOR: Record<string, string> = {
   card: '#7C3AED',
   shift: '#7C3AED',
@@ -115,6 +115,9 @@ export const TOAST_COLOR: Record<string, string> = {
   echo: '#2563EB',
   transfer_in: '#2563EB',
   transfer_out: '#2563EB',
+  inbound: '#0F766E',
+  stow: '#15803D',
+  xdock: '#B45309',
   phase: '#475569',
 };
 

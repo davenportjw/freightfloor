@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node tools/ast-sidecar/dist/hook-handler.js session-start",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node tools/ast-sidecar/dist/hook-handler.js post-tool-use",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

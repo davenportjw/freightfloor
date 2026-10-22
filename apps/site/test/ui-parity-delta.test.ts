@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import {
+  DISPATCH_MAX_COUNT,
   DeltaMessageSchema,
   HEAT_INTERVAL_MS,
   HEAT_MIN_VALUE,
@@ -11,6 +12,7 @@ import {
   type ServerMessage,
   type WelcomeMessage,
 } from '@warehouse/protocol';
+import { PLAYER_RATE_LIMIT_PER_MIN } from '@warehouse/armor';
 import {
   BASE_FLEET,
   FLEET_CAP,
@@ -21,17 +23,24 @@ import {
 } from '@warehouse/sim';
 import {
   AgentBrainScheduler,
+  CONE_EXPIRY_SEC,
   DEFAULT_TICKET_SECRET,
   InMemoryPersistenceStore,
   MAX_AUTONOMOUS_AGENTS,
+  MAX_CONES_PER_PLAYER,
   MAX_DRIVERS,
   MAX_DRIVERS_PER_CLIENT,
+  MAX_OPEN_P0_ON_FLOOR,
   MIN_AUTONOMOUS_AGENTS,
   SITE_LIMITS,
   createSiteServer,
   type BrainModelClient,
   type SiteServerInstance,
 } from '../src/index.js';
+import { publicIdFor } from '../src/public-id.js';
+
+/** Site → client payloads carry opaque publicIds, never raw clientIds. */
+const pid = (clientId: string): string => publicIdFor(clientId, DEFAULT_TICKET_SECRET);
 
 /**
  * Server wiring for the UI-parity protocol additions: limits, recipient-only hands,
@@ -147,6 +156,13 @@ describe('UI-parity protocol additions (server wiring)', () => {
     return [a, b];
   }
 
+  it("welcome.limits.dispatchersCall follows the site flag (off cleanly)", async () => {
+    const { wsUrl } = await boot({ enableDispatchersCall: false });
+    const c = await connect(wsUrl, 'client-ui-dc-off', 'Delta');
+    clients.push(c);
+    expect(c.welcome()!.limits.dispatchersCall).toBe(false);
+  });
+
   it('welcome carries real limits and a snapshot without other players’ hands; HTTP snapshots strip human hands', async () => {
     const { server, baseUrl, wsUrl } = await boot();
     const [a, b] = await two(wsUrl);
@@ -167,14 +183,23 @@ describe('UI-parity protocol additions (server wiring)', () => {
       tierStep: TIER_STEP,
       minAutonomousAgents: MIN_AUTONOMOUS_AGENTS,
       maxAutonomousAgents: MAX_AUTONOMOUS_AGENTS,
+      maxOpenP0: MAX_OPEN_P0_ON_FLOOR,
+      conesPerPlayer: MAX_CONES_PER_PLAYER,
+      coneTtlGameMin: CONE_EXPIRY_SEC,
+      dispatchMaxCount: DISPATCH_MAX_COUNT,
+      nlPerMinute: PLAYER_RATE_LIMIT_PER_MIN,
+      rackLiftMinigame: false,
+      dispatchersCall: true,
     });
     const cards = wb.snapshot.cards as Record<string, { ai?: boolean }>;
-    expect(cards['client-ui-bravo']).toBeDefined();
+    expect(cards[pid('client-ui-bravo')]).toBeDefined();
+    expect(cards['client-ui-bravo']).toBeUndefined();
+    expect(cards[pid('client-ui-alpha')]).toBeUndefined();
     expect(cards['client-ui-alpha']).toBeUndefined();
     for (const [k, h] of Object.entries(cards)) {
-      if (k !== 'client-ui-bravo') expect(h.ai).toBe(true);
+      if (k !== pid('client-ui-bravo')) expect(h.ai).toBe(true);
     }
-    expect(a.welcome()!.snapshot.cards['client-ui-bravo']).toBeUndefined();
+    expect(a.welcome()!.snapshot.cards[pid('client-ui-bravo')]).toBeUndefined();
 
     // Re-hello re-welcomes with the same scoping.
     b.send({ type: 'hello', ticket: 'ignored-when-authenticated' });
@@ -185,7 +210,7 @@ describe('UI-parity protocol additions (server wiring)', () => {
     }
     const rewelcome = b.messages.filter((m): m is WelcomeMessage => m.type === 'welcome')[1];
     expect(rewelcome.limits).toEqual(SITE_LIMITS);
-    expect(rewelcome.snapshot.cards['client-ui-alpha']).toBeUndefined();
+    expect(rewelcome.snapshot.cards[pid('client-ui-alpha')]).toBeUndefined();
 
     for (const path of ['/api/state', '/api/status']) {
       const json = (await (await fetch(`${baseUrl}${path}`)).json()) as {
@@ -208,9 +233,11 @@ describe('UI-parity protocol additions (server wiring)', () => {
     ] as const) {
       const d = c.deltas()[0];
       expect(DeltaMessageSchema.safeParse(d).success).toBe(true);
-      expect(Object.keys(d.hands ?? {})).toEqual([own]);
-      expect(d.hands![own]).toEqual(JSON.parse(JSON.stringify(server.world.cards[own])));
-      expect(c.raw.some((r) => r.includes(other) && r.includes('"hands"') && JSON.parse(r).hands?.[other])).toBe(false);
+      expect(Object.keys(d.hands ?? {})).toEqual([pid(own)]);
+      expect(d.hands![pid(own)]).toEqual(JSON.parse(JSON.stringify(server.world.cards[own])));
+      expect(c.raw.some((r) => JSON.parse(r).hands?.[pid(other)])).toBe(false);
+      // No raw clientId (own or other) ever appears on the wire.
+      expect(c.raw.some((r) => r.includes(other) || r.includes(own))).toBe(false);
 
       const boardRows = d.stats!.board!;
       expect(boardRows.length).toBeGreaterThan(0);

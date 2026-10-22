@@ -1,3 +1,4 @@
+import { createHmac, randomBytes } from 'node:crypto';
 import { GoogleGenAI } from '@google/genai';
 import {
   ArmorGuard,
@@ -9,12 +10,16 @@ import {
   type ArmorReasonCode,
   type ModelArmorClient,
   type ModelArmorVerdict,
+  type StrikeRecordResult,
 } from '@warehouse/armor';
 import {
   AGENT_COMMAND_RESPONSE_SCHEMA,
   AgentDirectiveSchema,
+  NL_ORDER_RESPONSE_SCHEMA,
   type A2uiScreenMessage,
   type AgentDirective,
+  type ArmorBlockStage,
+  type CommandEchoArmor,
   type CommandEchoMessage,
   type DispatchParams,
   type DispatchPriority,
@@ -103,9 +108,12 @@ export class CloudModelArmorClient implements ModelArmorClient {
   }
 
   public async sanitizeUserPrompt(text: string): Promise<ModelArmorVerdict> {
-    // Fast local pre-filter first (catches obvious injections/URIs/XSS even before network round-trip,
-    // while still calling Cloud Model Armor on all inputs that pass or in addition to local inspection)
+    // Fast local pre-filter first: a local hit is already a block, so return it without
+    // spending a Cloud Model Armor round-trip. Inputs that pass locally are screened in the cloud.
     const localVerdict = inspectPromptLocally(text);
+    if (localVerdict.flagged) {
+      return localVerdict;
+    }
     const cloudVerdict = await this.callModelArmor(':sanitizeUserPrompt', {
       userPromptData: { text },
     });
@@ -119,15 +127,14 @@ export class CloudModelArmorClient implements ModelArmorClient {
       return cloudVerdict;
     }
 
-    if (localVerdict.flagged) {
-      return localVerdict;
-    }
-
     return { flagged: false };
   }
 
   public async sanitizeModelResponse(text: string): Promise<ModelArmorVerdict> {
     const localVerdict = inspectPromptLocally(text);
+    if (localVerdict.flagged) {
+      return localVerdict;
+    }
     const cloudVerdict = await this.callModelArmor(':sanitizeModelResponse', {
       modelResponseData: { text },
     });
@@ -138,10 +145,6 @@ export class CloudModelArmorClient implements ModelArmorClient {
 
     if (cloudVerdict.flagged) {
       return cloudVerdict;
-    }
-
-    if (localVerdict.flagged) {
-      return localVerdict;
     }
 
     return { flagged: false };
@@ -331,6 +334,8 @@ export class VertexNlOrderParser implements NlOrderParserClient {
         maxOutputTokens: 220,
         thinkingConfig: { thinkingBudget: 0 },
         responseMimeType: 'application/json',
+        // Structured output: `clarify` replies must carry the model's own `dispatch` pick.
+        responseSchema: NL_ORDER_RESPONSE_SCHEMA,
         abortSignal: AbortSignal.timeout(15_000),
       },
     });
@@ -503,6 +508,15 @@ export function validateParsedAgentCommand(rawJsonText: string): ValidatedAgentC
   };
 }
 
+/** Who produced `a2uiScreen.recommendedDispatch`: Gemini (`model`) or the server keyword heuristic. */
+export type A2uiRecommendedSource = 'model' | 'heuristic';
+/** `a2uiScreen` plus the optional `recommendedSource` honesty label. */
+export type A2uiScreenWithSource = A2uiScreenMessage & { recommendedSource?: A2uiRecommendedSource };
+
+/**
+ * Keyword heuristic (regex, not a model) that pre-fills A2UI selectors when Gemini did not
+ * supply a dispatch. Screens built from it carry `recommendedSource: 'heuristic'`.
+ */
 export function inferDispatchFromText(text: string): DispatchParams {
   const lower = text.toLowerCase();
   let sourceZone: DispatchSourceZone = 'haz';
@@ -563,10 +577,11 @@ export function buildA2uiScreen(
   opts: {
     rawText?: string;
     clarifyQuestion?: string;
+    /** Gemini's own pick. When absent, selectors are pre-filled by a heuristic and labelled so. */
     recommendedDispatch?: DispatchParams;
     nowMs?: number;
   } = {},
-): A2uiScreenMessage {
+): A2uiScreenWithSource {
   const nowMs = opts.nowMs ?? Date.now();
   const activeOrders = world.orders.filter((o) => o.state !== 'done');
   const hazCount = activeOrders.filter((o) => o.slot.zone === 'Z').length;
@@ -582,6 +597,9 @@ export function buildA2uiScreen(
   const retLoad = retBay ? `${retBay.load}/${retBay.cap}` : '0/8';
   const aiCount = world.vehicles.filter((v) => !v.human && !v.isPlayerVehicle).length;
 
+  // Only a dispatch supplied by the model counts as a recommendation; anything else is the
+  // keyword heuristic (`inferDispatchFromText`) or a zone-count default and is labelled as such.
+  const recommendedSource: A2uiRecommendedSource = opts.recommendedDispatch ? 'model' : 'heuristic';
   const rec: DispatchParams =
     opts.recommendedDispatch ??
     (opts.rawText
@@ -606,7 +624,9 @@ export function buildA2uiScreen(
     screenId: `a2ui-${world.siteId}-${nowMs}`,
     title: 'Floor Dispatch & Objective Clarification',
     subtitle:
-      'Live A2UI control surface · Route specialty districts to Returns & QA or East shipping bays',
+      recommendedSource === 'model'
+        ? 'Live A2UI control surface · Selections suggested by Gemini · Route specialty districts to Returns & QA or East shipping bays'
+        : 'Live A2UI control surface · Selections pre-filled by keyword match (not Gemini) · Route specialty districts to Returns & QA or East shipping bays',
     rawText: opts.rawText ? sanitiseOutputText(opts.rawText, 120) : undefined,
     clarifyQuestion: opts.clarifyQuestion
       ? sanitiseOutputText(opts.clarifyQuestion, 160)
@@ -752,6 +772,7 @@ export function buildA2uiScreen(
       },
     ],
     recommendedDispatch: rec,
+    recommendedSource,
     cooldownLeftMs: governor.getDispatchCooldownLeftMs(world, clientId, nowMs),
   };
 }
@@ -774,6 +795,43 @@ export interface NlOrderPipelineOptions {
   guard?: ArmorGuard;
   governor: FacilityGovernor;
   persistence: PersistenceStore;
+  /**
+   * Secret salt for `ipHash` in the armor journal (the server passes its ticket HMAC secret).
+   * When omitted, a random per-process salt is used. Raw IPs are never stored.
+   */
+  ipHashSalt?: string;
+}
+
+type GateResult =
+  | { ok: true }
+  | { ok: false; reason: ArmorReasonCode; detail: string; armor?: CommandEchoArmor };
+
+/** Salted SHA-256 (HMAC-SHA256 keyed by `salt`) of a client IP, hex-encoded. */
+export function hashClientIp(ip: string, salt: string): string {
+  return createHmac('sha256', salt).update(`ip:${ip}`).digest('hex');
+}
+
+/** Pipeline layer number for each Model Armor screening stage (see the 7-layer pipeline docs). */
+const ARMOR_STAGE_LAYER: Record<ArmorBlockStage, number> = {
+  sanitizeUserPrompt: 2,
+  sanitizeModelResponse: 6,
+};
+
+/**
+ * `commandEcho.armor` for a real Model Armor block: the stage/layer that flagged it, the verdict's
+ * own filter category (`unknown` when the verdict carried none) and the sender's strike count.
+ */
+export function armorBlockInfo(
+  stage: ArmorBlockStage,
+  verdict: Pick<ModelArmorVerdict, 'filter'>,
+  strike?: { strikes: number; muted: boolean },
+): CommandEchoArmor {
+  return {
+    layer: ARMOR_STAGE_LAYER[stage],
+    stage,
+    filter: verdict.filter ?? 'unknown',
+    ...(strike ? { strikes: strike.strikes, muted: strike.muted } : {}),
+  };
 }
 
 /**
@@ -785,6 +843,7 @@ export class NlOrderPipeline {
   public readonly guard: ArmorGuard;
   private readonly governor: FacilityGovernor;
   private readonly persistence: PersistenceStore;
+  private readonly ipHashSalt: string;
 
   constructor(opts: NlOrderPipelineOptions) {
     this.armorClient = opts.armorClient ?? new CloudModelArmorClient();
@@ -792,6 +851,139 @@ export class NlOrderPipeline {
     this.guard = opts.guard ?? new ArmorGuard();
     this.governor = opts.governor;
     this.persistence = opts.persistence;
+    // Without a configured secret, use a random per-process salt: still never the raw IP.
+    this.ipHashSalt = opts.ipHashSalt || randomBytes(32).toString('hex');
+  }
+
+  /** Salted SHA-256 (HMAC) of a client IP for the armor journal; raw IPs are never persisted. */
+  public hashIp(ip: string): string {
+    return hashClientIp(ip, this.ipHashSalt);
+  }
+
+  /** Record nlCommand spend without letting a ledger failure surface as a parser failure. */
+  private async recordUsageSafe(tokensIn: number, tokensOut: number, nowMs: number): Promise<void> {
+    try {
+      await this.persistence.recordUsage('nlCommand', tokensIn, tokensOut, undefined, nowMs);
+    } catch (err) {
+      console.error(
+        `[armor-pipeline] nlCommand usage record failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  private async journalInputBlock(
+    world: World,
+    clientId: string,
+    ip: string,
+    cleanText: string,
+    nowMs: number,
+    journalPrefix: string,
+  ): Promise<StrikeRecordResult> {
+    const strikeInfo = this.guard.recordStrike(clientId, ip, nowMs);
+    const siteId = world.siteId as SiteId;
+    await this.persistence.appendArmorJournal(siteId, {
+      id: `${journalPrefix}-${siteId}-${nowMs}-${Math.random().toString(36).slice(2, 7)}`,
+      siteId,
+      clientId,
+      ipHash: this.hashIp(ip),
+      code: 'armor_blocked',
+      layer: 'sanitizeUserPrompt',
+      strikes: strikeInfo.strikes,
+      muted: strikeInfo.muted,
+      mutedUntil: strikeInfo.mutedUntil,
+      inputPreview: sanitiseOutputText(cleanText, 80),
+      createdAt: nowMs,
+      expireAt: nowMs + JOURNAL_TTL_MS,
+    });
+    return strikeInfo;
+  }
+
+  /**
+   * Cheap-first gate run before any paid call: local filter → per-player/IP rate limit and
+   * mute → daily budget → parser concurrency slot. On `ok` the caller holds an NL slot and
+   * must release it with `governor.releaseNlSlot()`.
+   */
+  private async preModelGate(p: {
+    world: World;
+    clientId: string;
+    ip: string;
+    cleanText: string;
+    nowMs: number;
+    journalPrefix: string;
+    blockedMsg: string;
+    budgetMsg: string;
+    busyMsg: string;
+  }): Promise<GateResult> {
+    // Layer 1B: deterministic local injection/URI/RAI filter; a hit never reaches the cloud.
+    const local = inspectPromptLocally(p.cleanText);
+    if (local.flagged) {
+      const strikeInfo = await this.journalInputBlock(
+        p.world,
+        p.clientId,
+        p.ip,
+        p.cleanText,
+        p.nowMs,
+        p.journalPrefix,
+      );
+      return {
+        ok: false,
+        reason: 'armor_blocked',
+        detail: local.detail ?? p.blockedMsg,
+        armor: armorBlockInfo('sanitizeUserPrompt', local, strikeInfo),
+      };
+    }
+
+    // Per-player (6/min), per-IP (30/min), and 3-strike mute check
+    const rateCheck = this.guard.consumeRequest(p.clientId, p.ip, p.nowMs);
+    if (!rateCheck.ok) {
+      return { ok: false, reason: rateCheck.code, detail: rateCheck.message };
+    }
+
+    // Daily nlCommand budget
+    const budget = await this.persistence.checkBudget('nlCommand', p.nowMs);
+    if (!budget.allowed) {
+      return { ok: false, reason: 'budget_exhausted', detail: p.budgetMsg };
+    }
+
+    // Concurrency cap (max in-flight nlCommand calls per site)
+    if (!this.governor.tryAcquireNlSlot()) {
+      return { ok: false, reason: 'rate_limited', detail: p.busyMsg };
+    }
+    return { ok: true };
+  }
+
+  /** Layer 2: Cloud Model Armor `:sanitizeUserPrompt` (fail-closed). */
+  private async cloudInputScreen(p: {
+    world: World;
+    clientId: string;
+    ip: string;
+    cleanText: string;
+    nowMs: number;
+    journalPrefix: string;
+    blockedMsg: string;
+    unavailableMsg: string;
+  }): Promise<GateResult> {
+    const verdict = await this.armorClient.sanitizeUserPrompt(p.cleanText);
+    if (verdict.reasonCode === 'armor_unavailable') {
+      return { ok: false, reason: 'armor_unavailable', detail: verdict.detail ?? p.unavailableMsg };
+    }
+    if (verdict.flagged) {
+      const strikeInfo = await this.journalInputBlock(
+        p.world,
+        p.clientId,
+        p.ip,
+        p.cleanText,
+        p.nowMs,
+        p.journalPrefix,
+      );
+      return {
+        ok: false,
+        reason: 'armor_blocked',
+        detail: verdict.detail ?? p.blockedMsg,
+        armor: armorBlockInfo('sanitizeUserPrompt', verdict, strikeInfo),
+      };
+    }
+    return { ok: true };
   }
 
   public getArmorBlocks1h(nowMs: number = Date.now()): number {
@@ -814,6 +1006,7 @@ export class NlOrderPipeline {
       cleanText: string = typeof rawText === 'string' ? rawText.slice(0, 200) : '',
       parsed: unknown = null,
       a2ui?: A2uiScreenMessage,
+      armor?: CommandEchoArmor,
     ): NlCommandOutcome => {
       const safeEchoText = sanitiseOutputText(cleanText, 120);
       return {
@@ -830,6 +1023,7 @@ export class NlOrderPipeline {
           parsed,
           executed: false,
           reason,
+          ...(armor ? { armor } : {}),
         },
       };
     };
@@ -841,65 +1035,39 @@ export class NlOrderPipeline {
     }
     const cleanText = hygiene.text;
 
-    // Layer 1B: Per-player (6/min), per-IP (30/min), and 3-strike mute check
-    const rateCheck = this.guard.consumeRequest(clientId, ip, nowMs);
-    if (!rateCheck.ok) {
-      return fail(rateCheck.code, rateCheck.message, cleanText);
-    }
-
-    // Layer 2: Google Cloud Model Armor `:sanitizeUserPrompt` (Fail-Closed)
-    const inputVerdict = await this.armorClient.sanitizeUserPrompt(cleanText);
-    if (inputVerdict.reasonCode === 'armor_unavailable') {
-      return fail(
-        'armor_unavailable',
-        inputVerdict.detail ?? 'Command bar temporarily unavailable.',
-        cleanText,
-      );
-    }
-    if (inputVerdict.flagged) {
-      const strikeInfo = this.guard.recordStrike(clientId, ip, nowMs);
-      const siteId = world.siteId as SiteId;
-      await this.persistence.appendArmorJournal(siteId, {
-        id: `armor-${siteId}-${nowMs}-${Math.random().toString(36).slice(2, 7)}`,
-        siteId,
-        clientId,
-        ipHash: ip,
-        code: 'armor_blocked',
-        layer: 'sanitizeUserPrompt',
-        strikes: strikeInfo.strikes,
-        muted: strikeInfo.muted,
-        mutedUntil: strikeInfo.mutedUntil,
-        inputPreview: sanitiseOutputText(cleanText, 80),
-        createdAt: nowMs,
-        expireAt: nowMs + JOURNAL_TTL_MS,
-      });
-      return fail(
-        'armor_blocked',
-        inputVerdict.detail ?? 'Order blocked by prompt armor.',
-        cleanText,
-      );
-    }
-
-    // Daily $1.50 nlCommand budget check
-    const budget = await this.persistence.checkBudget('nlCommand', nowMs);
-    if (!budget.allowed) {
-      return fail(
-        'budget_exhausted',
-        'Daily typed-order budget exhausted; use quick-action buttons.',
-        cleanText,
-      );
-    }
-
-    // Concurrency cap (max 4 in-flight nlCommand calls per site)
-    if (!this.governor.tryAcquireNlSlot()) {
-      return fail(
-        'rate_limited',
-        'Order parser is busy; please try again in a moment.',
-        cleanText,
-      );
+    // Layers 1B-2 in cost order: local filter → rate limit → budget → concurrency slot.
+    const gate = await this.preModelGate({
+      world,
+      clientId,
+      ip,
+      cleanText,
+      nowMs,
+      journalPrefix: 'armor',
+      blockedMsg: 'Order blocked by prompt armor.',
+      budgetMsg: 'Daily typed-order budget exhausted; use quick-action buttons.',
+      busyMsg: 'Order parser is busy; please try again in a moment.',
+    });
+    if (!gate.ok) {
+      return fail(gate.reason, gate.detail, cleanText, null, undefined, gate.armor);
     }
 
     try {
+      // Layer 2: Google Cloud Model Armor `:sanitizeUserPrompt` (Fail-Closed), only after the
+      // cheap local checks pass and a parser slot is held.
+      const cloud = await this.cloudInputScreen({
+        world,
+        clientId,
+        ip,
+        cleanText,
+        nowMs,
+        journalPrefix: 'armor',
+        blockedMsg: 'Order blocked by prompt armor.',
+        unavailableMsg: 'Command bar temporarily unavailable.',
+      });
+      if (!cloud.ok) {
+        return fail(cloud.reason, cloud.detail, cleanText, null, undefined, cloud.armor);
+      }
+
       // Layer 3: Nonce-fenced least-privilege Gemini 3.5 Flash-Lite parser
       const limitsSummary = this.governor.getPlayerLimitsSummary(world, clientId, nowMs);
       const fenced = buildFencedOrderPrompt(cleanText, limitsSummary);
@@ -918,13 +1086,8 @@ export class NlOrderPipeline {
         );
       }
 
-      await this.persistence.recordUsage(
-        'nlCommand',
-        parserRes.tokensIn,
-        parserRes.tokensOut,
-        undefined,
-        nowMs,
-      );
+      // Usage is recorded once, outside any model call/retry; a ledger failure never re-calls Gemini.
+      await this.recordUsageSafe(parserRes.tokensIn, parserRes.tokensOut, nowMs);
 
       // Layer 4: Typed validation against strict NlOrderParseSchema + map bounds
       const validated = validateParsedOrder(parserRes.text, {
@@ -965,7 +1128,7 @@ export class NlOrderPipeline {
           id: `armor-out-${siteId}-${nowMs}-${Math.random().toString(36).slice(2, 7)}`,
           siteId,
           clientId,
-          ipHash: ip,
+          ipHash: this.hashIp(ip),
           code: 'armor_blocked',
           layer: 'sanitizeModelResponse',
           strikes: strikeInfo.strikes,
@@ -980,15 +1143,19 @@ export class NlOrderPipeline {
           outputVerdict.detail ?? 'Model output blocked by prompt armor.',
           cleanText,
           command,
+          undefined,
+          armorBlockInfo('sanitizeModelResponse', outputVerdict, strikeInfo),
         );
       }
 
-      // If Gemini requested interactive clarification (A2UI), return the live A2UI screen
+      // If Gemini requested interactive clarification (A2UI), return the live A2UI screen.
+      // The recommendation is only labelled as Gemini's when the model actually supplied it;
+      // otherwise the selectors are pre-filled by the keyword heuristic and marked as such.
       if (command.action === 'clarify') {
         const a2ui = buildA2uiScreen(world, this.governor, clientId, {
           rawText: cleanText,
           clarifyQuestion: command.clarifyQuestion,
-          recommendedDispatch: command.dispatch ?? inferDispatchFromText(cleanText),
+          recommendedDispatch: command.dispatch,
           nowMs,
         });
         const safeParsed = {
@@ -1077,6 +1244,7 @@ export class NlOrderPipeline {
       detail: string,
       cleanText: string = typeof rawText === 'string' ? rawText.slice(0, 200) : '',
       parsed: unknown = null,
+      armor?: CommandEchoArmor,
     ): AgentCommandOutcome => {
       const safeEchoText = sanitiseOutputText(cleanText, 120);
       return {
@@ -1092,6 +1260,7 @@ export class NlOrderPipeline {
           parsed,
           executed: false,
           reason,
+          ...(armor ? { armor } : {}),
         },
       };
     };
@@ -1103,65 +1272,38 @@ export class NlOrderPipeline {
     }
     const cleanText = hygiene.text;
 
-    // Layer 1B: Rate limit & 3-strike mute check
-    const rateCheck = this.guard.consumeRequest(clientId, ip, nowMs);
-    if (!rateCheck.ok) {
-      return fail(rateCheck.code, rateCheck.message, cleanText);
-    }
-
-    // Layer 2: Cloud Model Armor `:sanitizeUserPrompt` (Fail-Closed)
-    const inputVerdict = await this.armorClient.sanitizeUserPrompt(cleanText);
-    if (inputVerdict.reasonCode === 'armor_unavailable') {
-      return fail(
-        'armor_unavailable',
-        inputVerdict.detail ?? 'Co-Pilot command bar temporarily unavailable.',
-        cleanText,
-      );
-    }
-    if (inputVerdict.flagged) {
-      const strikeInfo = this.guard.recordStrike(clientId, ip, nowMs);
-      const siteId = world.siteId as SiteId;
-      await this.persistence.appendArmorJournal(siteId, {
-        id: `armor-copilot-${siteId}-${nowMs}-${Math.random().toString(36).slice(2, 7)}`,
-        siteId,
-        clientId,
-        ipHash: ip,
-        code: 'armor_blocked',
-        layer: 'sanitizeUserPrompt',
-        strikes: strikeInfo.strikes,
-        muted: strikeInfo.muted,
-        mutedUntil: strikeInfo.mutedUntil,
-        inputPreview: sanitiseOutputText(cleanText, 80),
-        createdAt: nowMs,
-        expireAt: nowMs + JOURNAL_TTL_MS,
-      });
-      return fail(
-        'armor_blocked',
-        inputVerdict.detail ?? 'Co-Pilot directive blocked by prompt armor.',
-        cleanText,
-      );
-    }
-
-    // Budget check
-    const budget = await this.persistence.checkBudget('nlCommand', nowMs);
-    if (!budget.allowed) {
-      return fail(
-        'budget_exhausted',
-        'Daily typed-order budget exhausted; use Agent Designer controls.',
-        cleanText,
-      );
-    }
-
-    // Concurrency cap
-    if (!this.governor.tryAcquireNlSlot()) {
-      return fail(
-        'rate_limited',
-        'Co-Pilot parser is busy; please try again in a moment.',
-        cleanText,
-      );
+    // Layers 1B-2 in cost order: local filter → rate limit → budget → concurrency slot.
+    const gate = await this.preModelGate({
+      world,
+      clientId,
+      ip,
+      cleanText,
+      nowMs,
+      journalPrefix: 'armor-copilot',
+      blockedMsg: 'Co-Pilot directive blocked by prompt armor.',
+      budgetMsg: 'Daily typed-order budget exhausted; use Agent Designer controls.',
+      busyMsg: 'Co-Pilot parser is busy; please try again in a moment.',
+    });
+    if (!gate.ok) {
+      return fail(gate.reason, gate.detail, cleanText, null, gate.armor);
     }
 
     try {
+      // Layer 2: Cloud Model Armor `:sanitizeUserPrompt` (Fail-Closed)
+      const cloud = await this.cloudInputScreen({
+        world,
+        clientId,
+        ip,
+        cleanText,
+        nowMs,
+        journalPrefix: 'armor-copilot',
+        blockedMsg: 'Co-Pilot directive blocked by prompt armor.',
+        unavailableMsg: 'Co-Pilot command bar temporarily unavailable.',
+      });
+      if (!cloud.ok) {
+        return fail(cloud.reason, cloud.detail, cleanText, null, cloud.armor);
+      }
+
       const vehicleContext: Record<string, unknown> = {
         vehicle: vehicle.id,
         type: vehicle.type,
@@ -1196,13 +1338,7 @@ export class NlOrderPipeline {
         );
       }
 
-      await this.persistence.recordUsage(
-        'nlCommand',
-        parserRes.tokensIn,
-        parserRes.tokensOut,
-        undefined,
-        nowMs,
-      );
+      await this.recordUsageSafe(parserRes.tokensIn, parserRes.tokensOut, nowMs);
 
       // Layer 4: Typed validation against AgentDirectiveSchema
       const validated = validateParsedAgentCommand(parserRes.text);
@@ -1230,7 +1366,7 @@ export class NlOrderPipeline {
           id: `armor-copilot-out-${siteId}-${nowMs}-${Math.random().toString(36).slice(2, 7)}`,
           siteId,
           clientId,
-          ipHash: ip,
+          ipHash: this.hashIp(ip),
           code: 'armor_blocked',
           layer: 'sanitizeModelResponse',
           strikes: strikeInfo.strikes,
@@ -1244,6 +1380,8 @@ export class NlOrderPipeline {
           'armor_blocked',
           outputVerdict.detail ?? 'Model output blocked by prompt armor.',
           cleanText,
+          null,
+          armorBlockInfo('sanitizeModelResponse', outputVerdict, strikeInfo),
         );
       }
 

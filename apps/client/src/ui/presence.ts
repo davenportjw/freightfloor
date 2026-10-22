@@ -86,16 +86,26 @@ export function mountPresence(zone: HTMLElement, ctx: UiCtx): UiModule & { colla
     el('span', { class: 'label', text: 'Your Callsign' }),
     assignedBadgeVal,
   ]);
+  // The lobby-issued resume code (`JoinResponse.resumeToken`): the only thing that restores this
+  // identity on another browser. Shown with a copy button; hidden until the lobby issues one.
+  const codeVal = el('code', { class: 'num', attrs: { 'data-role': 'resume-code' }, text: DASH });
+  const copyBtn = button('Copy', 'btn small', () => void copyCode(), 'Copy your resume code');
+  const codeRow = el('div', { class: 'assigned-callsign-row', attrs: { 'data-role': 'resume-code-row', hidden: '' } }, [
+    el('span', { class: 'label', text: 'Your resume code' }),
+    codeVal,
+    copyBtn,
+  ]);
   const input = el('input', {
     class: 'text-input',
     attrs: {
       maxlength: '64',
-      placeholder: 'Resume callsign (e.g. Turbo-Forklift)',
-      'aria-label': 'Resume assigned callsign',
+      autocomplete: 'off',
+      placeholder: 'Find existing callsign or paste wr1_…',
+      'aria-label': 'Find an existing callsign or paste a resume code',
     },
   });
   const err = el('div', { class: 'form-error', attrs: { role: 'alert' } });
-  const resumeBtn = button('Resume Callsign', 'btn', () => void submit());
+  const resumeBtn = button('Resume', 'btn', () => void submit());
   const form = el('form', { class: 'rename-form' }, [input, resumeBtn]);
   form.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -103,11 +113,12 @@ export function mountPresence(zone: HTMLElement, ctx: UiCtx): UiModule & { colla
   });
   const hint = el('div', {
     class: 'hint',
-    text: 'Callsigns are auto-assigned by the lobby to keep the leaderboard clean. Enter a previous callsign above to resume your stats.',
+    text: 'Callsigns are assigned by the lobby (new custom names cannot be added). Enter an existing callsign or paste your resume code to switch to an existing driver.',
   });
   const body = el('div', { class: 'pill-body', attrs: { hidden: '' } }, [
     listEl,
     assignedRow,
+    codeRow,
     form,
     err,
     hint,
@@ -123,6 +134,17 @@ export function mountPresence(zone: HTMLElement, ctx: UiCtx): UiModule & { colla
       if (!res) input.value = '';
     } finally {
       resumeBtn.disabled = false;
+    }
+  }
+  async function copyCode(): Promise<void> {
+    const code = ctx.store.resumeCode;
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      copyBtn.textContent = 'Copied';
+    } catch (e) {
+      // Clipboard blocked (permissions / insecure context): say so; the code stays selectable.
+      err.textContent = `Could not copy: ${e instanceof Error ? e.message : String(e)}. Select the code and copy it.`;
     }
   }
   function setOpen(open: boolean): void {
@@ -142,6 +164,12 @@ export function mountPresence(zone: HTMLElement, ctx: UiCtx): UiModule & { colla
       const v = presenceView(ctx.store);
       meEl.textContent = v.me;
       assignedBadgeVal.textContent = ctx.store.you?.name ?? DASH;
+      const code = ctx.store.resumeCode;
+      codeRow.hidden = !code;
+      if (code && codeVal.textContent !== code) {
+        codeVal.textContent = code;
+        copyBtn.textContent = 'Copy';
+      }
       capEl.textContent = `· ${v.capText}`;
       capEl.classList.toggle('bad', v.full);
       list.render(JSON.stringify(v.players), () =>

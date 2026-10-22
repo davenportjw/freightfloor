@@ -9,9 +9,65 @@ export const TILE_QUANT_SCALE = 32;
 // 1. Site IDs, Phases, Difficulty & Constants
 // ============================================================================
 
-export const SITE_IDS = ['den-1', 'slc-2', 'phx-3', 'abq-4'] as const;
-export const SiteIdSchema = z.enum(SITE_IDS);
+export const BASE_SITE_IDS = ['den-1', 'slc-2', 'phx-3', 'abq-4'] as const;
+export const SITE_IDS: readonly string[] = BASE_SITE_IDS;
+export type BaseSiteId = (typeof BASE_SITE_IDS)[number];
+
+export const OVERFLOW_SITE_IDS = [
+  'den-2', 'den-3', 'den-4', 'den-5',
+  'slc-3', 'slc-4', 'slc-5',
+  'phx-4', 'phx-5',
+  'abq-5', 'abq-6',
+] as const;
+
+export function getOverflowSiteIds(maxPerRegion = 6): string[] {
+  const baseNums: Record<'den' | 'slc' | 'phx' | 'abq', number> = {
+    den: 1,
+    slc: 2,
+    phx: 3,
+    abq: 4,
+  };
+  const result: string[] = [];
+  for (const prefix of ['den', 'slc', 'phx', 'abq'] as const) {
+    const start = baseNums[prefix] + 1;
+    for (let n = start; n <= maxPerRegion; n++) {
+      result.push(`${prefix}-${n}`);
+    }
+  }
+  return result;
+}
+
+export const SiteIdSchema = z
+  .string()
+  .regex(/^(den|slc|phx|abq)-[1-9]\d*$/, 'Invalid regional site ID');
 export type SiteId = z.infer<typeof SiteIdSchema>;
+
+export function getRegionPrefix(siteId: string): 'den' | 'slc' | 'phx' | 'abq' {
+  const prefix = siteId.split('-')[0]?.toLowerCase();
+  if (prefix === 'den' || prefix === 'slc' || prefix === 'phx' || prefix === 'abq') {
+    return prefix;
+  }
+  return 'den';
+}
+
+export function getCanonicalBaseSiteId(siteId: string): BaseSiteId {
+  const prefix = getRegionPrefix(siteId);
+  switch (prefix) {
+    case 'slc':
+      return 'slc-2';
+    case 'phx':
+      return 'phx-3';
+    case 'abq':
+      return 'abq-4';
+    case 'den':
+    default:
+      return 'den-1';
+  }
+}
+
+export function isValidSiteId(id: string): id is SiteId {
+  return SiteIdSchema.safeParse(id).success;
+}
 
 export const PHASES = ['running', 'winding_down', 'break', 'resuming'] as const;
 export const PhaseSchema = z.enum(PHASES);
@@ -83,11 +139,14 @@ export const DISPATCH_MODES = ['reroute_and_spawn', 'reroute_only', 'spawn_only'
 export const DispatchModeSchema = z.enum(DISPATCH_MODES);
 export type DispatchMode = z.infer<typeof DispatchModeSchema>;
 
+/** Max orders one `dispatch` Floor order may reroute/spawn (schema cap + sim clamp). */
+export const DISPATCH_MAX_COUNT = 8;
+
 export const DispatchParamsSchema = z.object({
   sourceZone: DispatchSourceZoneSchema,
   targetBay: DispatchTargetBaySchema,
   priority: DispatchPrioritySchema.optional(),
-  count: z.number().int().min(1).max(8).optional(),
+  count: z.number().int().min(1).max(DISPATCH_MAX_COUNT).optional(),
   mode: DispatchModeSchema.optional(),
 });
 export type DispatchParams = z.infer<typeof DispatchParamsSchema>;
@@ -158,14 +217,50 @@ export const FREE_RANGE_SOFT_CAP = 26;
 export const FREE_RANGE_HARD_CAP = 30;
 export const RELOCATION_BONUS_PTS = 75;
 
+export const QueueStateSchema = z.enum(['none', 'queued', 'ready', 'claimed', 'expired']);
+export type QueueState = z.infer<typeof QueueStateSchema>;
+
+export const QueueStatusSchema = z.object({
+  state: QueueStateSchema,
+  position: z.number().int().nonnegative(),
+  totalQueued: z.number().int().nonnegative(),
+  queueSize: z.number().int().nonnegative().optional(),
+  estimatedWaitSec: z.number().int().nonnegative(),
+  preferredSite: SiteIdSchema.optional(),
+  seatLeaseId: z.string().min(4).max(96).optional(),
+  claimExpiresAt: z.number().int().nonnegative().optional(),
+  leaseExpiresAt: z.number().int().nonnegative().optional(),
+  claimSiteId: SiteIdSchema.optional(),
+  assignedSiteId: SiteIdSchema.optional(),
+  claimTicket: z.string().optional(),
+  claimWsUrl: z.string().optional(),
+});
+export type QueueStatus = z.infer<typeof QueueStatusSchema>;
+
 export const JoinRequestSchema = z.object({
   name: z.string().min(1).max(64).optional(),
   clientId: z.string().min(1).max(128),
   prefer: SiteIdSchema.optional(),
   resume: z.string().min(2).max(64).optional(),
   mode: RunModeSchema.optional(),
+  runMode: RunModeSchema.optional(),
+  requeue: z.boolean().optional(),
+  seatLeaseId: z.string().min(4).max(96).optional(),
+  spectateOnly: z.boolean().optional(),
 });
 export type JoinRequest = z.infer<typeof JoinRequestSchema>;
+
+/** Lobby-issued resume code (`JoinResponse.resumeToken`; sent back in `JoinRequest.resume`). */
+export const RESUME_TOKEN_PATTERN = /^wr1_[A-Za-z0-9_-]{32}$/;
+export const ResumeTokenSchema = z.string().regex(RESUME_TOKEN_PATTERN);
+
+/**
+ * Opaque public player id (`p1_` + 22 base64url chars), derived by the lobby/site from the raw
+ * clientId. Every player id the site or the leaderboard sends is a publicId; the raw clientId is a
+ * bearer credential that stays with its owner (localStorage + lobby calls) and is never displayed.
+ */
+export const PUBLIC_ID_PATTERN = /^p1_[A-Za-z0-9_-]{22}$/;
+export const PublicIdSchema = z.string().regex(PUBLIC_ID_PATTERN);
 
 export const JoinResponseSchema = z.object({
   siteId: SiteIdSchema,
@@ -174,8 +269,17 @@ export const JoinResponseSchema = z.object({
   expiresAt: z.number().int().nonnegative(),
   name: z.string().min(2).max(20).optional(),
   clientId: z.string().min(1).max(128).optional(),
+  role: z.enum(['driver', 'spectator']).optional(),
+  isBot: z.boolean().optional(),
+  queue: QueueStatusSchema.optional(),
+  /** Human joins only: the player's resume code (store it; show it as the "resume code"). */
+  resumeToken: ResumeTokenSchema.optional(),
+  /** The caller's own publicId; matches its `/api/network` leaderboard row and every id the site sends. */
+  publicId: PublicIdSchema.optional(),
 });
 export type JoinResponse = z.infer<typeof JoinResponseSchema>;
+export const ExtendedJoinResponseSchema = JoinResponseSchema;
+export type ExtendedJoinResponse = JoinResponse;
 
 export const SiteStateSchema = z.enum(['live', 'online', 'break', 'offline']);
 export type SiteState = z.infer<typeof SiteStateSchema>;
@@ -198,13 +302,18 @@ export type SiteStatus = z.infer<typeof SiteStatusSchema>;
 export type SiteSummary = SiteStatus;
 
 export const LeaderboardEntrySchema = z.object({
+  /** Always equal to `publicId` on the wire (never the raw clientId); kept for compatibility. */
   clientId: z.string().min(1),
+  /** Opaque public id (optional during rollout); match your own row with `JoinResponse.publicId`. */
+  publicId: PublicIdSchema.optional(),
   name: z.string().min(1),
   siteId: SiteIdSchema.optional(),
   points: z.number().optional(),
   lifetimePoints: z.number().optional(),
   bestBlitzPts: z.number().int().min(0).optional(),
   deliveries: z.number().int().nonnegative(),
+  /** Optional pallets-per-minute; rendered only when a server supplies it (not populated yet). */
+  ppm: z.number().nonnegative().optional(),
   isBot: z.boolean().optional(),
 });
 export const PlayerLeaderboardEntrySchema = LeaderboardEntrySchema;
@@ -214,6 +323,10 @@ export type PlayerLeaderboardEntry = LeaderboardEntry;
 export const NetworkResponseSchema = z.object({
   sites: z.array(SiteStatusSchema),
   leaderboard: z.array(LeaderboardEntrySchema),
+  queueSize: z.number().int().min(0).optional(),
+  totalQueued: z.number().int().min(0).optional(),
+  maxTotalDrivers: z.number().int().positive().optional(),
+  maxWarehouses: z.number().int().positive().optional(),
 });
 export type NetworkResponse = z.infer<typeof NetworkResponseSchema>;
 
@@ -229,6 +342,9 @@ export const TicketPayloadSchema = z.object({
   carryStreak: z.number().int().min(0).optional(),
   carryCards: z.array(z.string()).max(6).optional(),
   relocationBonus: z.number().int().min(0).optional(),
+  role: z.enum(['driver', 'spectator']).optional(),
+  jti: z.string().min(4).max(64).optional(),
+  seatLeaseId: z.string().min(4).max(64).optional(),
 });
 export const JoinTicketPayloadSchema = TicketPayloadSchema;
 export type TicketPayload = z.infer<typeof TicketPayloadSchema>;
@@ -348,12 +464,15 @@ export const InputMessageSchema = z.object({
   left: z.boolean(),
   right: z.boolean(),
   boost: z.boolean().optional(),
+  moveAngle: z.number().finite().nullable().optional(),
   seq: z.number().int().nonnegative(),
+  dt: z.number().min(0).max(2).optional(),
 });
 export type InputMessage = z.infer<typeof InputMessageSchema>;
 
 export const InteractMessageSchema = z.object({
   type: z.literal('interact'),
+  forkHeight: z.number().finite().min(0).max(1).optional(),
 });
 export type InteractMessage = z.infer<typeof InteractMessageSchema>;
 
@@ -391,6 +510,16 @@ export const KeepCardsMessageSchema = z.object({
   ids: z.array(z.string()),
 });
 export type KeepCardsMessage = z.infer<typeof KeepCardsMessageSchema>;
+
+/**
+ * Reserve one of the driver's current order options (`QuantisedVehicleDelta.fareOffer`).
+ * Rate-limited by site governance; a rejected pick returns an `error` (`governance_limit` / `choose_order_failed`).
+ */
+export const ChooseOrderMessageSchema = z.object({
+  type: z.literal('chooseOrder'),
+  orderId: z.number().int().nonnegative(),
+});
+export type ChooseOrderMessage = z.infer<typeof ChooseOrderMessageSchema>;
 
 export const VoteDifficultyMessageSchema = z.object({
   type: z.literal('voteDifficulty'),
@@ -524,6 +653,13 @@ export const AcceptRelocationMessageSchema = z.object({
 });
 export type AcceptRelocationMessage = z.infer<typeof AcceptRelocationMessageSchema>;
 
+/** Per-connection Dispatcher's Call opt-in/out (client `?dispatch=` / localStorage override). */
+export const DispatchersCallPrefMessageSchema = z.object({
+  type: z.literal('dispatchersCallPref'),
+  enabled: z.boolean(),
+});
+export type DispatchersCallPrefMessage = z.infer<typeof DispatchersCallPrefMessageSchema>;
+
 export const ClientMessageSchema = z
   .discriminatedUnion('type', [
     HelloMessageSchema,
@@ -533,6 +669,7 @@ export const ClientMessageSchema = z
     ReleaseMessageSchema,
     ManagerMessageSchema,
     KeepCardsMessageSchema,
+    ChooseOrderMessageSchema,
     VoteDifficultyMessageSchema,
     NlCommandMessageSchema,
     AgentCommandBaseSchema,
@@ -541,6 +678,7 @@ export const ClientMessageSchema = z
     A2uiActionMessageSchema,
     SetRunModeMessageSchema,
     AcceptRelocationMessageSchema,
+    DispatchersCallPrefMessageSchema,
   ])
   .superRefine((m, ctx) => {
     if (
@@ -563,6 +701,7 @@ export const CLIENT_MESSAGE_TYPES = [
   'release',
   'manager',
   'keepCards',
+  'chooseOrder',
   'voteDifficulty',
   'nlCommand',
   'agentCommand',
@@ -571,6 +710,7 @@ export const CLIENT_MESSAGE_TYPES = [
   'a2uiAction',
   'setRunMode',
   'acceptRelocation',
+  'dispatchersCallPref',
 ] as const;
 
 // ============================================================================
@@ -578,6 +718,7 @@ export const CLIENT_MESSAGE_TYPES = [
 // ============================================================================
 
 export const PlayerSessionInfoSchema = z.object({
+  /** The recipient's publicId on the wire (not its raw clientId); never persist it as the raw id. */
   clientId: z.string().min(1),
   playerId: z.string().optional(),
   name: z.string().min(1),
@@ -627,6 +768,58 @@ export const VehicleDecisionSchema = z.object({
 });
 export type VehicleDecision = z.infer<typeof VehicleDecisionSchema>;
 
+/** Warehouse rack or dock slot (sim `Slot`). `level` is shelf height `0 | 1 | 2` (L1 Low, L2 Mid, L3 High). */
+export const SlotSchema = z.object({
+  key: z.string(),
+  rackId: z.string(),
+  zone: z.string(),
+  rx: z.number().int(),
+  ry: z.number().int(),
+  ax: z.number().int(),
+  ay: z.number().int(),
+  level: z.number().int().min(0).max(2).optional(),
+});
+export type ProtocolSlot = z.infer<typeof SlotSchema>;
+
+/** Order colour class: 🟢 short hop, 🟡 cross-floor, 🔴 long haul / P0, 🟣 own contract. */
+export const FareClassSchema = z.enum(['short', 'cross', 'long', 'contract']);
+export type FareClass = z.infer<typeof FareClassSchema>;
+
+/** One order option (sim `FareOption`). Pars are game-minutes; tiles is Manhattan distance. */
+export const FareOptionSchema = z.object({
+  orderId: z.number().int().nonnegative(),
+  farClass: FareClassSchema,
+  carpool: z.boolean(),
+  p0: z.boolean(),
+  bay: z.string(),
+  value: z.number(),
+  tiles: z.number().nonnegative(),
+  parEmpty: z.number().nullable(),
+  parLoaded: z.number().nullable(),
+  /** Inbound pallet bound for a rack (stow) rather than an outbound bay. */
+  putaway: z.boolean().optional(),
+  /** Rack id the inbound pallet stows into. */
+  putawayRack: z.string().nullable().optional(),
+  /** Outbound bay that accepts this inbound pallet as a cross-dock (human drivers only). */
+  xdockBay: z.string().nullable().optional(),
+  /** Game-minutes left in the cross-dock window; null once closed. */
+  xdockLeft: z.number().nullable().optional(),
+});
+export type FareOption = z.infer<typeof FareOptionSchema>;
+
+/**
+ * Open order choice (sim `FareOffer`): Co-Pilot pick first. After 5 game-min the
+ * Co-Pilot reserves `copilotId` (a Carpool offer lapses instead).
+ */
+export const FareOfferSchema = z.object({
+  since: z.number(),
+  options: z.array(FareOptionSchema).max(3),
+  copilotId: z.number().int().nonnegative(),
+  reason: z.string(),
+  carpool: z.boolean(),
+});
+export type FareOffer = z.infer<typeof FareOfferSchema>;
+
 export const QuantisedVehicleDeltaSchema = z.object({
   id: z.string().min(1),
   qx: z.number().int().optional(),
@@ -670,6 +863,10 @@ export const QuantisedVehicleDeltaSchema = z.object({
   /** Speedy-rated fares this run. */
   speedyTrips: z.number().int().nonnegative().optional(),
   ppm: z.number().optional(),
+  /** Open order choice for this driver (own vehicle only). null = no choice open. */
+  fareOffer: FareOfferSchema.nullable().optional(),
+  /** AI rival assigned to this human driver (closest shift score). */
+  rivalId: z.string().nullable().optional(),
   onTimePct: z.number().nullable().optional(),
   runFinished: z.boolean().optional(),
   msg: z.string().optional(),
@@ -726,8 +923,39 @@ export const SiteLimitsSchema = z.object({
   minAutonomousAgents: z.number().int().nonnegative().optional(),
   /** Governor ceiling for `fleetAdd` (site `MAX_AUTONOMOUS_AGENTS`). */
   maxAutonomousAgents: z.number().int().positive().optional(),
+  /** Site-wide cap on open P0 orders for the `p0` Floor order (site `MAX_OPEN_P0_ON_FLOOR`). */
+  maxOpenP0: z.number().int().positive().optional(),
+  /** Live cones one player may own (site `MAX_CONES_PER_PLAYER`). */
+  conesPerPlayer: z.number().int().positive().optional(),
+  /** Cone lifetime in game-minutes before auto-expiry (site `CONE_EXPIRY_SEC`, 1 game-min = 1 real s). */
+  coneTtlGameMin: z.number().int().positive().optional(),
+  /** Max orders one `dispatch` may move (protocol `DISPATCH_MAX_COUNT`). */
+  dispatchMaxCount: z.number().int().positive().optional(),
+  /** `nlCommand` budget per player per real minute (armor `PLAYER_RATE_LIMIT_PER_MIN`). */
+  nlPerMinute: z.number().int().positive().optional(),
+  /** Opt-in feature flag for the Rack Height Fork-Lift Minigame (site `FEATURE_RACK_LIFT_MINIGAME`). */
+  rackLiftMinigame: z.boolean().optional(),
+  /** Dispatcher's Call minigame enabled on this site (site `ENABLE_DISPATCHERS_CALL`, default on). */
+  dispatchersCall: z.boolean().optional(),
 });
 export type SiteLimits = z.infer<typeof SiteLimitsSchema>;
+
+/** Per-recipient Floor-order state (real server enforcement). All *InMs are REAL milliseconds until this player may issue it again; 0 = ready. */
+export const FloorOrdersStatusSchema = z.object({
+  rush: z.object({ readyInMs: z.number().int().nonnegative() }),
+  p0: z.object({ open: z.number().int().nonnegative(), readyInMs: z.number().int().nonnegative() }),
+  cones: z.object({ mine: z.array(z.string()) }), // "x,y" keys of cones THIS player owns
+  dispatch: z.object({ readyInMs: z.number().int().nonnegative() }),
+  fleet: z.object({
+    addReadyInMs: z.number().int().nonnegative(),
+    removable: z.number().int().nonnegative(),
+  }), // removable = vehicles the governor would currently let fleetRemove take
+  nl: z.object({
+    left: z.number().int().nonnegative(),
+    resetInMs: z.number().int().nonnegative(),
+  }), // nlCommand budget (6/min)
+});
+export type FloorOrdersStatus = z.infer<typeof FloorOrdersStatusSchema>;
 
 export const WelcomeMessageSchema = z.object({
   type: z.literal('welcome'),
@@ -735,6 +963,8 @@ export const WelcomeMessageSchema = z.object({
   you: PlayerSessionInfoSchema,
   snapshot: z.any(),
   limits: SiteLimitsSchema.optional(),
+  /** Recipient's own Floor-order state at join time. */
+  floorOrders: FloorOrdersStatusSchema.optional(),
 });
 export type WelcomeMessage = z.infer<typeof WelcomeMessageSchema>;
 
@@ -813,6 +1043,39 @@ export const HeatLayerSchema = z.object({
 });
 export type HeatLayer = z.infer<typeof HeatLayerSchema>;
 
+export const CompletedRunRecordSchema = z
+  .object({
+    id: z.string(),
+    vehicleId: z.string(),
+    /** The driver's publicId on the wire (never a raw clientId). */
+    clientId: z.string().nullable(),
+    driver: z.string(),
+    baseName: z.string(),
+    runNumber: z.number().int().positive(),
+    type: z.enum([
+      'reach',
+      'counterbalance',
+      'tug',
+      'turret',
+      'pallet_jack',
+      'forklift',
+      'agv',
+    ]),
+    runMode: z.enum(['blitz', 'freerange']),
+    pts: z.number(),
+    shipped: z.number(),
+    onTime: z.number(),
+    incidents: z.number(),
+    streak: z.number(),
+    bestStreak: z.number(),
+    comboBest: z.number(),
+    speedyTrips: z.number(),
+    fareTrips: z.number(),
+    ppm: z.number(),
+    startedAt: z.number(),
+    endedAt: z.number(),
+  });
+
 export const DeltaStatsSchema = z
   .object({
     totals: z.any().optional(),
@@ -830,6 +1093,8 @@ export const DeltaStatsSchema = z
     hall: z.array(HallEntrySchema).optional(),
     /** Sparse heat, ~every 2 s, only to connections that sent `{type:'layers',traffic:true}`. */
     heat: HeatLayerSchema.optional(),
+    /** Archived completed human runs in the current shift. */
+    completedRuns: z.array(CompletedRunRecordSchema).optional(),
   })
   .passthrough();
 export type DeltaStats = z.infer<typeof DeltaStatsSchema>;
@@ -880,6 +1145,10 @@ export const CardSchema = z
     /** Perk granted once the card is completed (status 'done'). */
     perk: z.record(z.number()).optional(),
     completedAt: z.number().optional(),
+    /** Rival Grudge: game time the window closes. */
+    until: z.number().optional(),
+    /** Rival Grudge: rival id and both delivery counts when the window opened. */
+    rivalBase: z.object({ rivalId: z.string(), self: z.number(), rival: z.number() }).optional(),
   })
   .passthrough();
 export type Card = z.infer<typeof CardSchema>;
@@ -910,6 +1179,8 @@ export const DeltaMessageSchema = z.object({
   votes: z.any().optional(),
   /** ONLY the recipient's own hand: `{ [recipientClientId]: CardHand }` (empty object when they hold none). */
   hands: z.record(CardHandSchema).optional(),
+  /** ONLY the recipient's own Floor-order state; on full deltas, when changed (timers refreshed ≤ 1/s). */
+  floorOrders: FloorOrdersStatusSchema.optional(),
   difficulty: z.any().optional(),
   tier: z.number().optional(),
 });
@@ -929,6 +1200,7 @@ export const AckMessageSchema = z.object({
 export type AckMessage = z.infer<typeof AckMessageSchema>;
 
 export const PresenceEntrySchema = z.object({
+  /** The player's publicId on the wire (never a raw clientId). */
   clientId: z.string().optional(),
   playerId: z.string().optional(),
   name: z.string().min(1),
@@ -972,6 +1244,26 @@ export const ErrorMessageSchema = z.object({
 });
 export type ErrorMessage = z.infer<typeof ErrorMessageSchema>;
 
+/** Model Armor pipeline stages that can block a typed command (7-layer pipeline numbering). */
+export const ARMOR_BLOCK_STAGES = ['sanitizeUserPrompt', 'sanitizeModelResponse'] as const;
+export const ArmorBlockStageSchema = z.enum(ARMOR_BLOCK_STAGES);
+export type ArmorBlockStage = z.infer<typeof ArmorBlockStageSchema>;
+
+/**
+ * Which armor layer blocked a typed command (`commandEcho.armor`), copied from the real
+ * Model Armor verdict: `layer` is the pipeline layer number (2 = input screen, 6 = output screen),
+ * `filter` the verdict filter (`pi_and_jailbreak`, `malicious_uri`, `rai`, `unknown`), and
+ * `strikes` the server-side strike count for the sender after this block.
+ */
+export const CommandEchoArmorSchema = z.object({
+  layer: z.number().int().min(1).max(7),
+  stage: ArmorBlockStageSchema,
+  filter: z.string().min(1).max(40),
+  strikes: z.number().int().nonnegative().optional(),
+  muted: z.boolean().optional(),
+});
+export type CommandEchoArmor = z.infer<typeof CommandEchoArmorSchema>;
+
 export const CommandEchoMessageSchema = z.object({
   type: z.literal('commandEcho'),
   text: z.string(),
@@ -981,8 +1273,30 @@ export const CommandEchoMessageSchema = z.object({
   status: z.enum(['executed', 'rejected']).optional(),
   summary: z.string().optional(),
   directive: AgentDirectiveSchema.optional(),
+  /** Present only when Model Armor blocked the command (`reason: 'armor_blocked'`). */
+  armor: CommandEchoArmorSchema.optional(),
 });
 export type CommandEchoMessage = z.infer<typeof CommandEchoMessageSchema>;
+
+/**
+ * A completed Gemini decision for an AI vehicle, broadcast to every socket by the site brain
+ * scheduler. `agentId` is the numeric part of the vehicle id (`FL-03` → 3); `vid` is the full
+ * vehicle id when the server includes it. `note` is the model's own ≤200-char reason.
+ */
+export const BrainDecisionMessageSchema = z.object({
+  type: z.literal('brainDecision'),
+  reqId: z.number().int().nonnegative(),
+  agentId: z.number().int().nonnegative(),
+  vid: z.string().min(1).optional(),
+  kind: DecisionKindSchema,
+  decision: z.record(z.unknown()),
+  note: z.string(),
+  latencyMs: z.number().nonnegative(),
+  tokensIn: z.number().nonnegative(),
+  tokensOut: z.number().nonnegative(),
+  model: z.string(),
+});
+export type BrainDecisionMessage = z.infer<typeof BrainDecisionMessageSchema>;
 
 export const A2uiTelemetryPillSchema = z.object({
   id: z.string().min(1),
@@ -1016,6 +1330,52 @@ export const A2uiPresetButtonSchema = z.object({
 });
 export type A2uiPresetButton = z.infer<typeof A2uiPresetButtonSchema>;
 
+export const DISPATCHERS_CALL_SITUATIONS = [
+  'spill',
+  'p0_surge',
+  'trailer_near_cap',
+  'hazmat_backlog',
+  'dock_backlog',
+] as const;
+export const DispatchersCallSituationSchema = z.enum(DISPATCHERS_CALL_SITUATIONS);
+
+/** Full dispatch action of one Dispatcher's Call option (all fields resolved). */
+export const DispatchersCallActionSchema = z.object({
+  sourceZone: DispatchSourceZoneSchema,
+  targetBay: DispatchTargetBaySchema,
+  priority: DispatchPrioritySchema,
+  count: z.number().int().min(1).max(DISPATCH_MAX_COUNT),
+  mode: DispatchModeSchema,
+});
+
+/**
+ * Dispatcher's Call minigame attached to an `a2uiScreen` (sent only to the driver it is
+ * for). Pick with `a2uiAction { screenId: id, actionId: 'dc-opt-<idx>' }`; the server
+ * executes its stored action for that option (client `dispatch` is ignored).
+ */
+export const DispatchersCallMinigameSchema = z.object({
+  id: z.string().min(1),
+  kind: z.literal('dispatchers_call'),
+  /** Real ms the player has to pick, from receipt. */
+  deadlineMs: z.number().int().positive(),
+  /** Game time the sim times the pick out. */
+  deadlineT: z.number(),
+  situation: DispatchersCallSituationSchema,
+  question: z.string().min(1).max(90),
+  options: z
+    .array(
+      z.object({
+        idx: z.number().int().nonnegative(),
+        label: z.string().min(1).max(48),
+        desc: z.string().min(1),
+        action: DispatchersCallActionSchema,
+      }),
+    )
+    .min(2)
+    .max(3),
+});
+export type DispatchersCallMinigame = z.infer<typeof DispatchersCallMinigameSchema>;
+
 export const A2uiScreenMessageSchema = z.object({
   type: z.literal('a2uiScreen'),
   screenId: z.string().min(1),
@@ -1027,9 +1387,35 @@ export const A2uiScreenMessageSchema = z.object({
   selectors: z.array(A2uiSelectorGroupSchema),
   presets: z.array(A2uiPresetButtonSchema),
   recommendedDispatch: DispatchParamsSchema,
+  /**
+   * Who pre-filled `recommendedDispatch`: `model` = Gemini proposed it, `heuristic` = keyword
+   * match on the player's words. Absent = no AI attribution (e.g. a plain default).
+   */
+  recommendedSource: z.enum(['model', 'heuristic']).optional(),
   cooldownLeftMs: z.number().int().nonnegative().optional(),
+  /** Present only on a Dispatcher's Call screen (render the minigame card, not the builder). */
+  minigame: DispatchersCallMinigameSchema.optional(),
 });
 export type A2uiScreenMessage = z.infer<typeof A2uiScreenMessageSchema>;
+
+/**
+ * Dispatcher's Call reveal (after the pick, or on timeout): Gemini's hidden pick and
+ * reason. The scored outcome arrives later as the `dispatchers_call_result` sim event.
+ */
+export const DispatchersCallRevealMessageSchema = z.object({
+  type: z.literal('dispatchersCallReveal'),
+  id: z.string().min(1),
+  playerIdx: z.number().int().nonnegative().nullable(),
+  geminiIdx: z.number().int().nonnegative(),
+  geminiLabel: z.string().min(1),
+  geminiReason: z.string().min(1).max(90),
+  agreed: z.boolean(),
+  timedOut: z.boolean(),
+  summary: z.string().nullable(),
+  orderIds: z.array(z.number().int()),
+  evalUntil: z.number().nullable(),
+});
+export type DispatchersCallRevealMessage = z.infer<typeof DispatchersCallRevealMessageSchema>;
 
 export const RelocationOfferMessageSchema = z.object({
   type: z.literal('relocationOffer'),
@@ -1049,9 +1435,32 @@ export const RelocateShardMessageSchema = z.object({
   siteId: SiteIdSchema.optional(),
   wsUrl: z.string(),
   ticket: z.string(),
+  /** Ticket expiry (epoch ms), same as the signed ticket's `exp`. */
+  expiresAt: z.number().int().nonnegative(),
   bonusPts: z.number().int().min(0),
 });
 export type RelocateShardMessage = z.infer<typeof RelocateShardMessageSchema>;
+
+export const EvictionReasonSchema = z.enum([
+  'run_complete',
+  'idle_timeout',
+  'session_lease_expired',
+  'hard_cap_timeout',
+  'zero_deliveries_timeout',
+]);
+export type EvictionReason = z.infer<typeof EvictionReasonSchema>;
+
+export const RunEvictedMessageSchema = z.object({
+  type: z.literal('runEvicted'),
+  vid: z.union([z.string().min(1), z.number().int().nonnegative()]),
+  reason: EvictionReasonSchema,
+  pts: z.number().int(),
+  shipped: z.number().int().nonnegative(),
+  incidents: z.number().int().nonnegative(),
+  bestStreak: z.number().int().nonnegative(),
+  runMode: RunModeSchema,
+});
+export type RunEvictedMessage = z.infer<typeof RunEvictedMessageSchema>;
 
 export const ServerMessageSchema = z.discriminatedUnion('type', [
   WelcomeMessageSchema,
@@ -1065,6 +1474,9 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
   A2uiScreenMessageSchema,
   RelocationOfferMessageSchema,
   RelocateShardMessageSchema,
+  RunEvictedMessageSchema,
+  BrainDecisionMessageSchema,
+  DispatchersCallRevealMessageSchema,
 ]);
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;
 
@@ -1080,6 +1492,9 @@ export const SERVER_MESSAGE_TYPES = [
   'a2uiScreen',
   'relocationOffer',
   'relocateShard',
+  'runEvicted',
+  'brainDecision',
+  'dispatchersCallReveal',
 ] as const;
 
 // ============================================================================

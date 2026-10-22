@@ -1,8 +1,8 @@
 /** 3D vehicle models (AGV / counterbalance / reach) ported from the mock's vehicleParts/drawVehicle. */
-import { getSiteTheme, type Vehicle } from '@warehouse/sim';
+import { BOOST_COLLISION_SPEED, getSiteTheme, type Vehicle } from '@warehouse/sim';
 import type { Pose } from './motion.js';
 import type { Painter } from './painter.js';
-import { teamColor } from './scenery.js';
+import { resolveCargoSpriteKey, teamColor } from './scenery.js';
 
 export interface Part {
   cx: number;
@@ -23,7 +23,13 @@ export function modelOf(type: string | undefined): ModelKind {
   return 'counterbalance';
 }
 
-export function vehicleParts(v: Vehicle, p: Pose, nowMs: number, siteId = 'den-1'): Part[] {
+export function vehicleParts(
+  v: Vehicle,
+  p: Pose,
+  nowMs: number,
+  siteId = 'den-1',
+  includeCargo = true,
+): Part[] {
   const ca = Math.cos(p.a);
   const sa = Math.sin(p.a);
   const team = teamColor(v);
@@ -34,7 +40,7 @@ export function vehicleParts(v: Vehicle, p: Pose, nowMs: number, siteId = 'den-1
     parts.push({ cx: p.x + ca * ox - sa * oy, cy: p.y + sa * ox + ca * oy, len, wid, z0, h, hex });
   const fork = Number.isFinite(v.fork) ? v.fork : 0;
   const forkZ = 2 + fork * (model === 'reach' ? 26 : 20);
-  const cargo = v.cargo ?? [];
+  const cargo = includeCargo ? (v.cargo ?? []) : [];
   const cargoAt = (ox: number, z: number) =>
     cargo.forEach((o, i) => {
       const zz = z + i * 13;
@@ -58,7 +64,8 @@ export function vehicleParts(v: Vehicle, p: Pose, nowMs: number, siteId = 'den-1
   if (model === 'agv') {
     add(0, 0, 0.9, 0.52, 1.5, 6, '#E2E8F0');
     add(0, 0, 0.84, 0.46, 7.5, 1.6, team);
-    add(0.38, 0, 0.1, 0.3, 7.5, 5, '#334155'); // sensor bar
+    add(0.38, 0, 0.1, 0.3, 7.5, 5, '#334155'); // LiDAR sensor bar
+    add(0.41, 0, 0.06, 0.22, 9.2, 1.6, '#38BDF8'); // LiDAR optical lens
     cargoAt(-0.02, 9.2);
   } else {
     const reach = model === 'reach';
@@ -66,6 +73,8 @@ export function vehicleParts(v: Vehicle, p: Pose, nowMs: number, siteId = 'den-1
     for (const sx of [-0.22, 0.24]) for (const sy of [-1, 1]) add(sx, sy * (wid / 2 + 0.02), 0.2, 0.1, 0, 5, '#1E293B');
     add(-0.04, 0, reach ? 0.62 : 0.74, wid, 3, 7, '#94A3B8');
     add(-0.36, 0, 0.26, wid, 3, reach ? 9 : 13, team); // counterweight carries the team colour
+    // Operator seat & console detail
+    add(-0.1, 0, 0.2, 0.22, 10, 4.5, '#0F172A');
     if (!reach) {
       for (const sx of [-0.22, 0.08]) for (const sy of [-1, 1]) add(sx, sy * 0.19, 0.04, 0.04, 10, 14, '#334155');
       add(-0.07, 0, 0.4, 0.42, 24, 2, '#475569'); // overhead guard
@@ -74,7 +83,12 @@ export function vehicleParts(v: Vehicle, p: Pose, nowMs: number, siteId = 'den-1
     }
     const mastH = reach ? 40 : 32;
     add(0.4, 0, 0.08, wid - 0.08, 0, mastH, '#334155');
-    for (const sy of [-1, 1]) add(0.62, sy * 0.12, 0.42, 0.06, forkZ, 2, '#475569');
+    add(0.38, 0, 0.05, 0.05, 2, mastH - 4, '#CBD5E1'); // hydraulic lift cylinder
+    add(0.44, 0, 0.04, wid - 0.06, forkZ, 5.5, '#1E293B'); // fork carriage backrest
+    for (const sy of [-1, 1]) {
+      add(0.62, sy * 0.12, 0.42, 0.06, forkZ, 2, '#475569');
+      add(0.79, sy * 0.12, 0.08, 0.06, forkZ, 2, '#F59E0B'); // high-vis fork tips
+    }
     cargoAt(0.62, forkZ + 2);
   }
   const blink = Math.floor(nowMs / 350) % 2 === 0 && (Math.abs(v.speedNow ?? 0) > 0.2 || v.state === 'picking');
@@ -170,7 +184,8 @@ export function drawVehicle(
   pt.poly(pt.circleGrid(p.x, p.y, 0.72), null, team, s.emphasised ? 3 : 1.5); // team ring
   const speed = v.speedNow ?? 0;
   const stunned = s.worldT < (v.stunnedUntil ?? 0);
-  const boosting = (Boolean(v.input?.boost) || (v.human && Math.abs(speed) > 3.05)) && !stunned;
+  const boosting =
+    (Boolean(v.input?.boost) || (v.human && Math.abs(speed) > BOOST_COLLISION_SPEED)) && !stunned;
   if (boosting) {
     const hasCargo = (v.cargo?.length ?? 0) > 0;
     pt.poly(
@@ -201,8 +216,33 @@ export function drawVehicle(
     const k = s.pulse(1257) * 2 - 1; // sin(now/200)
     pt.poly(pt.circleGrid(p.x, p.y, 0.8 + 0.08 * k), 'rgba(34,197,94,0.22)', '#16A34A', 2);
   }
-  for (const q of vehicleParts(v, p, s.nowMs, siteId))
+
+  const cargo = v.cargo ?? [];
+  const forkRaised = (v.fork ?? 0) > 0.22;
+  const useSpriteCargo =
+    !forkRaised &&
+    cargo.length > 0 &&
+    typeof (pt as Partial<Painter>).hasSprite === 'function' &&
+    typeof (pt as Partial<Painter>).sprite === 'function' &&
+    pt.hasSprite(resolveCargoSpriteKey(cargo[0], siteId));
+
+  for (const q of vehicleParts(v, p, s.nowMs, siteId, !useSpriteCargo)) {
     pt.oBox(q.cx, q.cy, q.len, q.wid, p.a, q.z0, q.h, q.hex, 'rgba(15,23,42,0.28)');
+  }
+
+  if (useSpriteCargo) {
+    const model = modelOf(v.type);
+    const fork = Number.isFinite(v.fork) ? v.fork : 0;
+    const forkZ = 2 + fork * (model === 'reach' ? 26 : 20);
+    const ox = model === 'agv' ? -0.02 : 0.62;
+    const baseZ = model === 'agv' ? 9.2 : forkZ + 2;
+    const gx = p.x + Math.cos(p.a) * ox;
+    const gy = p.y + Math.sin(p.a) * ox;
+    cargo.forEach((o, i) => {
+      pt.sprite(resolveCargoSpriteKey(o, siteId), gx, gy, baseZ + i * 13, 1.05);
+    });
+  }
+
   if (cue.active) {
     const ringPts: [number, number][] = [];
     for (let i = 0; i < 16; i++) {

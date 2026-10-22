@@ -1,5 +1,6 @@
 import { pathToFileURL } from 'node:url';
 import type { SiteId } from '@warehouse/protocol';
+import { resolveGeminiModel } from './brain.js';
 import { CloudPersistenceStore, InMemoryPersistenceStore } from './persistence.js';
 import { createSiteServer } from './server.js';
 
@@ -29,6 +30,13 @@ export async function startMainServer(): Promise<void> {
       `[${siteId}] TICKET_SECRET (or TICKET_HMAC_KEY) must be injected via Secret Manager in Cloud Run`,
     );
   }
+
+  // Fail loudly at boot on a non-allow-listed GEMINI_MODEL instead of
+  // erroring on every brain / dispatcher call at runtime.
+  const geminiModel = resolveGeminiModel(process.env.GEMINI_MODEL);
+  console.log(`[${siteId}] Gemini model: ${geminiModel}`);
+
+  installProcessErrorHandlers(siteId);
 
   const persistence = useCloud
     ? new CloudPersistenceStore({
@@ -72,6 +80,28 @@ export async function startMainServer(): Promise<void> {
   await server.app.listen({ port, host });
   await server.flushHeartbeat();
   console.log(`[${siteId}] Site server listening on http://${host}:${port}`);
+}
+
+let processHandlersInstalled = false;
+
+/**
+ * A single stray rejection/exception (e.g. a Firestore write failing inside a
+ * fire-and-forget path) must not take down an authoritative shard and every
+ * connected driver with it. Log loudly and keep serving; the per-path handlers
+ * in server.ts surface the real error to clients where applicable.
+ */
+export function installProcessErrorHandlers(siteId: string): void {
+  if (processHandlersInstalled) return;
+  processHandlersInstalled = true;
+  process.on('unhandledRejection', (reason) => {
+    console.error(
+      `[${siteId}] unhandledRejection:`,
+      reason instanceof Error ? reason.stack || reason.message : reason,
+    );
+  });
+  process.on('uncaughtException', (err) => {
+    console.error(`[${siteId}] uncaughtException:`, err.stack || err.message);
+  });
 }
 
 const isMain =

@@ -113,3 +113,28 @@ The sections above are the agreed contract. These are the details of what actual
 - The renderer sets the canvas cursor itself and auto-fits on first render and whenever the map size changes.
 - Removed legacy members: `init()`, `modeLabel`, `fitFloor()`, `followActive`, public `coneMode`, and the settable `zoom`.
 - Code layout: `src/render/{iso,motion,painter,scenery,vehicles}.ts`.
+
+## Button, Pill & Control Visual Specification (QA Invariants)
+
+All interactive controls in `apps/client/src/styles.css` and `apps/client/src/ui/**` must obey these visual and structural rules so QA and automated Playwright smoke checks (`tools/smoke/ui.mjs`) can verify them deterministically:
+
+### 1. Core Button & Control Taxonomy
+| Control Family | Canonical Classes | Visual Contract | Typical Surfaces |
+|---|---|---|---|
+| **Primary CTA** | `.go`, `.primary`, `.btn.drive`, `.btn.primary` | Solid accent fill (`var(--blue)` or gradient in `.intro-go-btn`), `#fff` text, `font-weight: 700`, `border-radius: 10px`, `text-decoration: none`. Hover darkens to `var(--blue-d)`. | Intro `Start driving →`, Results `Run again ↵`, Contract Pick `Keep & drive ↵`, Agent Designer `Apply to My Forklift`. |
+| **Secondary / Ghost Button** | `.btn`, `.ghost`, `.btn.small`, `.btn.sm` | `#fff` surface, `1px solid var(--line-2)` border, `var(--ink-2)` text, `border-radius: 9px`, `text-decoration: none`. Hover sets `border-color: var(--blue)` and `color: var(--blue-d)`. | Results `Free Range` & `Watch the floor`, Agent Designer `Reset` / `Cancel`, Settings / Network buttons. |
+| **Elevated Secondary Pill Button** | `.btn.intro-ai-link`, `.btn.intro-back-link` | Soft blue pill (`background: var(--blue-l)`, `border: 1px solid #bfdbfe`, `border-radius: 999px`, `padding: 6px 14px`, `color: var(--blue-d)`, `font-weight: 700`, `text-decoration: none`). Never place inside a secondary bordered box or apply `text-decoration: underline`. | Intro modal `🧠 How the AI works` and `← How to Play` view switches (`ui/help.ts`). |
+| **Selectable Choice Pill / Chip** | `.chip`, `.ad-choice-pill`, `.ad-intent-pill`, `.ad-persona-chip` | Unselected: `#fff` background, `1px solid var(--line-2)` border, `var(--ink-2)` text. Active (`.on` or `.active`, plus `aria-pressed="true"`): solid `var(--blue)` fill (or tinted card with `var(--blue)` border for `.ad-persona-chip`), `#fff` text. | Co-Pilot & Agent Designer (`ui/agentDesigner.ts`), layer chips, quick-intent pills. |
+| **Segmented Control** | `.seg-toggle > .seg-btn`, `.seg-tabs > .seg-btn` | Track container (`background: var(--soft)`, `border-radius: 8px–9px`, `padding: 2px`). Buttons have `border: 0`, `background: transparent`, `text-decoration: none`. Active tab (`.on`, `.active`, or `.current`) gets `background: #fff`, `color: var(--ink)`, `font-weight: 700`, and subtle elevation shadow (`0 1px 2px rgba(15, 23, 42, 0.12)`). | Chat Co-Pilot/Floor toggle, Standings difficulty vote, Results leaderboard tabs. |
+| **Icon / Dismiss Button** | `.x`, `.step`, `.q`, `.menu-btn` | Compact square/circle (`22px–40px`), `1px solid var(--line-2)` or transparent border, centered glyph, `text-decoration: none`. | Modal/flyout `✕` close buttons, Fleet `−`/`+` steppers, Topbar `☰` and `?`. |
+| **Inline Text Action** | `.textlink` | Borderless inline button (`background: none; border: 0; color: var(--blue-d); text-decoration: none`), showing underline only on `:hover`. Never wrap `.textlink` inside a `.seg-tabs` or pill container. | Inline prose actions only (never primary/secondary modal toolbar buttons). |
+
+### 2. Mandatory QA Invariants (Enforced by Unit & Smoke Tests)
+1. **No Hybrid Link-in-Pill Chrome**: No `<button>` with a visible background or border (`backgroundColor !== 'rgba(0, 0, 0, 0)'` or `borderTopWidth > 0`) may ever compute `text-decoration-line: underline`. Underlines are strictly prohibited on buttons, pills, chips, and segmented controls (especially buttons containing leading emojis such as `🧠 How the AI works`).
+2. **Zero Native OS Button Bevels**: Every `<button>` class must reset browser chrome (`appearance: none; -webkit-appearance: none; font: inherit;`) and explicitly style `border`, `background`, and `border-radius` so no button falls back to default browser outset borders or `rgb(239, 239, 239)` gray fills.
+3. **Modifier & State Parity**:
+   - Both `.on` and `.active` (plus `.current` on `.seg-btn`) must style the active state identically across `.btn`, `.chip`, `.seg-btn`, `.ad-persona-chip`, and `.ad-choice-pill`.
+   - Both `.btn.small` and `.btn.sm`, and both `.btn.drive` and `.btn.primary`, must be supported aliases in `styles.css`.
+   - Toggleable pills in `ui/agentDesigner.ts` must synchronize `.active`, `.on`, and `aria-pressed="true" | "false"`.
+4. **No False Disabled Affordances**: Any `:disabled` button (including `#run button.seg:disabled` during Run 1's locked Blitz mode, `.obtn:disabled`, `.menu-item:disabled`, `.step:disabled`) must suppress hover background highlights (`:not(:disabled):hover`) and never show `cursor: pointer`.
+5. **Focus-Visible Ring**: Every interactive button primitive must display `outline: 2px solid var(--blue); outline-offset: 1px;` on `:focus-visible`.

@@ -9,6 +9,7 @@ export const MAX_TIER = 6;
 export const BASE_AI = 20;
 export const FLEET_CAP = BASE_FLEET + TIER_STEP * MAX_TIER; // 60 vehicles at Tier 6
 export const TICK_MIN = 0.1; // game-minutes per tick at 1x (10 Hz => 1 real s = 1 game min)
+export const MAX_HUMAN_STEP_DT = 0.02; // fixed Euler sub-step ceiling for client/server stepHuman parity
 export const DAY_START = 6 * 60; // 06:00
 export const BACKLOG_CAP = 60;
 export const KWH_PER_PCT = 0.24;
@@ -20,7 +21,9 @@ export const SITES = ['den-1', 'slc-2', 'phx-3', 'abq-4'] as const;
 export type SiteId = (typeof SITES)[number] | string;
 
 export interface SiteTheme {
-  id: 'den-1' | 'slc-2' | 'phx-3' | 'abq-4';
+  id: SiteId;
+  code?: string;
+  title?: string;
   name: string;
   shortName: string;
   city: string;
@@ -78,9 +81,33 @@ export const SITE_THEMES: Record<'den-1' | 'slc-2' | 'phx-3' | 'abq-4', SiteThem
   },
 };
 
+const REGION_BASE_THEME_KEY: Record<string, keyof typeof SITE_THEMES> = {
+  den: 'den-1',
+  slc: 'slc-2',
+  phx: 'phx-3',
+  abq: 'abq-4',
+};
+
 export function getSiteTheme(siteId?: string): SiteTheme {
   if (siteId && siteId in SITE_THEMES) {
     return SITE_THEMES[siteId as keyof typeof SITE_THEMES];
+  }
+  if (siteId) {
+    const match = /^(den|slc|phx|abq)-(\d+)$/i.exec(siteId.trim());
+    if (match) {
+      const prefix = match[1].toLowerCase();
+      const num = match[2];
+      const baseKey = REGION_BASE_THEME_KEY[prefix] ?? 'den-1';
+      const base = SITE_THEMES[baseKey];
+      const normalizedId = `${prefix}-${num}`;
+      return {
+        ...base,
+        id: normalizedId,
+        code: normalizedId.toUpperCase(),
+        name: `${base.city} #${num}`,
+        title: `${base.city} Annex #${num}`,
+      };
+    }
   }
   return SITE_THEMES['den-1'];
 }
@@ -173,6 +200,20 @@ export interface Slot {
   ry: number;
   ax: number;
   ay: number;
+  level?: 0 | 1 | 2;
+}
+
+export type RackLiftGrade = 'perfect' | 'clean' | 'scrape';
+
+export interface RackLiftEvaluation {
+  grade: RackLiftGrade;
+  targetLevel: 0 | 1 | 2;
+  targetFork: number;
+  forkHeight: number;
+  error: number;
+  perfectWindow: number;
+  cleanWindow: number;
+  bonusDelta: number;
 }
 
 export interface ZoneInfo {
@@ -267,10 +308,72 @@ export interface Order {
   special?: string;
   /** Par time (game-min) for the loaded leg, set at pickup from the planner's route. */
   parLoaded?: number;
+  /**
+   * Difficulty speed (`DifficultyConfig.speed`) in force when `parLoaded` was stamped.
+   * Rating rescales par by `stamp / current` so a mid-leg difficulty change is fair.
+   */
+  parDiffSpeed?: number;
   /** Hand key (player / agent id) that owns this route-card pallet during the reservation window. */
   reservedFor?: string | null;
   /** Game time when the contract reservation opens to other drivers. */
   reservedUntil?: number;
+  /** Par time (game-min) for the empty leg, set when a driver chooses this order. */
+  parEmpty?: number;
+  /** Game time the order was chosen (`chooseOrder` or Co-Pilot auto-pick). */
+  chosenAt?: number;
+  /** Fare colour class, fixed when chosen (or at delivery from the loaded-leg par). */
+  farClass?: FareClass;
+  /**
+   * Inbound putaway: the rack slot this west-dock pallet must be stowed into.
+   * `slot` is the dock pickup tile; `bay` mirrors `xdockBay` (the cross-dock bay).
+   */
+  putaway?: Slot | null;
+  /** Outbound bay that accepts this inbound pallet as a cross-dock (human drivers only). */
+  xdockBay?: string | null;
+  /** Game time the cross-dock window closes; after this the pallet must be stowed. */
+  xdockDue?: number | null;
+  /** Dispatcher's Call challenge id whose executed dispatch moved / created this order. */
+  dispatchCallId?: string | null;
+}
+
+/** Fare colour class: 🟢 short hop, 🟡 cross-floor, 🔴 long haul / P0, 🟣 contract. */
+export type FareClass = 'short' | 'cross' | 'long' | 'contract';
+
+/** One candidate order offered to a manual driver by `fareOptions`. */
+export interface FareOption {
+  orderId: number;
+  farClass: FareClass;
+  /** Same-bay add-on while carrying one pallet on a 2-slot vehicle. */
+  carpool: boolean;
+  p0: boolean;
+  bay: string;
+  value: number;
+  /** Manhattan tiles from the vehicle to the pickup (the guide() distance term). */
+  tiles: number;
+  /** Empty-leg par (vehicle → pickup), game-min; null when no route. */
+  parEmpty: number | null;
+  /** Loaded-leg par (pickup → bay), game-min; null when no route. */
+  parLoaded: number | null;
+  /** Inbound west-dock pallet to stow (putaway). */
+  putaway?: boolean;
+  /** Rack id the inbound pallet stows into. */
+  putawayRack?: string | null;
+  /** Cross-dock bay for an inbound pallet (null when not inbound). */
+  xdockBay?: string | null;
+  /** Game-min left in the cross-dock window, or null when closed / not inbound. */
+  xdockLeft?: number | null;
+}
+
+/** The order choice currently open for a manual driver. */
+export interface FareOffer {
+  /** Game time the offer opened (timeout counts from here). */
+  since: number;
+  options: FareOption[];
+  /** The Co-Pilot's recommended order (auto-reserved on timeout). */
+  copilotId: number;
+  /** Why the Co-Pilot recommends it, built from the guide() scoring terms. */
+  reason: string;
+  carpool: boolean;
 }
 
 /** Speed rating for one fare (delivered pallet). */
@@ -312,11 +415,12 @@ export interface DriverInput {
   left: boolean;
   right: boolean;
   boost?: boolean;
+  moveAngle?: number | null;
   seq?: number;
 }
 
 export interface VehicleTarget {
-  kind: 'pick' | 'drop' | 'charge' | 'park' | 'break';
+  kind: 'pick' | 'drop' | 'stow' | 'charge' | 'park' | 'break';
   x: number;
   y: number;
   order?: Order;
@@ -324,7 +428,7 @@ export interface VehicleTarget {
 }
 
 export type RunMode = 'blitz' | 'freerange';
-export const BLITZ_DURATION_MIN = 300; // 300 sim-min = 300 real seconds (5 real min) at 10 Hz (0.1 sim-min/tick)
+export const BLITZ_DURATION_MIN = 180; // 180 sim-min = 180 real seconds (3 real min) at 10 Hz (0.1 sim-min/tick)
 export const RUN_CARD_GRACE_MIN = 15; // informational card-pick window (runGraceUntil); the Blitz clock itself starts only on first input, keepCards, or Co-Pilot
 
 export interface CardModifiers {
@@ -463,6 +567,8 @@ export interface Vehicle {
   msg: string;
   driver: string | null;
   input: DriverInput;
+  inputQueue?: Array<{ input: DriverInput; dt: number }>;
+  inputCarriedDt?: number;
   sPts: number;
   sShipped: number;
   runMode: RunMode;
@@ -510,7 +616,126 @@ export interface Vehicle {
   /** Speed when the driver started braking (precision-stop detection). */
   brakeFrom?: number | null;
   /** Set when the driver braked from > 4.0 to < 0.8; consumed by the next interact. */
-  precisionArmed?: { x: number; y: number; t: number } | null;
+  precisionArmed?:
+    | { x: number; y: number; t: number; until?: number; tiles?: Point[] }
+    | { until: number; tiles: Point[]; x?: number; y?: number; t?: number }
+    | null;
+  /** Hydraulic Exit Surge boost expiration game time from a Perfect Lift. */
+  liftBoostUntil?: number;
+  /** Rack Scrape speed wobble expiration game time from a missed lift window. */
+  liftScrapeUntil?: number;
+  /** Open order choice for a manual driver (see `fareOptions` / `chooseOrder`). */
+  fareOffer?: FareOffer | null;
+  /** Cargo order id whose Carpool offer timed out (not re-offered for that load). */
+  carpoolDeclined?: number | null;
+  /** AI agent assigned as this driver's rival (closest score at run start). */
+  rivalId?: string | null;
+  /**
+   * Orders this human was heading to on the previous tick (claimed order + open fare
+   * options, which include the guide target), with the claimant seen then. Used to emit
+   * `rival_snipe` when an AI vehicle claims or picks one of them.
+   */
+  snipeWatch?: Array<{ orderId: number; claimant: string | null; anyAi?: boolean }>;
+  /** Game time of the last `rival_snipe` bubble for this human (throttle). */
+  lastSnipeAt?: number | null;
+  /**
+   * Dispatcher's Call minigame state for the current Blitz run (at most one per run;
+   * cleared by `startDriverRun`). Persisted with the vehicle in snapshots.
+   */
+  dispatchersCall?: DispatchersCallState | null;
+  /**
+   * Portion of the current `sPts` already moved into `bank` at a shift rollover (Blitz
+   * humans keep `sPts` across the rollover). Only the delta since the last bank is banked.
+   */
+  bankedPts?: number;
+  /**
+   * True while this dedicated player vehicle is parked because its owner took the wheel of
+   * an AI truck. A paused vehicle does not move, drain, burn its Blitz clock or get perks.
+   */
+  wheelPaused?: boolean;
+  /** Blitz time (game-min) left on the paused vehicle's clock; restored on release. */
+  runPausedLeft?: number | null;
+  /** AI run/score stats saved by `takeWheel` and restored by `release`. */
+  aiStash?: AiRunStash | null;
+}
+
+/** AI vehicle stats snapshotted when a human takes the wheel (restored on release). */
+export interface AiRunStash {
+  sPts: number;
+  sShipped: number;
+  bankedPts: number;
+  runMode: RunMode;
+  runStartedAt: number | null;
+  runEndsAt: number | null;
+  runGraceUntil: number | null;
+  runPts: number;
+  runDeliveries: number;
+  runOnTime: number;
+  runIncidents: number;
+  streak: number;
+  bestStreak: number;
+  comboStep: number;
+  combo: number;
+  comboBest: number;
+  fareTrips: number;
+  speedyTrips: number;
+  fareLog: FareResult[];
+  rivalId: string | null;
+}
+
+/** Real floor situation that can trigger a Dispatcher's Call (never fabricated). */
+export type DispatchersCallSituationKind =
+  | 'spill'
+  | 'p0_surge'
+  | 'trailer_near_cap'
+  | 'hazmat_backlog'
+  | 'dock_backlog';
+
+/** Numeric snapshot of the live situation that qualified a Dispatcher's Call. */
+export interface DispatchersCallSituation {
+  kind: DispatchersCallSituationKind;
+  /** Open spills on the floor. */
+  spills: number;
+  /** Not-yet-delivered P0 orders. */
+  openP0: number;
+  /** Not-yet-delivered orders in hazmat zone Z or bound for RET. */
+  hazmatOpen: number;
+  /** Open inbound putaway pallets waiting at the west docks. */
+  dockOpen: number;
+  /** Fullest loading (non-transfer, not departing) outbound bay, if any. */
+  bayId: string | null;
+  bayLoad: number;
+  bayCap: number;
+  /** Game time the situation was detected. */
+  t: number;
+}
+
+export type DispatchersCallStatus = 'offered' | 'evaluating' | 'done' | 'skipped';
+
+export interface DispatchersCallState {
+  id: string;
+  status: DispatchersCallStatus;
+  situation: DispatchersCallSituation | null;
+  /** Game time the challenge was offered (or skipped). */
+  offeredAt: number;
+  /** Number of options shown to the player. */
+  optionCount: number;
+  /** Gemini's hidden pick (option index), revealed after the player's pick. */
+  geminiIdx: number | null;
+  /** Player's pick, or null on timeout / skip. */
+  optionIdx: number | null;
+  pickedAt: number | null;
+  /** Order ids moved or created by the executed dispatch (tagged `dispatchCallId`). */
+  orderIds: number[];
+  /** Game time the outcome is scored (or run end if sooner). */
+  evalUntil: number | null;
+  /** Tracked orders delivered by anyone / delivered on time. */
+  delivered: number;
+  onTime: number;
+  /** Points paid into runPts / sPts when scored. */
+  pts: number;
+  /** Why the challenge was skipped (no qualifying situation, model error, …). */
+  skipReason?: string;
 }
 
 export interface ContractOption {
@@ -659,7 +884,7 @@ export interface Transfer {
 
 export type TransferOut = Transfer;
 
-/** Every card type. Phase-3 types (long_haul, local_hero, poacher, rival_grudge, ghost_hunter) are typed but not dealt yet. */
+/** Every card type (all dealable; `humanOnly` cards are never dealt to AI agents). */
 export const CARD_TYPE_IDS = [
   'route',
   'batch',
@@ -706,6 +931,10 @@ export interface Card {
   humanOnly?: boolean;
   /** Perk granted once the card is completed. */
   perk?: CardPerk;
+  /** Timed goals (Rival Grudge): game time the window closes. */
+  until?: number;
+  /** Rival Grudge baseline: delivery counts when the card was kept. */
+  rivalBase?: { rivalId: string; self: number; rival: number };
 }
 
 export interface CardHand {
@@ -817,6 +1046,29 @@ export interface PlayerSession {
   isBot: boolean;
 }
 
+export interface CompletedRunRecord {
+  id: string; // e.g., `${vehicleId}:run-${runNumber}`
+  vehicleId: string;
+  clientId: string | null;
+  driver: string; // e.g., 'Jason Run 1'
+  baseName: string; // e.g., 'Jason'
+  runNumber: number; // e.g., 1
+  type: VehicleType;
+  runMode: RunMode;
+  pts: number;
+  shipped: number;
+  onTime: number;
+  incidents: number;
+  streak: number;
+  bestStreak: number;
+  comboBest: number;
+  speedyTrips: number;
+  fareTrips: number;
+  ppm: number;
+  startedAt: number;
+  endedAt: number;
+}
+
 export interface World {
   version: 5;
   siteId: string;
@@ -873,8 +1125,13 @@ export interface World {
     hazards: number;
     skids?: number;
     palletDrops?: number;
+    nearMisses?: number;
     transfersOut: number;
     transfersIn: number;
+    /** Inbound pallets stowed into racks. */
+    putaways?: number;
+    /** Inbound pallets cross-docked straight to an outbound bay. */
+    crossDocks?: number;
     decisions: { reroute: number; wait: number; push: number };
   };
   day: PeriodStats;
@@ -885,11 +1142,20 @@ export interface World {
   marketTimer: number;
   resumed: boolean;
   receivedTransferIds: Set<string>;
+  /** Game time the next inbound trailer arrives at a west dock. */
+  nextInboundAt: number;
   outboundTransfers: TransferOut[];
   pendingDecisions: DecisionRequest[];
   decisionJournal: DecisionJournalEntry[];
   decisions: DecisionJournalEntry[]; // Alias to decisionJournal
   players: Map<string, PlayerSession>;
+  completedRuns?: CompletedRunRecord[];
+  /** Opt-in feature flag for the Rack Height Fork-Lift Minigame (default false). */
+  rackLiftMinigame?: boolean;
+  /** Emergency kill-switch to ignore client-supplied forkHeight even when sent. */
+  rackLiftMinigameKillSwitch?: boolean;
+  /** Optional convenience RNG method bound to this world. */
+  rng?: () => number;
 }
 
 export type WorldState = World;
@@ -935,11 +1201,13 @@ export interface WorldSnapshotV5 {
   deliveries: DeliveryRecord[];
   incidentLog: IncidentRecord[];
   receivedTransferIds: string[];
+  nextInboundAt?: number;
   outboundTransfers: TransferOut[];
   pendingDecisions: DecisionRequest[];
   decisionJournal: DecisionJournalEntry[];
   players: Array<[string, PlayerSession]>;
   heat: number[];
+  completedRuns?: CompletedRunRecord[];
 }
 
 export type DispatchSourceZone =

@@ -48,10 +48,12 @@ const BLOCK_X = [7, 12, 17, 22, 27, 32, 37, 42, 47];
 
 type CanonicalSiteId = 'den-1' | 'slc-2' | 'phx-3' | 'abq-4';
 
-function normalizeSiteId(siteId?: SiteId): CanonicalSiteId {
-  if (siteId === 'slc-2' || siteId === 'phx-3' || siteId === 'abq-4') {
-    return siteId;
-  }
+export function normalizeSiteId(siteId?: SiteId): CanonicalSiteId {
+  if (!siteId) return 'den-1';
+  const lower = siteId.toLowerCase();
+  if (lower === 'slc-2' || lower.startsWith('slc-')) return 'slc-2';
+  if (lower === 'phx-3' || lower.startsWith('phx-')) return 'phx-3';
+  if (lower === 'abq-4' || lower.startsWith('abq-')) return 'abq-4';
   return 'den-1';
 }
 

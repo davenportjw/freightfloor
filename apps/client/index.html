@@ -3,46 +3,65 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Warehouse — Live Floor</title>
+    <title>Freight Floor</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
-  <body>
+  <body data-mode="floor">
     <!-- Full-bleed world canvas. The renderer sizes it from this container. -->
     <div id="stage">
       <canvas id="world" aria-label="Warehouse floor. Drag to pan, scroll to zoom, click a vehicle to inspect it."></canvas>
     </div>
 
-    <!-- HUD zones: modules in src/ui/ mount into these. Tab hides all of them. -->
-    <div id="zoneLeft" class="zone zone-left"></div>
-    <div id="zoneInspector" class="zone zone-inspector"></div>
-    <div id="zoneRight" class="zone zone-right"></div>
-    <div id="a2uiZone" class="zone zone-a2ui"></div>
-    <div id="zoneBottom" class="zone zone-bottom"></div>
-    <div id="zoneCorner" class="zone zone-corner">
-      <div id="toasts" class="toasts" aria-live="polite"></div>
-      <div id="cardsTray"></div>
+    <!-- HUD v3: floating cards over the canvas; modules in src/ui/ mount into these ids.
+         DRIVE mode: run capsule · objective · contracts · dash. FLOOR mode: KPIs · feed · Floor orders · inspector. -->
+    <button id="menuBtn" class="hud menu-btn" type="button" aria-label="Menu (M)" title="Menu (M)" aria-haspopup="true" aria-expanded="false">☰</button>
+    <a id="githubBtn" class="hud github-btn" href="https://github.com/davenportjw/freightfloor" target="_blank" rel="noopener noreferrer" aria-label="View source on GitHub" title="View source on GitHub">
+      <svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+    </a>
+    <div id="brandBadge" class="hud brand-badge" role="img" aria-label="Freight Floor">
+      <img class="brand-badge__icon" src="/favicon.svg" width="28" height="28" alt="" aria-hidden="true" />
+      <span class="brand-badge__wordmark">FREIGHT <em>FLOOR</em></span>
     </div>
 
-    <div id="hudHiddenHint" class="hud hud-hidden-hint" hidden>Panels hidden · press <span class="kbd">Tab</span> to show</div>
+    <div id="run" class="hud run" data-role="run-capsule" hidden></div>
+    <div id="topStack" class="top-stack">
+      <div id="objective" class="hud objective" hidden></div>
+      <div id="fare" class="fare" hidden></div>
+      <div id="alert" class="hud" role="status" hidden></div>
+      <div id="reloc" class="hud reloc" hidden></div>
+    </div>
+    <div id="contracts" class="hud contracts" hidden></div>
+    <div id="dash" class="hud dash" hidden></div>
+    <div id="touchControls" class="touch-controls" hidden></div>
+
+    <div id="kpis" class="hud kpis" hidden></div>
+    <div id="floorBanner" class="hud floor-banner" hidden></div>
+    <div id="inspector" hidden></div>
+    <div id="feed" class="feed" aria-live="polite" hidden></div>
+    <div id="orders" class="hud orders" hidden></div>
+    <div id="dispatchPop" class="hud dispatch-pop" hidden></div>
+    <div id="coneHint" class="hud cone-hint" hidden></div>
+    <div id="orderNote" class="hud order-note" role="status" data-role="order-note" hidden></div>
+
+    <div id="chat" class="hud chat" hidden></div>
+    <nav id="menu" class="hud menu" aria-label="Menu" hidden></nav>
+    <div id="standFly" class="hud flyout stand-fly" hidden></div>
+    <div id="flyout" class="hud flyout" hidden></div>
+
+    <div id="a2uiZone" class="zone zone-a2ui"></div>
 
     <aside id="drawer" class="hud drawer closed" aria-label="History drawer"></aside>
+
+    <!-- Sheets: centred over a scrim (contract pick, held-Tab standings, results). -->
+    <div id="scrim" class="scrim" hidden></div>
+    <div id="pickSheet" class="hud sheet pick" role="dialog" aria-modal="true" aria-label="Pick your contracts" hidden></div>
+    <div id="standingsSheet" class="hud sheet standings" role="dialog" aria-label="Standings" hidden></div>
+    <div id="runEnd" class="sheet-host" hidden></div>
 
     <div id="help" class="overlay" hidden></div>
     <div id="leaderboardModal" class="overlay" hidden></div>
     <div id="agent-designer-modal" class="overlay" hidden></div>
-    <div id="runEnd" class="overlay" hidden></div>
-
-    <!-- Shown only when no display name is saved yet; nothing connects until a name is chosen. -->
-    <div id="joinOverlay" class="overlay" hidden>
-      <form id="joinForm" class="hud join-card" aria-labelledby="joinTitle">
-        <h2 id="joinTitle">Join the warehouse</h2>
-        <p class="muted">Pick a display name. Other players see it on the leaderboard.</p>
-        <label class="label" for="joinName">Display name</label>
-        <input id="joinName" class="text-input" maxlength="18" autocomplete="nickname" required />
-        <div id="joinError" class="form-error" role="alert"></div>
-        <button class="btn drive" type="submit">Join</button>
-      </form>
-    </div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

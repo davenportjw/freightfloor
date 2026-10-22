@@ -1,4 +1,8 @@
 locals {
+  site_image     = var.site_image != "" ? var.site_image : "${var.region}-docker.pkg.dev/${var.project_id}/warehouse/site:latest"
+  lobby_image    = var.lobby_image != "" ? var.lobby_image : "${var.region}-docker.pkg.dev/${var.project_id}/warehouse/lobby:latest"
+  loadtest_image = var.loadtest_image != "" ? var.loadtest_image : "${var.region}-docker.pkg.dev/${var.project_id}/warehouse/loadtest:latest"
+
   services = [
     "run.googleapis.com",
     "artifactregistry.googleapis.com",
@@ -11,7 +15,7 @@ locals {
   ]
 
   sites = {
-    den-1 = { min = 1, idle = "run", agents = 20 }
+    den-1 = { min = 0, idle = "break", agents = 20 }
     slc-2 = { min = 0, idle = "break", agents = 12 }
     phx-3 = { min = 0, idle = "break", agents = 12 }
     abq-4 = { min = 0, idle = "break", agents = 12 }
@@ -177,7 +181,7 @@ resource "google_cloud_run_v2_service" "site" {
     }
 
     containers {
-      image = var.site_image
+      image = local.site_image
 
       resources {
         cpu_idle = false
@@ -228,6 +232,19 @@ resource "google_cloud_run_v2_service" "site" {
         value = "1"
       }
       env {
+        name  = "ENABLE_RACK_LIFT_MINIGAME"
+        value = var.enable_rack_lift_minigame ? "1" : "0"
+      }
+      env {
+        name  = "ENABLE_DISPATCHERS_CALL"
+        value = var.enable_dispatchers_call ? "1" : "0"
+      }
+      env {
+        # /internal/transfer verifies the Pub/Sub push OIDC token was minted for this account.
+        name  = "PUBSUB_PUSH_SERVICE_ACCOUNT"
+        value = google_service_account.pubsub_push.email
+      }
+      env {
         name = "TICKET_HMAC_KEY"
         value_source {
           secret_key_ref {
@@ -237,7 +254,12 @@ resource "google_cloud_run_v2_service" "site" {
         }
       }
 
+      # Snapshot restore + Firestore/Pub/Sub init can take ~15-25s on a cold
+      # instance; allow up to ~60s before the revision is marked unhealthy.
       startup_probe {
+        period_seconds    = 5
+        timeout_seconds   = 3
+        failure_threshold = 12
         http_get {
           path = "/healthz"
         }
@@ -315,15 +337,19 @@ resource "google_cloud_run_v2_service" "lobby" {
     max_instance_request_concurrency = 300
 
     scaling {
-      min_instance_count = 0
+      # Keep one warm lobby so a first visit doesn't pay a ~10 s cold start.
+      min_instance_count = var.suffix == "-stg" ? 0 : 1
       max_instance_count = 2
     }
 
     containers {
-      image = var.lobby_image
+      image = local.lobby_image
 
       resources {
-        cpu_idle = false
+        # Request-based CPU billing keeps 1 warm lobby in memory for ~$8-$10/mo;
+        # open WebSocket proxy streams count as active requests so CPU stays
+        # allocated whenever a player is connected.
+        cpu_idle = true
         limits = {
           cpu    = "1"
           memory = "1Gi"
@@ -343,6 +369,14 @@ resource "google_cloud_run_v2_service" "lobby" {
         value = "1000"
       }
       env {
+        name  = "MAX_WAREHOUSES"
+        value = tostring(var.max_warehouses)
+      }
+      env {
+        name  = "QUEUE_SCALE_THRESHOLD"
+        value = tostring(var.queue_scale_threshold)
+      }
+      env {
         name = "SITE_URLS_JSON"
         value = jsonencode({
           for k, svc in google_cloud_run_v2_service.site : k => svc.uri
@@ -358,7 +392,12 @@ resource "google_cloud_run_v2_service" "lobby" {
         }
       }
 
+      # Snapshot restore + Firestore/Pub/Sub init can take ~15-25s on a cold
+      # instance; allow up to ~60s before the revision is marked unhealthy.
       startup_probe {
+        period_seconds    = 5
+        timeout_seconds   = 3
+        failure_threshold = 12
         http_get {
           path = "/healthz"
         }
@@ -436,7 +475,7 @@ resource "google_cloud_run_v2_job" "loadtest_128" {
       max_retries     = 0
 
       containers {
-        image = var.loadtest_image
+        image = local.loadtest_image
 
         resources {
           limits = {

@@ -1,0 +1,35 @@
+# ============================================================================
+# Freight Floor — Terraform Variables Template (infra/terraform.tfvars.example)
+# Copy to `infra/terraform.tfvars` (gitignored & dockerignored) or pass `-var` flags.
+# ============================================================================
+
+# Required: Your Google Cloud Project ID
+project_id = "your-gcp-project-id"
+
+# Default Google Cloud region for Cloud Run, Artifact Registry, Secret Manager & Model Armor
+region = "us-central1"
+
+# Environment suffix ("" for production, "-stg" for isolated staging stack)
+suffix = ""
+
+# Optional container image overrides.
+# Leave empty ("") to automatically use:
+#   ${region}-docker.pkg.dev/${project_id}/warehouse/{site,lobby,loadtest}:latest
+site_image     = ""
+lobby_image    = ""
+loadtest_image = ""
+
+# Firestore database ID (must be created in Native mode in your GCP project)
+firestore_database_id = "(default)"
+
+# Dynamic shard scaling & queue thresholds
+max_warehouses        = 8
+queue_scale_threshold = 8
+
+# Feature flags for regional warehouse shards
+enable_dispatchers_call   = true
+enable_rack_lift_minigame = false
+
+# Optional infrastructure toggles
+enable_loadtest_job = true
+enable_edge_lb      = false

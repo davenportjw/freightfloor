@@ -280,8 +280,9 @@ export async function runLoadtest(
   // Let bots & pilots drive, plan, and interact for durationMs
   await new Promise((resolve) => setTimeout(resolve, durationMs));
 
-  // Stop all clients cleanly
+  // Stop all clients cleanly and allow proxy-to-site upstream sockets to close
   await Promise.all(allClients.map((c) => c.stop()));
+  await new Promise((resolve) => setTimeout(resolve, 50));
 
   // Aggregate metrics
   const driversPerSite: Record<SiteId, number> = {

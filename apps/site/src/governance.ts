@@ -1,5 +1,5 @@
-import type { ArmorReasonCode } from '@warehouse/armor';
-import type { DispatchParams, ManagerOp } from '@warehouse/protocol';
+import type { ArmorGuard, ArmorReasonCode } from '@warehouse/armor';
+import type { DispatchParams, FloorOrdersStatus, ManagerOp } from '@warehouse/protocol';
 import {
   addVehicle,
   bayAt,
@@ -12,6 +12,7 @@ import {
   setDifficulty,
   toggleCone,
   voteDifficulty,
+  TICK_MIN,
   type DifficultyInput,
   type World,
 } from '@warehouse/sim';
@@ -26,9 +27,15 @@ export const MAX_CONES_ON_FLOOR = 24;
 export const CONE_TOGGLE_COOLDOWN_SEC = 2;
 export const CONE_EXPIRY_SEC = 60; // 1 game-hour (60 s at 10 Hz)
 export const FLEET_PLAYER_COOLDOWN_SEC = 30;
+/** Min seconds between `chooseOrder` messages from one player (≈ 4 picks/s max). */
+export const CHOOSE_ORDER_COOLDOWN_SEC = 0.25;
 export const MIN_AUTONOMOUS_AGENTS = 8;
 export const MAX_AUTONOMOUS_AGENTS = 28;
 export const MAX_CONCURRENT_NL_COMMANDS = 4;
+/** Real-time interval of one site sim tick (10 Hz). */
+export const SITE_TICK_MS = 100;
+/** Real milliseconds per game-minute at 1x (`SITE_TICK_MS` / sim `TICK_MIN` = 1000). */
+export const REAL_MS_PER_GAME_MIN = Math.round(SITE_TICK_MS / TICK_MIN);
 
 interface TimeStampPair {
   gameMin: number;
@@ -92,6 +99,7 @@ export class FacilityGovernor {
   private readonly lastPlayerFleet = new Map<string, TimeStampPair>();
   private readonly lastPlayerDispatch = new Map<string, TimeStampPair>();
   private readonly coneMeta = new Map<string, ConeOwnership>();
+  private readonly lastPlayerChoose = new Map<string, TimeStampPair>();
   private inFlightNlCommands = 0;
 
   private elapsedSec(world: World, prev: TimeStampPair | undefined | null, nowMs: number): number {
@@ -162,6 +170,96 @@ export class FacilityGovernor {
       rushCooldownMin,
       conesLeft: Math.min(playerConesLeft, siteConesLeft),
     };
+  }
+
+  /** Real ms left on a `cooldownSec` limiter stamped at `prev` (0 = ready), same clock as the `try*` checks. */
+  private cooldownLeftMs(
+    world: World,
+    prev: TimeStampPair | undefined | null,
+    cooldownSec: number,
+    nowMs: number,
+  ): number {
+    if (!prev) return 0;
+    const elapsed = this.elapsedSec(world, prev, nowMs);
+    if (elapsed >= cooldownSec) return 0;
+    return Math.ceil((cooldownSec - elapsed) * 1000);
+  }
+
+  /**
+   * Per-player Floor-order state derived from the exact limiter state `executeManagerOp`
+   * enforces. Read-only: never stamps cooldowns or expires cones. `nl` comes from the
+   * site's `ArmorGuard` sliding window (the `nlCommand` rate limiter).
+   */
+  public getFloorOrdersStatus(
+    world: World,
+    clientId: string,
+    guard: ArmorGuard,
+    ip?: string,
+    nowMs: number = Date.now(),
+  ): FloorOrdersStatus {
+    const activeRushMs = Math.max(0, Math.ceil((world.rushUntil - world.t) * REAL_MS_PER_GAME_MIN));
+    const rushReadyInMs = Math.max(
+      activeRushMs,
+      this.cooldownLeftMs(world, this.lastSiteRush, RUSH_SITE_COOLDOWN_SEC, nowMs),
+      this.cooldownLeftMs(world, this.lastPlayerRush.get(clientId), RUSH_PLAYER_COOLDOWN_SEC, nowMs),
+    );
+
+    const mine: string[] = [];
+    for (const meta of this.coneMeta.values()) {
+      if (
+        meta.clientId === clientId &&
+        world.cones.has(meta.key) &&
+        this.elapsedSec(world, meta.placedAt, nowMs) < CONE_EXPIRY_SEC
+      ) {
+        mine.push(meta.key);
+      }
+    }
+    mine.sort();
+
+    const autonomousCount = world.vehicles.filter((v) => !v.human && !v.isPlayerVehicle).length;
+    const fleetReadyInMs = this.cooldownLeftMs(
+      world,
+      this.lastPlayerFleet.get(clientId),
+      FLEET_PLAYER_COOLDOWN_SEC,
+      nowMs,
+    );
+
+    return {
+      rush: { readyInMs: rushReadyInMs },
+      p0: {
+        open: world.orders.filter((o) => o.p0 && o.state !== 'done').length,
+        readyInMs: this.cooldownLeftMs(
+          world,
+          this.lastPlayerP0.get(clientId),
+          P0_PLAYER_COOLDOWN_SEC,
+          nowMs,
+        ),
+      },
+      cones: { mine },
+      dispatch: { readyInMs: this.getDispatchCooldownLeftMs(world, clientId, nowMs) },
+      fleet: {
+        addReadyInMs: fleetReadyInMs,
+        removable: Math.max(0, autonomousCount - MIN_AUTONOMOUS_AGENTS),
+      },
+      nl: guard.peekBudget(clientId, ip, nowMs),
+    };
+  }
+
+  /** Rate limit for order choice (`chooseOrder`): one per CHOOSE_ORDER_COOLDOWN_SEC per player. */
+  public tryChooseOrder(world: World, clientId: string, nowMs: number = Date.now()): GovernanceResult {
+    const elapsed = this.elapsedSec(world, this.lastPlayerChoose.get(clientId), nowMs);
+    if (elapsed < CHOOSE_ORDER_COOLDOWN_SEC) {
+      const reason = `Order choice rate limit (1 per ${CHOOSE_ORDER_COOLDOWN_SEC}s).`;
+      return {
+        ok: false,
+        code: 'governance_limit',
+        reason,
+        message: reason,
+        retryAfterSec: Math.max(0, Math.round((CHOOSE_ORDER_COOLDOWN_SEC - elapsed) * 100) / 100),
+      };
+    }
+    this.lastPlayerChoose.set(clientId, this.stamp(world, nowMs));
+    return { ok: true, message: 'ok' };
   }
 
   public tryRush(world: World, clientId: string, nowMs: number = Date.now()): GovernanceResult {

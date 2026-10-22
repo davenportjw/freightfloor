@@ -1,5 +1,5 @@
 /**
- * Bottom-left inspector (mock updateInspector, lines 1863-1904). Re-renders only when its change
+ * Floor-view inspector card (HUD v3: left:12 bottom:70) for the selected vehicle (mock updateInspector, lines 1863-1904). Re-renders only when its change
  * key changes so the buttons stay clickable. Brain lines show only real server data: the latest
  * reason text and, when a real decision arrived, its model and latency.
  */
@@ -70,28 +70,31 @@ function policyLine(w: World, v: Vehicle): string {
   return `${blurb} Respect ${pol.respect.toFixed(2)}, speed ${pol.speed.toFixed(2)}.`;
 }
 
-export function mountInspector(zone: HTMLElement, ctx: UiCtx): UiModule {
-  const root = el('section', { class: 'hud inspector', attrs: { 'aria-label': 'Vehicle inspector' } });
+export function mountInspector(root: HTMLElement, ctx: UiCtx): UiModule {
+  root.classList.add('hud', 'inspector');
+  root.setAttribute('aria-label', 'Vehicle inspector');
   root.hidden = true;
   const view = new KeyedView(root);
-  zone.append(root);
 
   return {
     update() {
       const { store, actions } = ctx;
       const v = store.vehicle(store.selectedVid);
-      if (!v) {
+      // HUD v3: the inspector belongs to the Floor view (left:12 bottom:70); while driving the
+      // run capsule / dash carry the same information for your own vehicle.
+      const show = Boolean(v) && store.hudMode() === 'floor' && store.activeOverlay() !== 'results';
+      if (!v || !show) {
         root.hidden = true;
         view.invalidate();
         return;
       }
       root.hidden = false;
-      view.render(inspectorKey(store), () => {
+      const following = store.ui.followVid === v.id;
+      view.render(`${inspectorKey(store)}|${following}`, () => {
         const w = store.world;
         const mine = store.you?.vid === v.id && v.human;
         const strat = v.human ? (v.autopilot ? `Co-Pilot (${v.strategy})` : 'Human') : v.strategy;
         const bat = Math.round(v.battery);
-        const g = store.side.guides.get(v.id);
         const reason = store.side.reasons.get(v.id);
         const decision = store.side.decisions.get(v.id);
         const pres = presenceView(store);
@@ -103,37 +106,26 @@ export function mountInspector(zone: HTMLElement, ctx: UiCtx): UiModule {
               swatch(teamColor(v.human ? 'Human' : v.strategy)),
               el('b', { class: 'big', text: v.id }),
               el('span', {
-                class: 'muted',
+                class: 'muted ellipsis',
                 text: `${strat}${mine ? ' · you' : v.human && v.driver ? ` · ${v.driver}` : ''}`,
               }),
             ]),
-            button('✕', 'btn small', () => actions.select(null), 'Deselect [Esc]'),
+            button('✕', 'x', () => actions.select(null), 'Deselect [Esc]'),
           ]),
           el('div', { class: 'insp-grid num' }, [
             stat(
               'Battery',
               `${bat}%`,
               bat < 20,
-              v.state === 'charging' || v.humanCharging
-                ? el('span', { class: 'charge-badge', text: '⚡ +5', title: 'Charging (+5%/min)' })
-                : null,
+              v.state === 'charging' || v.humanCharging ? el('span', { class: 'charge-badge', text: '⚡', title: 'Charging' }) : null,
             ),
-            stat('Speed', Math.abs(v.speedNow).toFixed(1)),
-            v.human && !v.autopilot
-              ? stat('Fork', `${Math.round(v.fork * 100)}%`)
-              : stat('State', v.state),
+            stat('Delivered', String(v.deliveries)),
             stat('Shift pts', String(Math.round(v.sPts))),
-            stat('Incidents', String(v.incidents)),
-            stat('Near-miss', String(v.nearMisses)),
           ]),
         );
-        if (mine && g?.text) kids.push(el('div', { class: `guide${g.inRange ? ' ok' : ''}`, text: `${g.inRange ? '✓' : '▶'} ${g.text}` }));
         const theme = getSiteTheme(store.siteId ?? w.siteId);
         kids.push(
-          el('div', { class: 'insp-line', title: theme.cargoLabel }, [
-            el('span', { class: 'label', text: 'Contract ' }),
-            contractText(v, w.t),
-          ]),
+          el('div', { class: 'insp-line', title: theme.cargoLabel }, [el('span', { class: 'label', text: 'Contract ' }), contractText(v, w.t)]),
         );
         if (v.directive || v.autopilot) {
           kids.push(
@@ -143,13 +135,11 @@ export function mountInspector(zone: HTMLElement, ctx: UiCtx): UiModule {
             ]),
           );
         }
-        if (v.msg) kids.push(el('div', { class: 'insp-msg', text: v.msg }));
         if (!v.human || v.autopilot) {
-          kids.push(el('div', { class: 'hint', text: policyLine(w, v) }));
           if (reason || decision) {
-            const meta = decision ? ` (${decision.kind} · ${decision.model} · ${Math.round(decision.latencyMs)} ms)` : '';
+            const meta = decision ? ` (${decision.model} · ${Math.round(decision.latencyMs)} ms)` : '';
             kids.push(
-              el('div', { class: 'insp-brain' }, [
+              el('div', { class: 'insp-brain', title: policyLine(w, v) }, [
                 el('span', { class: 'label', text: 'Brain ' }),
                 decision?.reason ?? reason ?? '',
                 meta ? el('span', { class: 'muted', text: meta }) : null,
@@ -160,65 +150,24 @@ export function mountInspector(zone: HTMLElement, ctx: UiCtx): UiModule {
         }
 
         const actionsRow = el('div', { class: 'insp-actions' });
-        if (mine) {
-          const toggleAutoBtn = button(
-            v.autopilot ? '🕹️ Take Over ' : '🤖 Co-Pilot ',
-            v.autopilot ? 'btn small' : 'btn small on',
-            () => actions.setAutopilot(!v.autopilot, v.id),
-            v.autopilot ? 'Switch to manual WASD driving' : 'Engage Co-Pilot Autopilot for your vehicle [Esc]',
-          );
-          toggleAutoBtn.append(kbd(v.autopilot ? 'WASD' : 'Esc'));
-          actionsRow.append(toggleAutoBtn);
-
-          const designerBtn = button(
-            '🎛️ Designer ',
-            'btn small',
-            () => actions.showAgentDesigner(true),
-            'Open Co-Pilot & Agent Designer [G]',
-          );
-          designerBtn.append(kbd('G'));
-          actionsRow.append(designerBtn);
-
-          if (store.canHandBack()) {
-            const hb = button('Hand back ', 'btn small', () => actions.handBack(), 'Return this leased AI vehicle');
-            hb.append(kbd('Esc'));
-            actionsRow.append(hb);
-          }
-        } else if (!v.human) {
-          const take = button('Take the wheel ', 'btn drive', () => actions.takeWheel(v.id));
+        if (!v.human) {
+          const take = button('Take this one ', 'primary', () => actions.takeWheel(v.id));
           take.append(kbd('T'));
           if (pres.full) {
             take.disabled = true;
             take.title = `Driver cap reached (${pres.capText}).`;
+          } else if (store.isDriving()) {
+            take.disabled = true;
+            take.title = 'You are already driving — hand back first.';
           }
           actionsRow.append(take);
-          const dirBtn = button(
-            '🎛️ Direct ',
-            'btn small',
-            () => actions.showAgentDesigner(true),
-            'Open Co-Pilot & Agent Designer for this vehicle [G]',
-          );
-          dirBtn.append(kbd('G'));
-          actionsRow.append(dirBtn);
-        } else {
+        } else if (!mine) {
           actionsRow.append(el('span', { class: 'muted small', text: `Driven by ${v.driver ?? 'another player'}.` }));
         }
+        const follow = button(following ? 'Following ✓' : 'Follow', `ghost${following ? ' on' : ''}`, () => actions.follow(following ? null : v.id));
+        follow.title = following ? 'Stop following (free camera)' : `Keep the camera on ${v.id}`;
+        actionsRow.append(follow);
         kids.push(actionsRow);
-        if (mine) {
-          kids.push(
-            el('div', { class: 'hint' }, [
-              kbd('W'),
-              kbd('A'),
-              kbd('S'),
-              kbd('D'),
-              ' instant takeover · ',
-              kbd('G'),
-              ' Co-Pilot Designer · ',
-              kbd('E'),
-              ' pick / drop / charge',
-            ]),
-          );
-        }
         return kids;
       });
     },

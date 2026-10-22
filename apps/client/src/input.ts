@@ -15,7 +15,14 @@
  * like the server does.
  */
 import type { AckMessage, InputMessage } from '@warehouse/protocol';
-import { stepHuman, TICK_MIN, type DriverInput, type Vehicle, type World } from '@warehouse/sim';
+import {
+  MAX_HUMAN_STEP_DT,
+  stepHuman,
+  TICK_MIN,
+  type DriverInput,
+  type Vehicle,
+  type World,
+} from '@warehouse/sim';
 
 /** Real milliseconds per server tick (server setInterval 100 ms). */
 export const SERVER_TICK_MS = 100;
@@ -59,14 +66,21 @@ export function emptyInput(): DriverInput {
 }
 
 export function anyHeld(i: DriverInput): boolean {
-  return i.up || i.down || i.left || i.right || Boolean(i.boost);
+  return (
+    i.up ||
+    i.down ||
+    i.left ||
+    i.right ||
+    Boolean(i.boost) ||
+    (typeof i.moveAngle === 'number' && Number.isFinite(i.moveAngle))
+  );
 }
 
-/** Step a human vehicle by `dt` game-minutes in server-sized sub-steps (<= TICK_MIN). */
+/** Step a human vehicle by `dt` game-minutes in fine sub-steps (<= MAX_HUMAN_STEP_DT). */
 export function stepInChunks(w: World, v: Vehicle, input: DriverInput, dt: number): void {
   let left = dt;
   while (left > 1e-9) {
-    const step = Math.min(TICK_MIN, left);
+    const step = Math.min(MAX_HUMAN_STEP_DT, left);
     stepHuman(w, v, input, step);
     left -= step;
   }
@@ -100,6 +114,71 @@ export interface KeyLike {
   repeat?: boolean;
 }
 
+export interface ThumbstickState {
+  up: boolean;
+  down: boolean;
+  left: boolean;
+  right: boolean;
+  active: boolean;
+  clampedX: number;
+  clampedY: number;
+  moveAngle: number | null;
+}
+
+const OCTANT_SIN = Math.sin(Math.PI / 8);
+
+/**
+ * Converts a 2D screen-space vector `(dx, dy)` into the corresponding 2:1 isometric
+ * board world angle (`Math.atan2(wy, wx)` in radians, rounded to 3 decimals).
+ *
+ * Under the 2:1 isometric projection (`screenX ~ gx - gy`, `screenY ~ (gx + gy) / 2`),
+ * a screen vector `(dx, dy)` unprojects to world direction `(wx, wy) ~ (dx + 2*dy, 2*dy - dx)`.
+ */
+export function screenVectorToWorldAngle(dx: number, dy: number): number {
+  const wx = dx + 2 * dy;
+  const wy = 2 * dy - dx;
+  return Math.round(Math.atan2(wy, wx) * 1000) / 1000;
+}
+
+/**
+ * Converts a 2D thumbstick offset `(dx, dy)` in screen pixels into 8-way
+ * `DriverInput` directional booleans, continuous board-space `moveAngle`,
+ * and clamped knob coordinates.
+ */
+export function thumbstickDirsFromVector(
+  dx: number,
+  dy: number,
+  deadzone = 10,
+  maxRadius = 38,
+): ThumbstickState {
+  const dist = Math.hypot(dx, dy);
+  if (!Number.isFinite(dist) || dist <= deadzone) {
+    return {
+      up: false,
+      down: false,
+      left: false,
+      right: false,
+      active: false,
+      clampedX: 0,
+      clampedY: 0,
+      moveAngle: null,
+    };
+  }
+  const nx = dx / dist;
+  const ny = dy / dist;
+  const clampedDist = Math.min(dist, maxRadius);
+  return {
+    up: ny < -OCTANT_SIN,
+    down: ny > OCTANT_SIN,
+    left: nx < -OCTANT_SIN,
+    right: nx > OCTANT_SIN,
+    active: true,
+    clampedX: nx * clampedDist,
+    clampedY: ny * clampedDist,
+    moveAngle: screenVectorToWorldAngle(dx, dy),
+  };
+}
+
 function wrapAngleDelta(d: number): number {
   const twoPi = Math.PI * 2;
   return ((((d + Math.PI) % twoPi) + twoPi) % twoPi) - Math.PI;
@@ -111,6 +190,9 @@ function wrapAngleDelta(d: number): number {
  */
 export class InputController {
   readonly held: DriverInput = emptyInput();
+  private readonly keyHeld: DriverInput = emptyInput();
+  private readonly touchHeld: DriverInput = emptyInput();
+  private lastSentMoveAngle: number | null = null;
   seq = 0;
   frames: PendingInputFrame[] = [];
   /** Open interval since the last send (input = last sent input). */
@@ -133,6 +215,7 @@ export class InputController {
     const dir = KEYMAP[ev.code];
     if (!dir || !this.isDriving()) return false;
     if (ev.repeat) return true;
+    this.keyHeld[dir] = true;
     if (!this.held[dir]) {
       this.held[dir] = true;
       if (this.isAutopilot()) {
@@ -146,8 +229,10 @@ export class InputController {
   keyUp(ev: KeyLike, nowMs: number): boolean {
     const dir = KEYMAP[ev.code];
     if (!dir) return false;
-    if (this.held[dir]) {
-      this.held[dir] = false;
+    this.keyHeld[dir] = false;
+    const next = Boolean(this.touchHeld[dir]);
+    if (Boolean(this.held[dir]) !== next) {
+      this.held[dir] = next;
       if (this.isDriving()) this.sendNow(nowMs);
     }
     return this.isDriving();
@@ -156,7 +241,8 @@ export class InputController {
   /** Programmatically set boost state (e.g. from the HUD boost button). */
   setBoost(active: boolean, nowMs: number): void {
     if (active && !this.isDriving()) return;
-    const next = Boolean(active) && this.isDriving();
+    this.touchHeld.boost = Boolean(active) && this.isDriving();
+    const next = Boolean(this.keyHeld.boost || this.touchHeld.boost) && this.isDriving();
     if (Boolean(this.held.boost) !== next) {
       this.held.boost = next;
       if (next && this.isAutopilot()) {
@@ -166,20 +252,118 @@ export class InputController {
     }
   }
 
+  /** True when either keyboard or touch boost is currently held. */
+  isBoostHeld(): boolean {
+    return Boolean(this.held.boost);
+  }
+
+
+  /** Programmatically set directional touch input (e.g. from virtual thumbstick). */
+  setTouchDirs(
+    dirs: Partial<Record<'up' | 'down' | 'left' | 'right', boolean>> & {
+      moveAngle?: number | null;
+    },
+    nowMs: number,
+  ): void {
+    const driving = this.isDriving();
+    let changed = false;
+    let activatedAny = false;
+    for (const k of ['up', 'down', 'left', 'right'] as const) {
+      if (dirs[k] === undefined) continue;
+      const touchVal = Boolean(dirs[k]) && driving;
+      this.touchHeld[k] = touchVal;
+      const next = Boolean(this.keyHeld[k] || this.touchHeld[k]);
+      if (this.held[k] !== next) {
+        if (next) activatedAny = true;
+        this.held[k] = next;
+        changed = true;
+      }
+    }
+    if ('moveAngle' in dirs) {
+      const nextAngle =
+        driving && typeof dirs.moveAngle === 'number' && Number.isFinite(dirs.moveAngle)
+          ? dirs.moveAngle
+          : null;
+      this.touchHeld.moveAngle = nextAngle;
+      this.held.moveAngle = nextAngle;
+      if ((nextAngle === null) !== (this.lastSentMoveAngle === null)) {
+        changed = true;
+        if (nextAngle !== null) activatedAny = true;
+      } else if (
+        nextAngle !== null &&
+        this.lastSentMoveAngle !== null &&
+        Math.abs(wrapAngleDelta(nextAngle - this.lastSentMoveAngle)) >= 0.06
+      ) {
+        changed = true;
+        activatedAny = true;
+      }
+    }
+    if (changed) {
+      if (activatedAny && this.isAutopilot()) {
+        this.onManualTakeover?.();
+      }
+      if (driving) this.sendNow(nowMs);
+    }
+    if ('moveAngle' in dirs) {
+      this.tail.input.moveAngle = this.held.moveAngle ?? null;
+    }
+  }
+
+  /** Programmatically set a single directional touch input. */
+  setTouchDir(
+    dir: 'up' | 'down' | 'left' | 'right',
+    active: boolean,
+    nowMs: number,
+  ): void {
+    this.setTouchDirs({ [dir]: active }, nowMs);
+  }
+
+  /** Release all active touch directions and touch boost. */
+  releaseTouch(nowMs: number): void {
+    this.setTouchDirs(
+      { up: false, down: false, left: false, right: false, moveAngle: null },
+      nowMs,
+    );
+    if (this.touchHeld.boost) {
+      this.setBoost(false, nowMs);
+    }
+  }
+
   /** Window lost focus: release every key (and tell the server). */
   blur(nowMs: number): void {
+    this.keyHeld.up = this.keyHeld.down = this.keyHeld.left = this.keyHeld.right = false;
+    this.keyHeld.boost = false;
+    this.keyHeld.moveAngle = null;
+    this.touchHeld.up = this.touchHeld.down = this.touchHeld.left = this.touchHeld.right = false;
+    this.touchHeld.boost = false;
+    this.touchHeld.moveAngle = null;
     if (!anyHeld(this.held)) return;
     this.held.up = this.held.down = this.held.left = this.held.right = false;
     this.held.boost = false;
+    this.held.moveAngle = null;
     if (this.isDriving()) this.sendNow(nowMs);
+    this.tail.input.moveAngle = null;
   }
+
+  private tailRawDt = 0;
+  private unpredictedDt = 0;
 
   /** Drop all state (hand back, reconnect, vehicle change). */
   reset(): void {
-    this.held.up = this.held.down = this.held.left = this.held.right = false;
+    this.keyHeld.up = this.keyHeld.down = this.keyHeld.left = this.keyHeld.right = false;
+    this.keyHeld.boost = false;
+    this.keyHeld.moveAngle = null;
+    this.touchHeld.up = this.touchHeld.down = this.touchHeld.left = this.touchHeld.right = false;
+    this.touchHeld.boost = false;
+    this.touchHeld.moveAngle = null;
+    this.held.up = this.held.down = this.held.right = this.held.left = false;
     this.held.boost = false;
+    this.held.moveAngle = null;
+    this.lastSentMoveAngle = null;
     this.frames = [];
     this.tail = { seq: this.seq, input: emptyInput(), dt: 0 };
+    this.tailRawDt = 0;
+    this.unpredictedDt = 0;
     this.lastSendMs = null;
     this.lastAckT = null;
     this.errorX = 0;
@@ -228,7 +412,15 @@ export class InputController {
     if (Math.abs(this.errorAngle) < 1e-4) this.errorAngle = 0;
 
     const dt = clampedMs * SIM_MIN_PER_MS;
-    this.tail.dt += dt;
+    const absorbed = Math.min(dt, this.unpredictedDt);
+    this.unpredictedDt -= absorbed;
+    const tailStepDt = Math.max(0, dt - absorbed);
+    this.tail.dt += tailStepDt;
+    if (v.speedNow !== 0 || anyHeld(this.tail.input)) {
+      this.tailRawDt += tailStepDt;
+    } else {
+      this.tailRawDt = 0;
+    }
     stepInChunks(w, v, this.tail.input, dt);
   }
 
@@ -243,7 +435,10 @@ export class InputController {
 
   /** Server pose accepted (not predicting): nothing is in flight any more. */
   settle(): void {
+    this.frames = [];
     this.tail.dt = 0;
+    this.tailRawDt = 0;
+    this.unpredictedDt = 0;
     this.lastAckT = null;
     this.errorX = 0;
     this.errorY = 0;
@@ -258,11 +453,12 @@ export class InputController {
       typeof ack.t === 'number' &&
       this.lastAckT !== null &&
       Math.abs(ack.t - this.lastAckT) < 1e-6 &&
-      this.frames.length > 0
+      (this.frames.length > 0 || this.tail.dt > 1e-6)
     ) {
       return;
     }
 
+    this.unpredictedDt = 0;
     const prevAckT = this.lastAckT;
     if (typeof ack.t === 'number') {
       this.lastAckT = ack.t;
@@ -287,6 +483,10 @@ export class InputController {
           head.dt -= consumeDt;
           consumeDt = 0;
         }
+      }
+      if (consumeDt > 1e-6 && this.tail.dt > 0) {
+        this.tail.dt = Math.max(0, this.tail.dt - consumeDt);
+        consumeDt = 0;
       }
       while (this.frames.length > 0 && this.frames[0].dt <= 1e-6 && this.frames[0].seq <= ack.seq) {
         this.frames.shift();
@@ -326,12 +526,35 @@ export class InputController {
 
   private sendNow(nowMs: number): void {
     const seq = ++this.seq;
+    const activeSlice = anyHeld(this.tail.input) || this.tailRawDt > 0;
+    const wallDt =
+      activeSlice && this.lastSendMs !== null
+        ? Math.min(0.25, Math.max(0, (nowMs - this.lastSendMs) * SIM_MIN_PER_MS))
+        : this.tailRawDt;
+    const effectiveRawDt = Math.max(this.tailRawDt, wallDt);
+    const aheadDt = Math.max(0, wallDt - this.tailRawDt);
+    const frameDt = this.tail.dt + aheadDt;
+    this.unpredictedDt += aheadDt;
+    const sliceDt = Math.min(0.5, Math.max(0, Math.round(effectiveRawDt * 10000) / 10000));
     // Close the open interval: it ends with this send.
-    this.frames.push({ seq, input: { ...this.tail.input }, dt: this.tail.dt });
+    this.frames.push({ seq, input: { ...this.tail.input }, dt: frameDt });
     if (this.frames.length > MAX_PENDING_FRAMES) this.frames.shift();
-    const input = { ...this.held };
-    this.tail = { seq, input, dt: 0 };
+    const hasAngle =
+      typeof this.held.moveAngle === 'number' && Number.isFinite(this.held.moveAngle);
+    const nextAngle = hasAngle ? (this.held.moveAngle as number) : null;
+    const includeMoveAngle = hasAngle || this.lastSentMoveAngle !== null;
+    const input: DriverInput = {
+      up: this.held.up,
+      down: this.held.down,
+      left: this.held.left,
+      right: this.held.right,
+      boost: Boolean(this.held.boost),
+      ...(includeMoveAngle ? { moveAngle: nextAngle } : {}),
+    };
+    this.lastSentMoveAngle = nextAngle;
+    this.tail = { seq, input: { ...input }, dt: 0 };
+    this.tailRawDt = 0;
     this.lastSendMs = nowMs;
-    this.send({ type: 'input', ...input, seq });
+    this.send({ type: 'input', ...input, seq, dt: sliceDt });
   }
 }
