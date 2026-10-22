@@ -439,25 +439,24 @@ describe('@warehouse/lobby — M6 placement, ticket signing, and network directo
     expect(body2.name).not.toBe('Custom-New-Handle');
     expect(body2.name).not.toBe(body1.name);
 
-    // Searching existing callsigns via GET /api/callsigns returns matching existing human callsigns
+    // GET /api/callsigns does not enumerate other players' callsigns (returns empty list)
     const searchRes = await app.inject({
       method: 'GET',
       url: `/api/callsigns?q=${encodeURIComponent(body1.name.slice(0, 5))}`,
     });
     expect(searchRes.statusCode).toBe(200);
-    expect(searchRes.json().callsigns).toContain(body1.name);
+    expect(searchRes.json().callsigns).toEqual([]);
 
-    // Typing an existing callsign in `resume` finds and returns that existing callsign
+    // Typing another player's callsign in `resume` from a new browser is rejected (new browser gets its own name or must use a secret resume code)
     const lookupRes = await app.inject({
       method: 'POST',
       url: '/api/join',
       payload: { clientId: 'new-browser-session-id', resume: body1.name.toUpperCase() },
     });
-    expect(lookupRes.statusCode).toBe(200);
-    expect(lookupRes.json().name).toBe(body1.name);
-    expect(lookupRes.json().clientId).toBe('client-human-101');
+    expect(lookupRes.statusCode).toBe(404);
+    expect(lookupRes.json().error).toBe('invalid_resume_code');
 
-    // Resuming with the secret resume code from a new browser session also restores client-human-101
+    // Resuming with the secret resume code from a new browser session restores client-human-101
     expect(body1.resumeToken).toMatch(/^wr1_[A-Za-z0-9_-]{32}$/);
     const resumeRes = await app.inject({
       method: 'POST',

@@ -781,11 +781,6 @@ function boot(): void {
   modules.push(mountShieldCard(shieldEl, ctx));
   const help = mountHelp(byId('help'), ctx, {
       getCallsign: () => store.you?.name || displayName || 'Assigning…',
-      onEnterFloor: (rawCallsign) => {
-        const candidate = rawCallsign.trim();
-        if (!candidate) return null;
-        return actions.resumeCallsign(candidate);
-      },
   });
   modules.push(help);
 

@@ -537,6 +537,14 @@ describe('GitHub repository links (Intro modal and HUD)', () => {
       const logos = overlay.queryAll((e) => e.tagName === 'IMG' && e.classList.contains('intro-logo-banner'));
       expect(logos).toHaveLength(1);
       expect(logos[0]!.getAttribute('src')).toBe('/assets/freightfloor-logo.svg');
+
+      // Assigned callsign badge is rendered cleanly with no <datalist> or autocomplete input flashing
+      const datalists = overlay.queryAll((e) => e.tagName === 'DATALIST');
+      expect(datalists).toHaveLength(0);
+      const callsignInputs = overlay.queryAll((e) => e.getAttribute('id') === 'introCallsign');
+      expect(callsignInputs).toHaveLength(0);
+      const badges = overlay.queryAll((e) => e.getAttribute('id') === 'introAssignedCallsign');
+      expect(badges).toHaveLength(1);
     } finally {
       (globalThis as Record<string, unknown>).document = prevDoc;
     }

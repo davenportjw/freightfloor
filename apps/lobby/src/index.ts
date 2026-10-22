@@ -643,23 +643,9 @@ export class FirestoreLobbyStore implements LobbyStore {
       .slice(0, limit);
   }
 
-  async listCallsigns(query: string = '', limit: number = 20): Promise<string[]> {
-    const q = query.trim().toLowerCase();
-    const snap = await this.db.collection(this.colName('players')).limit(500).get();
-    const names = new Set<string>();
-    snap.forEach((doc) => {
-      const data = doc.data();
-      const name = String(data.name || '').replace(/\s+Run\s+\d+$/i, '').trim();
-      const isBot = Boolean(data.isBot) || isReservedBotPrefix(name);
-      if (!isBot && name && name !== 'Driver') {
-        if (!q || name.toLowerCase().includes(q)) {
-          names.add(name);
-        }
-      }
-    });
-    return Array.from(names)
-      .sort((a, b) => a.localeCompare(b))
-      .slice(0, limit);
+  async listCallsigns(_query: string = '', _limit: number = 20): Promise<string[]> {
+    // Public callsign enumeration/autocomplete is disabled so players cannot browse or assume another player's identity.
+    return [];
   }
 
   async resolvePlayerIdentity(params: ResolvePlayerIdentityParams): Promise<PlayerIdentityResult> {
@@ -705,30 +691,12 @@ export class FirestoreLobbyStore implements LobbyStore {
     const ownSnap = await col.doc(params.clientId).get();
     const own = ownSnap.exists ? toIdentity(params.clientId, ownSnap.data() ?? {}) : undefined;
 
-    // Existing callsign lookup: finds and returns an existing human player by callsign, never adding a new name.
+    // A bare callsign only resumes on the same browser that already owns it; never allow assuming another player.
     if (params.resumeCallsign) {
       const targetCallsign = normalizeBaseName(params.resumeCallsign);
       if (own && !own.isBot && own.name && normalizeBaseName(own.name) === targetCallsign) {
         await touch(own.clientId, own.name);
         return { ok: true, clientId: own.clientId, name: own.name };
-      }
-      const snap = await col.limit(500).get();
-      let matched: { clientId: string; name: string; isBot: boolean } | undefined;
-      snap.forEach((doc) => {
-        if (matched) return;
-        const candidate = toIdentity(doc.id, doc.data());
-        if (
-          !candidate.isBot &&
-          candidate.name &&
-          candidate.name !== 'Driver' &&
-          normalizeBaseName(candidate.name) === targetCallsign
-        ) {
-          matched = candidate;
-        }
-      });
-      if (matched) {
-        await touch(matched.clientId, matched.name);
-        return { ok: true, clientId: matched.clientId, name: matched.name };
       }
       return INVALID_RESUME_CODE;
     }
@@ -1005,20 +973,9 @@ export class InMemoryLobbyStore implements LobbyStore {
       }));
   }
 
-  async listCallsigns(query: string = '', limit: number = 20): Promise<string[]> {
-    const q = query.trim().toLowerCase();
-    const names = new Set<string>();
-    for (const p of this.players.values()) {
-      const name = String(p.name || '').replace(/\s+Run\s+\d+$/i, '').trim();
-      if (!p.isBot && !isReservedBotPrefix(name) && name && name !== 'Driver') {
-        if (!q || name.toLowerCase().includes(q)) {
-          names.add(name);
-        }
-      }
-    }
-    return Array.from(names)
-      .sort((a, b) => a.localeCompare(b))
-      .slice(0, limit);
+  async listCallsigns(_query: string = '', _limit: number = 20): Promise<string[]> {
+    // Public callsign enumeration/autocomplete is disabled so players cannot browse or assume another player's identity.
+    return [];
   }
 
   async resolvePlayerIdentity(params: ResolvePlayerIdentityParams): Promise<PlayerIdentityResult> {
@@ -1044,23 +1001,12 @@ export class InMemoryLobbyStore implements LobbyStore {
 
     const own = this.players.get(params.clientId);
 
-    // Existing callsign lookup: finds and returns an existing human player by callsign, never adding a new name.
+    // A bare callsign only resumes on the same browser that already owns it; never allow assuming another player.
     if (params.resumeCallsign) {
       const targetCallsign = normalizeBaseName(params.resumeCallsign);
       if (own && isHuman(own) && own.name && normalizeBaseName(own.name) === targetCallsign) {
         touch(own);
         return { ok: true, clientId: own.clientId, name: own.name };
-      }
-      for (const p of this.players.values()) {
-        if (
-          isHuman(p) &&
-          p.name &&
-          p.name !== 'Driver' &&
-          normalizeBaseName(p.name) === targetCallsign
-        ) {
-          touch(p);
-          return { ok: true, clientId: p.clientId, name: p.name };
-        }
       }
       return INVALID_RESUME_CODE;
     }

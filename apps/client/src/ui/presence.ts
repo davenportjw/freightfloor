@@ -100,8 +100,8 @@ export function mountPresence(zone: HTMLElement, ctx: UiCtx): UiModule & { colla
     attrs: {
       maxlength: '64',
       autocomplete: 'off',
-      placeholder: 'Find existing callsign or paste wr1_…',
-      'aria-label': 'Find an existing callsign or paste a resume code',
+      placeholder: 'Paste resume code (wr1_…)',
+      'aria-label': 'Paste your resume code',
     },
   });
   const err = el('div', { class: 'form-error', attrs: { role: 'alert' } });
@@ -113,7 +113,7 @@ export function mountPresence(zone: HTMLElement, ctx: UiCtx): UiModule & { colla
   });
   const hint = el('div', {
     class: 'hint',
-    text: 'Callsigns are assigned by the lobby (new custom names cannot be added). Enter an existing callsign or paste your resume code to switch to an existing driver.',
+    text: 'Each browser gets a unique callsign assigned by the lobby. Paste your resume code (wr1_…) to restore a callsign across browsers.',
   });
   const body = el('div', { class: 'pill-body', attrs: { hidden: '' } }, [
     listEl,

@@ -243,14 +243,15 @@ describe('resume codes and existing callsign lookup', () => {
       expect(res.json().error).toBe('invalid_resume_code');
     }
 
-    // Existing callsign lookup finds and returns the existing player.
-    const byExistingCallsign = await app.inject({
+    // Another player's callsign from a new browser -> rejected (cannot assume another player without their secret resume code).
+    const byOtherCallsign = await app.inject({
       method: 'POST',
       url: '/api/join',
       payload: { clientId: 'new-browser', resume: victim.name },
     });
-    expect(byExistingCallsign.statusCode).toBe(200);
-    expect(byExistingCallsign.json()).toMatchObject({ clientId: 'victim-1', name: victim.name });
+    expect(byOtherCallsign.statusCode).toBe(404);
+    expect(byOtherCallsign.json().error).toBe('invalid_resume_code');
+    expect(byOtherCallsign.body).not.toContain('victim-1');
 
     // Valid code from a new browser → restores identity and returns the same code.
     const ok = await app.inject({ method: 'POST', url: '/api/join', payload: { clientId: 'new-browser', resume: victim.resumeToken } });
@@ -279,7 +280,7 @@ describe('resume codes and existing callsign lookup', () => {
     await app.close();
   });
 
-  it('Firestore store persists only the code hash and resolves existing callsigns and resume hashes across instances', async () => {
+  it('Firestore store persists only the code hash, blocks cross-browser callsign hijacking, and resolves resume hashes across instances', async () => {
     const db = new FakeFirestore();
     seedFullSites(db, { 'den-1': { drivers: 0 } });
     const [a, b] = await twoInstances(db);
@@ -292,10 +293,14 @@ describe('resume codes and existing callsign lookup', () => {
     const byUnknownName = await b.inject({ method: 'POST', url: '/api/join', payload: { clientId: 'other', resume: 'no-such-callsign-99' } });
     expect(byUnknownName.statusCode).toBe(404);
 
-    const byExistingName = await b.inject({ method: 'POST', url: '/api/join', payload: { clientId: 'other', resume: first.name } });
-    expect(byExistingName.statusCode).toBe(200);
-    expect(byExistingName.json().clientId).toBe('fs-player');
-    expect(byExistingName.json().name).toBe(first.name);
+    const byOtherPlayerName = await b.inject({ method: 'POST', url: '/api/join', payload: { clientId: 'other', resume: first.name } });
+    expect(byOtherPlayerName.statusCode).toBe(404);
+    expect(byOtherPlayerName.json().error).toBe('invalid_resume_code');
+
+    const bySameBrowserName = await b.inject({ method: 'POST', url: '/api/join', payload: { clientId: 'fs-player', resume: first.name } });
+    expect(bySameBrowserName.statusCode).toBe(200);
+    expect(bySameBrowserName.json().clientId).toBe('fs-player');
+    expect(bySameBrowserName.json().name).toBe(first.name);
 
     const byCode = await b.inject({ method: 'POST', url: '/api/join', payload: { clientId: 'other', resume: first.resumeToken } });
     expect(byCode.statusCode).toBe(200);

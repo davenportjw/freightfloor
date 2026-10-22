@@ -80,13 +80,8 @@ export function introSpinupStatus(state: IntroSpinupState): IntroSpinupStatus {
 }
 
 export interface HelpMountOptions {
-  /** Current saved or default callsign to pre-populate the callsign input. */
+  /** Current saved or default callsign to display in the assigned callsign badge. */
   getCallsign?: () => string;
-  /**
-   * Invoked when the player clicks "Start driving →" or submits the callsign bar.
-   * Returns (or resolves to) `null` if valid (allowing the modal to close) or an error message if invalid.
-   */
-  onEnterFloor?: (callsign: string) => string | null | Promise<string | null>;
 }
 
 /**
@@ -117,65 +112,6 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     attrs: { id: 'introAssignedCallsign', 'data-role': 'intro-assigned-callsign' },
     text: 'Assigning…',
   });
-  const callsignList = el('datalist', {
-    attrs: { id: 'introCallsignList' },
-  });
-  const callsignInput = el('input', {
-    class: 'text-input intro-callsign-input',
-    attrs: {
-      id: 'introCallsign',
-      type: 'text',
-      maxlength: '64',
-      autocomplete: 'off',
-      list: 'introCallsignList',
-      placeholder: 'Find your callsign (type to search)…',
-      'aria-label': 'Find an existing callsign or paste a resume code (optional)',
-    },
-  });
-  const callsignError = el('div', {
-    class: 'form-error',
-    attrs: { id: 'introCallsignError', role: 'alert' },
-  });
-
-  const knownCallsigns = new Set<string>();
-  function syncCallsignOptions(extra: readonly string[] = []): void {
-    for (const c of extra) {
-      const cleaned = c.replace(/\s+Run\s+\d+$/i, '').trim();
-      if (cleaned) knownCallsigns.add(cleaned);
-    }
-    for (const p of ctx.store.presence ?? []) {
-      const cleaned = (p.name || '').replace(/\s+Run\s+\d+$/i, '').trim();
-      if (cleaned) knownCallsigns.add(cleaned);
-    }
-    for (const row of ctx.store.network?.leaderboard ?? []) {
-      const cleaned = (row.name || '').replace(/\s+Run\s+\d+$/i, '').trim();
-      if (cleaned) knownCallsigns.add(cleaned);
-    }
-    const sorted = Array.from(knownCallsigns).sort((a, b) => a.localeCompare(b)).slice(0, 30);
-    callsignList.replaceChildren(
-      ...sorted.map((name) => el('option', { attrs: { value: name } })),
-    );
-  }
-
-  let lookupSeq = 0;
-  callsignInput.addEventListener('input', () => {
-    callsignError.textContent = '';
-    const q = callsignInput.value.trim();
-    syncCallsignOptions();
-    if (q.length < 2 || /^wr1_/i.test(q) || typeof globalThis.fetch !== 'function') return;
-    const seq = ++lookupSeq;
-    void globalThis
-      .fetch(`/api/callsigns?q=${encodeURIComponent(q)}`)
-      .then((res) => (res && res.ok ? res.json() : null))
-      .then((body: { callsigns?: unknown } | null) => {
-        if (seq !== lookupSeq || !body || !Array.isArray(body.callsigns)) return;
-        const found = body.callsigns.filter((x): x is string => typeof x === 'string');
-        syncCallsignOptions(found);
-      })
-      .catch(() => {
-        /* ignore background lookup errors in offline/unit test environments */
-      });
-  });
 
   function enterFloor(): void {
     // Wired client: startDriving queues the drive (intro stays up, "Connecting…") until welcome.
@@ -195,36 +131,8 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     }
   }
 
-  function showCallsignError(err: string): void {
-    callsignError.textContent = err;
-    callsignInput.focus();
-  }
-
   function tryEnterFloor(): void {
     if (ctx.store.ui.pendingDrive || startBtn.disabled) return;
-    callsignError.textContent = '';
-    const raw = callsignInput.value.trim();
-    if (!raw || !opts.onEnterFloor) {
-      enterFloor();
-      return;
-    }
-    const result = opts.onEnterFloor(raw);
-    if (result instanceof Promise) {
-      startBtn.disabled = true;
-      result
-        .then((err) => {
-          if (err) return showCallsignError(err);
-          callsignInput.value = '';
-          enterFloor();
-        })
-        .catch((e: unknown) => showCallsignError(e instanceof Error ? e.message : String(e)))
-        .finally(() => {
-          startBtn.disabled = false;
-        });
-      return;
-    }
-    if (result) return showCallsignError(result);
-    callsignInput.value = '';
     enterFloor();
   }
 
@@ -978,9 +886,6 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     el('div', { class: 'intro-callsign-box' }, [
       el('span', { class: 'muted', text: 'You are' }),
       assignedBadge,
-      callsignInput,
-      callsignList,
-      callsignError,
     ]),
     startBtn,
   ]);
@@ -1060,7 +965,6 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       if (assignedBadge.textContent !== current) {
         assignedBadge.textContent = current;
       }
-      syncCallsignOptions();
       if (overlay.hidden === !open) return;
       overlay.hidden = !open;
       // Trap Tab inside the dialog while open; return focus to where it was on close.
