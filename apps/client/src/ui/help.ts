@@ -131,8 +131,13 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     }
   }
 
+  let lastEnterAt = 0;
   function tryEnterFloor(): void {
-    if (ctx.store.ui.pendingDrive || startBtn.disabled) return;
+    if (startBtn.disabled) return;
+    if (ctx.store.ui.pendingDrive && (!ctx.store.welcomed || !ctx.store.you)) return;
+    const now = Date.now();
+    if (now - lastEnterAt < 250 && !ctx.store.ui.helpOpen) return;
+    lastEnterAt = now;
     enterFloor();
   }
 
@@ -140,6 +145,10 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     class: 'btn drive intro-start-btn',
     attrs: { type: 'submit', 'data-action': 'close-intro' },
     text: 'Start driving →',
+    onClick: (ev) => {
+      ev.preventDefault();
+      tryEnterFloor();
+    },
   });
 
   // ---- view switch: one secondary pill button to the AI explainer, one back ----

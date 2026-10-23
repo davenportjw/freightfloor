@@ -141,10 +141,15 @@ export function mountA2ui(zone: HTMLElement, ctx: UiCtx): UiModule {
         activeScreenId = null;
         const canPick = dcCanPick(dc, now);
         const secs = dcSecondsLeft(dc, now);
-        const key = JSON.stringify(['dc', dc.minigame.id, dc.picked, dc.reveal?.id ?? null, canPick, secs]);
+        const key = JSON.stringify(['dc', dc.minigame.id, dc.picked, dc.reveal?.id ?? null, canPick]);
         view.render(key, () => renderDispatchersCall(dc, canPick, secs, (idx) => actions.pickDispatchersCall(idx)));
         const ring = root.querySelector<HTMLElement>('.dc-ring');
-        if (ring) ring.style.setProperty('--dc-left', String(dcTimeLeft(dc, now)));
+        if (ring) {
+          ring.style.setProperty('--dc-left', String(dcTimeLeft(dc, now)));
+          const ringText = dc.reveal || dc.picked != null ? '✓' : String(secs);
+          if (ring.textContent !== ringText) ring.textContent = ringText;
+          ring.setAttribute('aria-label', `${secs} seconds left`);
+        }
         return;
       }
 
@@ -168,7 +173,7 @@ export function mountA2ui(zone: HTMLElement, ctx: UiCtx): UiModule {
         draft.targetBay,
         draft.priority,
         draft.count,
-        screen.telemetry,
+        screen.telemetry.map((t) => `${t.label}:${t.tone ?? ''}`),
         screen.recommendedSource ?? null,
       ]);
 
@@ -291,6 +296,11 @@ export function mountA2ui(zone: HTMLElement, ctx: UiCtx): UiModule {
         ]);
 
         return [header, telemetryRow, presetsRow, selectorsGrid, footer];
+      });
+      const statVals = root.querySelectorAll<HTMLElement>('.a2ui-stat__val');
+      screen.telemetry.forEach((t, idx) => {
+        const valEl = statVals[idx];
+        if (valEl && valEl.textContent !== t.value) valEl.textContent = t.value;
       });
     },
   };

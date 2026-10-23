@@ -64,6 +64,8 @@ canvas#world { width: 100%; height: 100%; display: block; cursor: grab; touch-ac
   font-size: 12.5px;
   cursor: pointer;
   white-space: nowrap;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
   transition: background 0.12s, border-color 0.12s, color 0.12s;
 }
 .btn:hover { background: var(--blue-l); border-color: #3b82f6; color: var(--blue-d); }
@@ -640,6 +642,7 @@ canvas#world { width: 100%; height: 100%; display: block; cursor: grab; touch-ac
 }
 .intro-spinup__quip {
   margin: 0;
+  min-height: 2.8em;
   font-size: 12px;
   line-height: 1.4;
   color: var(--muted);
@@ -1479,6 +1482,8 @@ canvas#world.cone-mode { cursor: crosshair; }
   text-decoration: none;
   font: inherit;
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 .go {
   background: var(--ink); color: #fff; border: 1px solid var(--ink);

@@ -33,14 +33,54 @@ export function el<K extends keyof HTMLElementTagNameMap>(
     }
   }
   if (opts.onClick) {
-    const handler = opts.onClick;
-    node.addEventListener('click', (ev) => handler(ev as MouseEvent));
+    bindTapClick(node, opts.onClick);
   }
   for (const c of children) {
     if (c === null || c === undefined || c === false) continue;
     node.append(typeof c === 'string' ? document.createTextNode(c) : c);
   }
   return node;
+}
+
+/**
+ * Bind a click handler that also activates on a clean touch `pointerup` (with
+ * scroll-slop tolerance and synthetic-click deduplication) so iOS Safari never
+ * swallows the first tap when a modal or live HUD updates between touch events.
+ */
+export function bindTapClick(node: HTMLElement, handler: (ev: MouseEvent) => void): void {
+  let downX = 0;
+  let downY = 0;
+  let touchTracking = false;
+  let lastTouchFireAt = 0;
+  const SLOP_PX = 12;
+  const DEDUPE_MS = 450;
+
+  if (typeof node.addEventListener !== 'function') return;
+
+  node.addEventListener('pointerdown', (ev: PointerEvent) => {
+    if (ev.pointerType !== 'touch') return;
+    touchTracking = true;
+    downX = ev.clientX;
+    downY = ev.clientY;
+  });
+  node.addEventListener('pointercancel', () => {
+    touchTracking = false;
+  });
+  node.addEventListener('pointerup', (ev: PointerEvent) => {
+    if (!touchTracking || ev.pointerType !== 'touch') return;
+    touchTracking = false;
+    if ((node as HTMLButtonElement).disabled) return;
+    if (Math.hypot(ev.clientX - downX, ev.clientY - downY) > SLOP_PX) return;
+    lastTouchFireAt = Date.now();
+    handler(ev as unknown as MouseEvent);
+  });
+  node.addEventListener('click', (ev) => {
+    if (Date.now() - lastTouchFireAt < DEDUPE_MS) {
+      ev.preventDefault();
+      return;
+    }
+    handler(ev as MouseEvent);
+  });
 }
 
 export function button(

@@ -199,7 +199,7 @@ When the client loads (`apps/client/src/ui/help.ts`), the **Intro Page** (`#help
 
 ## Client HUD (v3) Module Layout
 
-The client (`apps/client`, vanilla TypeScript + Canvas2D, Vite) has two HUD layouts, **Drive** and **Floor**, chosen by `ui/mode.ts` (`hudMode`, `activeOverlay`). See [gameplay.md § 7](gameplay.md#7-client-ui--controls) for the player-facing description. Each HUD region is one module mounted by `main.ts` on a fixed element id. Modules are re-rendered from `ClientStore` (`state.ts`) through `KeyedView`, so the DOM only changes when the view model changes.
+The client (`apps/client`, vanilla TypeScript + Canvas2D, Vite) has two HUD layouts, **Drive** and **Floor**, chosen by `ui/mode.ts` (`hudMode`, `activeOverlay`). See [gameplay.md § 7](gameplay.md#7-client-ui--controls) for the player-facing description. Each HUD region is one module mounted by `main.ts` on a fixed element id. Modules are re-rendered from `ClientStore` (`state.ts`) through `KeyedView`, so the DOM only changes when the view model changes. Interactive buttons use `bindTapClick` (`ui/dom.ts`) with `touch-action: manipulation` so iOS Safari / coarse-pointer touch taps activate cleanly on `pointerup` (with scroll-slop tolerance and synthetic `click` deduplication), `createFocusTrap` (`ui/focusTrap.ts`) skips programmatic initial focus on coarse pointers, and dismissing the `#help` Intro modal auto-keeps the initial contract offer so players are never blocked by two sequential intro modals (`#help` → `#pickSheet`).
 
 | Module | Element | Role |
 |---|---|---|

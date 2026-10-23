@@ -3,6 +3,7 @@ import { FRAME_ERROR_LOG_MS, guardedFrame } from '../src/frameLoop.js';
 import { NetworkPoller, type NetworkPollerDeps } from '../src/networkPoller.js';
 import type { NetworkFetch } from '../src/net.js';
 import { createFocusTrap, nextTrapTarget, type TrapContainer, type TrapKeyEvent } from '../src/ui/focusTrap.js';
+import { bindTapClick } from '../src/ui/dom.js';
 import { PointerSet, pinchStep } from '../src/render/gestures.js';
 import { zoomAt } from '../src/render/iso.js';
 import { watchDevicePixelRatio, watchElementSize } from '../src/render/dpr.js';
@@ -154,6 +155,97 @@ describe('focus trap', () => {
     trap.deactivate();
     expect(handler).toBeNull();
     expect(doc.activeElement).toBe(node('outside'));
+  });
+
+  it('skips programmatic initial focus on coarse-pointer (touch) devices to prevent iOS Safari tap swallowing', () => {
+    const prevWin = (globalThis as Record<string, unknown>).window;
+    (globalThis as Record<string, unknown>).window = {
+      matchMedia: (q: string) => ({ matches: q === '(pointer: coarse)' }),
+    };
+    try {
+      const doc = { activeElement: null as unknown };
+      const first = { focus: vi.fn() };
+      const container: TrapContainer<typeof first> = {
+        querySelectorAll: () => [first],
+        contains: () => false,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      };
+      const trap = createFocusTrap(container, doc);
+      trap.activate(first);
+      expect(first.focus).not.toHaveBeenCalled();
+    } finally {
+      (globalThis as Record<string, unknown>).window = prevWin;
+    }
+  });
+});
+
+describe('bindTapClick (iOS Safari single-tap activation)', () => {
+  function makeMockButton(): {
+    disabled: boolean;
+    emit: (type: string, ev: Record<string, unknown>) => void;
+    node: HTMLElement;
+  } {
+    const listeners = new Map<string, Array<(ev: unknown) => void>>();
+    const btn = {
+      disabled: false,
+      addEventListener(type: string, fn: (ev: unknown) => void) {
+        const list = listeners.get(type) ?? [];
+        list.push(fn);
+        listeners.set(type, list);
+      },
+      emit(type: string, ev: Record<string, unknown>) {
+        for (const fn of listeners.get(type) ?? []) fn(ev);
+      },
+    };
+    return {
+      get disabled() {
+        return btn.disabled;
+      },
+      set disabled(v: boolean) {
+        btn.disabled = v;
+      },
+      emit: btn.emit.bind(btn),
+      node: btn as unknown as HTMLElement,
+    };
+  }
+
+  it('fires on touch pointerup within slop and deduplicates the subsequent synthesized click', () => {
+    const mock = makeMockButton();
+    const handler = vi.fn();
+    bindTapClick(mock.node, handler);
+
+    mock.emit('pointerdown', { pointerType: 'touch', clientX: 100, clientY: 200 });
+    mock.emit('pointerup', { pointerType: 'touch', clientX: 104, clientY: 203 });
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    const preventDefault = vi.fn();
+    mock.emit('click', { preventDefault });
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores touch pointerup when the finger scrolled beyond the slop threshold', () => {
+    const mock = makeMockButton();
+    const handler = vi.fn();
+    bindTapClick(mock.node, handler);
+
+    mock.emit('pointerdown', { pointerType: 'touch', clientX: 100, clientY: 200 });
+    mock.emit('pointerup', { pointerType: 'touch', clientX: 100, clientY: 230 });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('fires normally on mouse/keyboard click', () => {
+    const mock = makeMockButton();
+    const handler = vi.fn();
+    bindTapClick(mock.node, handler);
+
+    mock.emit('pointerdown', { pointerType: 'mouse', clientX: 50, clientY: 50 });
+    mock.emit('pointerup', { pointerType: 'mouse', clientX: 50, clientY: 50 });
+    expect(handler).not.toHaveBeenCalled();
+
+    mock.emit('click', { preventDefault: vi.fn() });
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 });
 

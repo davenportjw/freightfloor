@@ -17,7 +17,7 @@ export const FOCUSABLE_SELECTOR = [
 
 /** Minimal focusable element surface. */
 export interface FocusableLike {
-  focus(): void;
+  focus(options?: { preventScroll?: boolean }): void;
   hidden?: boolean;
   isConnected?: boolean;
   getClientRects?: () => { length: number };
@@ -101,8 +101,14 @@ export function createFocusTrap<E extends FocusableLike>(
         if (typeof container.addEventListener === 'function') container.addEventListener('keydown', onKey);
         on = true;
       }
-      const first = initial ?? focusables()[0] ?? null;
-      if (first && typeof first.focus === 'function') first.focus();
+      const coarsePointer =
+        typeof window !== 'undefined' &&
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(pointer: coarse)').matches;
+      if (!coarsePointer) {
+        const first = initial ?? focusables()[0] ?? null;
+        if (first && typeof first.focus === 'function') first.focus();
+      }
     },
     deactivate() {
       if (!on) return;

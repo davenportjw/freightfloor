@@ -20,7 +20,6 @@ import {
   optionPills,
   rivalDraftText,
   rivalPillText,
-  secondsLeft,
 } from './fareChoice.js';
 
 /** Battery % under which the low-battery alert shows. */
@@ -237,14 +236,13 @@ export function mountObjective(
       const off = store.myFareOffer();
       const offKey = fareOfferKey(off);
       const pills = off && offKey ? optionPills(off, store.ui.fareSel) : [];
-      const secs = off && offKey ? secondsLeft(off, store.world.t) : null;
       const rivalText = rivalPillText(me.rivalId, store.world.vehicles, me.sPts);
       const draftText = me.rivalId ? rivalDraftText(store.myHand(), store.side.cardDecisions.get(me.rivalId)) : null;
       // My rival's latest real Gemini decision (`brainDecision`): verbatim note + measured latency.
       const reasonText = me.rivalId ? rivalReasonText(store.vehicle(me.rivalId), store.brainDecisions.get(me.rivalId)) : null;
       fareEl.hidden = !pills.length && !rivalText && !draftText && !reasonText;
       if (!fareEl.hidden) {
-        fareView.render(JSON.stringify([offKey, store.ui.fareSel, secs, off?.reason ?? '', rivalText, draftText, reasonText]), () => {
+        fareView.render(JSON.stringify([offKey, store.ui.fareSel, off?.reason ?? '', Boolean(rivalText), draftText, reasonText]), () => {
           const rows: HTMLElement[] = [];
           if (off && pills.length) {
             rows.push(
@@ -292,6 +290,15 @@ export function mountObjective(
           }
           return rows;
         });
+        const cdEl = fareEl.querySelector<HTMLElement>('.fare-countdown');
+        if (cdEl && off) {
+          const cdText = countdownText(off, store.world.t);
+          if (cdEl.textContent !== cdText) cdEl.textContent = cdText;
+        }
+        const rpEl = fareEl.querySelector<HTMLElement>('[data-role="rival-pill"]');
+        if (rpEl && rivalText && rpEl.textContent !== rivalText) {
+          rpEl.textContent = rivalText;
+        }
       }
 
       // ---- alert: one line, newest wins ----

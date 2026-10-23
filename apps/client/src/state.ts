@@ -1067,7 +1067,7 @@ export class ClientStore {
       hand: this.welcomed ? this.myHand() : null,
       dealMinimizedKey: this.ui.dealMinimizedKey,
       overlay: this.ui.overlay,
-      modalOpen: this.ui.agentDesignerOpen || this.ui.leaderboardModalOpen,
+      modalOpen: this.ui.helpOpen || this.ui.agentDesignerOpen || this.ui.leaderboardModalOpen,
     });
   }
 

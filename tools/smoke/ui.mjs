@@ -408,7 +408,7 @@ try {
     await githubBtnCheck('drive, 1600×900');
     const driveGeo = await hudGeometry();
     const core = ['#menuBtn', '#run', '#objective', '#contracts', '#dash'];
-    const extras = driveGeo.visible.filter((s) => !core.includes(s) && !['#githubBtn', '#fare', '#alert', '#reloc'].includes(s));
+    const extras = driveGeo.visible.filter((s) => !core.includes(s) && !['#githubBtn', '#brandBadge', '#fare', '#alert', '#reloc'].includes(s));
     check('Drive HUD shows the 5 drive elements only', core.every((s) => driveGeo.visible.includes(s)) && extras.length === 0, driveGeo.visible.join(','));
     check('no overlapping HUD cards (drive, 1600×900)', driveGeo.overlaps.length === 0, driveGeo.overlaps.join(' ') || driveGeo.visible.join(','));
     check('Drive HUD covers ≤15% of the floor (1600×900)', driveGeo.coverage <= 0.15, `${(driveGeo.coverage * 100).toFixed(1)}%`);
@@ -464,15 +464,18 @@ try {
     await blur();
     await page.keyboard.press('KeyH');
 
-    // HUD Minimal (V) persists across reload; the intro still opens on a subsequent visit.
+    // HUD Minimal (V) persists across reload; the intro still opens on a subsequent visit,
+    // and dismissing it never opens a second blocking #pickSheet modal even for returning players.
     await page.keyboard.press('KeyV');
     await page.waitForTimeout(150);
+    await page.evaluate(() => localStorage.setItem('warehouse.runs.done', '2'));
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(1500);
     const helpVisibleAfterReload = await page.locator('#help').isVisible().catch(() => false);
     check('intro page (#help) visible on subsequent visit after reload', helpVisibleAfterReload);
     if (helpVisibleAfterReload) await page.locator('[data-action="close-intro"]').first().click();
     await page.waitForTimeout(2500);
+    check('single intro dismissal enters floor without stacked #pickSheet modal', !(await isShown('#help')) && !(await isShown('#pickSheet')));
     const minimalPersisted = await page.evaluate(() => document.body.classList.contains('hud-minimal'));
     check('HUD Minimal persists after reload', minimalPersisted);
     await blur();

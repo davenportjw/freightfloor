@@ -414,10 +414,15 @@ function boot(): void {
       store.changed();
     },
     showHelp(open) {
+      const wasOpen = store.ui.helpOpen;
       store.ui.helpOpen = open;
       if (!open) {
         store.ui.pendingDrive = false;
         markHelpSeen(safeStorage());
+        if (wasOpen) {
+          introDismissedAutoKeep = true;
+          maybeAutoKeep(true);
+        }
         checkRunEnd();
       }
       store.changed();
@@ -487,6 +492,7 @@ function boot(): void {
       renderer.panTo(x, y);
     },
     startDriving() {
+      introDismissedAutoKeep = true;
       // Pressed before the welcome: keep the intro up ("Connecting…") and drive when it lands.
       if (!store.welcomed || !store.you) {
         store.ui.pendingDrive = true;
@@ -498,6 +504,7 @@ function boot(): void {
       // reading the intro, driveFromFloor re-requests a fresh driver seat.
       if (store.evictedReason !== null) actions.driveFromFloor();
       else actions.quickDrive();
+      maybeAutoKeep(true);
     },
     driveFromFloor() {
       const pres = presenceView(store);
@@ -851,10 +858,11 @@ function boot(): void {
   function refreshDriveFirst(): void {
     store.driveFirst = isDriveFirstRun({ runNumber: currentRunNumber(), runsDone: readRunsDone(safeStorage()) });
   }
-  /** Run 1: auto-keep one card instead of opening the pick sheet (once per dealt offer). */
+  /** Run 1 (or immediately after dismissing the Intro modal): auto-keep one card instead of opening a second intro sheet. */
   let autoKeptKey: string | null = null;
-  function maybeAutoKeep(): void {
-    if (!store.driveFirst || store.hudMode() !== 'driving') return;
+  let introDismissedAutoKeep = false;
+  function maybeAutoKeep(force = false): void {
+    if ((!store.driveFirst && !force && !introDismissedAutoKeep) || store.hudMode() !== 'driving') return;
     const hand = store.myHand();
     const offer = hand?.offer;
     if (!hand || !offer?.length || hand.pick != null) return;
@@ -863,6 +871,7 @@ function boot(): void {
     const ids = autoKeepIds(offer);
     if (!ids.length) return;
     autoKeptKey = key;
+    introDismissedAutoKeep = false;
     store.ui.dealMinimizedKey = key;
     actions.keepCards(ids);
   }

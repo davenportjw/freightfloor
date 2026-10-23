@@ -44,13 +44,24 @@ describe('hudMode / activeOverlay', () => {
     expect(pickSheetOpen({ mode: 'driving', hand: { offer: null, pick: null } as never, dealMinimizedKey: null })).toBe(false);
   });
 
-  it('results > pick > explicit overlay', () => {
+  it('results > pick > explicit overlay, and helpOpen suppresses stacked underlying pick sheet', () => {
     const hand = { offer: [card('a')], pick: null } as never;
     const base = { mode: 'driving' as const, hand, dealMinimizedKey: null, overlay: 'chat' as const };
     expect(activeOverlay({ ...base, runEndOpen: true })).toBe('results');
     expect(activeOverlay({ ...base, runEndOpen: false })).toBe('pick');
     expect(activeOverlay({ ...base, runEndOpen: false, hand: null })).toBe('chat');
     expect(activeOverlay({ ...base, runEndOpen: false, hand: null, overlay: null })).toBeNull();
+
+    const store = new ClientStore();
+    store.welcomed = true;
+    store.you = { id: 'p1', clientId: 'c1', name: 'Fork-1', color: '#000', role: 'driver', vid: 'v1', siteId: 'den-1' };
+    store.myVid = 'v1';
+    store.world.vehicles = [{ id: 'v1', human: true, runFinished: false } as unknown as Vehicle];
+    store.world.cards = { c1: hand };
+    store.ui.helpOpen = true;
+    expect(store.activeOverlay()).toBeNull();
+    store.ui.helpOpen = false;
+    expect(store.activeOverlay()).toBe('pick');
   });
 });
 
