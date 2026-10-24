@@ -429,7 +429,7 @@ export class FirestoreLobbyStore implements LobbyStore {
           process.env.GOOGLE_CLOUD_PROJECT ||
           process.env.GCP_PROJECT_ID ||
           process.env.GCP_PROJECT ||
-          'davenport-boutique',
+          'davenporter-freightfloor',
         databaseId: process.env.FIRESTORE_DATABASE_ID || '(default)',
       });
   }

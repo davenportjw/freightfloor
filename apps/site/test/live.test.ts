@@ -29,7 +29,7 @@ describe.skipIf(!runLive)(
 
         const persistence = new InMemoryPersistenceStore();
         const client = new VertexGeminiBrainClient({
-          projectId: 'davenport-boutique',
+          projectId: process.env.GCP_PROJECT_ID || 'davenporter-freightfloor',
           location: 'global',
           model: DEFAULT_GEMINI_MODEL,
         });

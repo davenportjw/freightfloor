@@ -119,7 +119,7 @@ export class VertexPilotModelClient implements PilotModelClient {
   public readonly model: string;
 
   constructor(opts?: { projectId?: string; location?: string; model?: string }) {
-    const project = opts?.projectId ?? process.env.GCP_PROJECT_ID ?? 'davenport-boutique';
+    const project = opts?.projectId ?? process.env.GCP_PROJECT_ID ?? 'davenporter-freightfloor';
     const location = opts?.location ?? process.env.GCP_LOCATION ?? 'global';
     this.model = opts?.model ?? PILOT_GEMINI_MODEL;
     this.ai = new GoogleGenAI({

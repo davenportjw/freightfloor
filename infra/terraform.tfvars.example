@@ -4,7 +4,7 @@
 # ============================================================================
 
 # Required: Your Google Cloud Project ID
-project_id = "your-gcp-project-id"
+project_id = "davenporter-freightfloor"
 
 # Default Google Cloud region for Cloud Run, Artifact Registry, Secret Manager & Model Armor
 region = "us-central1"
@@ -29,6 +29,15 @@ queue_scale_threshold = 8
 # Feature flags for regional warehouse shards
 enable_dispatchers_call   = true
 enable_rack_lift_minigame = false
+
+# AI Usage Caps & Cloud Quotas
+agent_daily_budget_usd              = 12.5
+nl_command_daily_budget_usd         = 1.5
+brain_max_rpm_per_site              = 120
+max_concurrent_brain_calls          = 8
+vertex_daily_input_token_quota      = 50000000
+vertex_per_minute_input_token_quota = 1000000
+model_armor_rpm_quota               = 120
 
 # Optional infrastructure toggles
 enable_loadtest_job = true

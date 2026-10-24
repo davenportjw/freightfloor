@@ -1,7 +1,7 @@
 variable "project_id" {
   description = "Google Cloud Project ID"
   type        = string
-  default     = "davenport-boutique"
+  default     = "davenporter-freightfloor"
 }
 
 variable "region" {
@@ -76,4 +76,44 @@ variable "enable_dispatchers_call" {
   default     = true
 }
 
+variable "agent_daily_budget_usd" {
+  description = "Daily USD cap across all site shards for autonomous Gemini shift brains and Dispatcher's Call"
+  type        = number
+  default     = 12.5
+}
 
+variable "nl_command_daily_budget_usd" {
+  description = "Daily USD cap across all site shards for natural-language manager orders (nlCommand)"
+  type        = number
+  default     = 1.5
+}
+
+variable "brain_max_rpm_per_site" {
+  description = "Maximum Gemini brain calls per minute per regional site shard"
+  type        = number
+  default     = 120
+}
+
+variable "max_concurrent_brain_calls" {
+  description = "Maximum concurrent in-flight Gemini brain calls per regional site shard"
+  type        = number
+  default     = 8
+}
+
+variable "vertex_daily_input_token_quota" {
+  description = "Hard GCP Cloud Quotas daily input token limit for Gemini 3.5 Flash-Lite (GlobalGenerateContentInputTokensPerDayPerBaseModel)"
+  type        = number
+  default     = 50000000
+}
+
+variable "vertex_per_minute_input_token_quota" {
+  description = "Hard GCP Cloud Quotas per-minute input token limit for Gemini 3.5 Flash-Lite (GlobalGenerateContentInputTokensPerMinutePerBaseModel)"
+  type        = number
+  default     = 1000000
+}
+
+variable "model_armor_rpm_quota" {
+  description = "Hard GCP Cloud Quotas per-minute request limit for Model Armor (RequestsPerMinute)"
+  type        = number
+  default     = 120
+}

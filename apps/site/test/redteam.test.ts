@@ -44,12 +44,12 @@ describe.skipIf(!runLive)(
         expect(corpus.length).toBeGreaterThanOrEqual(60);
 
         const armorClient = new CloudModelArmorClient({
-          projectId: 'davenport-boutique',
+          projectId: process.env.GCP_PROJECT_ID || 'davenporter-freightfloor',
           location: 'us-central1',
           templatePath: DEFAULT_MODEL_ARMOR_TEMPLATE,
         });
         const parserClient = new VertexNlOrderParser({
-          projectId: 'davenport-boutique',
+          projectId: process.env.GCP_PROJECT_ID || 'davenporter-freightfloor',
           location: 'global',
           model: DEFAULT_GEMINI_MODEL,
         });

@@ -103,7 +103,7 @@ export async function cleanupSmokePlayers(options: {
   /** Collection suffix (lobby/site use `players${SUFFIX}`; '' in prod, '-stg' in staging). */
   suffix?: string;
 }): Promise<number> {
-  const projectId = options.projectId ?? process.env.GCP_PROJECT_ID ?? 'davenport-boutique';
+  const projectId = options.projectId ?? process.env.GCP_PROJECT_ID ?? 'davenporter-freightfloor';
   const prefix = options.prefix ?? process.env.FIRESTORE_PREFIX ?? '';
   const suffix = options.suffix ?? process.env.SUFFIX ?? '';
   const db = new Firestore({ projectId });
@@ -311,7 +311,7 @@ export interface SiteAccess {
 export async function openSiteAccess(opts: SiteAccessOptions): Promise<SiteAccess> {
   const lobbyUrl = opts.lobbyUrl.replace(/\/$/, '');
   const remote = lobbyUrl.startsWith('https://');
-  const projectId = opts.projectId ?? process.env.GCP_PROJECT_ID ?? 'davenport-boutique';
+  const projectId = opts.projectId ?? process.env.GCP_PROJECT_ID ?? 'davenporter-freightfloor';
   const prefix = opts.prefix ?? process.env.FIRESTORE_PREFIX ?? '';
   const proxySecret = opts.proxySecret ?? (remote ? await resolveProxySecret(projectId) : undefined);
   const auth = new GoogleAuth();
@@ -424,7 +424,7 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
   let secondaryWs: WebSocket | null = null;
 
   const projectId =
-    options.firestoreProjectId ?? process.env.GCP_PROJECT_ID ?? 'davenport-boutique';
+    options.firestoreProjectId ?? process.env.GCP_PROJECT_ID ?? 'davenporter-freightfloor';
   const prefix = options.firestorePrefix ?? process.env.FIRESTORE_PREFIX ?? '';
 
   try {

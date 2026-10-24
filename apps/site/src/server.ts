@@ -837,7 +837,7 @@ export async function createSiteServer(
   const gcpProjectId =
     process.env.GOOGLE_CLOUD_PROJECT ||
     process.env.GCP_PROJECT_ID ||
-    'davenport-boutique';
+    'davenporter-freightfloor';
   const vertexLocation =
     process.env.VERTEX_LOCATION ||
     process.env.GEMINI_LOCATION ||

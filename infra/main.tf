@@ -1,7 +1,12 @@
+data "google_project" "current" {
+  project_id = var.project_id
+}
+
 locals {
   site_image     = var.site_image != "" ? var.site_image : "${var.region}-docker.pkg.dev/${var.project_id}/warehouse/site:latest"
   lobby_image    = var.lobby_image != "" ? var.lobby_image : "${var.region}-docker.pkg.dev/${var.project_id}/warehouse/lobby:latest"
   loadtest_image = var.loadtest_image != "" ? var.loadtest_image : "${var.region}-docker.pkg.dev/${var.project_id}/warehouse/loadtest:latest"
+  role_suffix    = replace(var.suffix, "-", "_")
 
   services = [
     "run.googleapis.com",
@@ -12,6 +17,8 @@ locals {
     "pubsub.googleapis.com",
     "secretmanager.googleapis.com",
     "modelarmor.googleapis.com",
+    "cloudquotas.googleapis.com",
+    "iam.googleapis.com",
   ]
 
   sites = {
@@ -50,7 +57,32 @@ resource "google_artifact_registry_repository" "warehouse" {
   depends_on = [google_project_service.apis]
 }
 
-# 3. Service Accounts & IAM Roles
+# 3. Least-Privilege Custom IAM Roles & Service Accounts
+resource "google_project_iam_custom_role" "vertex_predict" {
+  project     = var.project_id
+  role_id     = "warehouseVertexPredict${local.role_suffix}"
+  title       = "Warehouse Vertex AI Online Prediction Only (${var.suffix == "" ? "prod" : var.suffix})"
+  description = "Least-privilege role granting only aiplatform.endpoints.predict for Gemini inference (no training, jobs, or endpoint deployment)"
+  permissions = [
+    "aiplatform.endpoints.predict",
+  ]
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_project_iam_custom_role" "modelarmor_sanitize" {
+  project     = var.project_id
+  role_id     = "warehouseModelArmorSanitize${local.role_suffix}"
+  title       = "Warehouse Model Armor Sanitize Only (${var.suffix == "" ? "prod" : var.suffix})"
+  description = "Least-privilege role granting only Model Armor prompt and model-response sanitization permissions"
+  permissions = [
+    "modelarmor.templates.useToSanitizeUserPrompt",
+    "modelarmor.templates.useToSanitizeModelResponse",
+  ]
+
+  depends_on = [google_project_service.apis]
+}
+
 resource "google_service_account" "site" {
   project      = var.project_id
   account_id   = "warehouse-site${var.suffix}"
@@ -75,13 +107,44 @@ resource "google_service_account" "loadtest" {
   display_name = "Warehouse Loadtest & Gemini Pilots (${var.suffix == "" ? "prod" : var.suffix})"
 }
 
+resource "google_service_account" "cloudbuild" {
+  count        = var.suffix == "" ? 1 : 0
+  project      = var.project_id
+  account_id   = "warehouse-cloudbuild"
+  display_name = "Warehouse Cloud Build Builder (Least Privilege)"
+}
+
+resource "google_artifact_registry_repository_iam_member" "cloudbuild_writer" {
+  count      = var.suffix == "" ? 1 : 0
+  project    = var.project_id
+  location   = var.region
+  repository = google_artifact_registry_repository.warehouse[0].name
+  role       = "roles/artifactregistry.writer"
+  member     = "serviceAccount:${google_service_account.cloudbuild[0].email}"
+}
+
+resource "google_project_iam_member" "cloudbuild_logging" {
+  count   = var.suffix == "" ? 1 : 0
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.cloudbuild[0].email}"
+}
+
+resource "google_project_iam_member" "cloudbuild_storage_viewer" {
+  count   = var.suffix == "" ? 1 : 0
+  project = var.project_id
+  role    = "roles/storage.objectViewer"
+  member  = "serviceAccount:${google_service_account.cloudbuild[0].email}"
+}
+
+# Site SA: scoped strictly to custom Vertex predict, custom Model Armor sanitize, and Firestore user.
+# Pub/Sub publisher and Secret Manager accessor are bound at the individual topic/secret resource level below.
 resource "google_project_iam_member" "site_roles" {
-  for_each = toset([
-    "roles/aiplatform.user",
-    "roles/datastore.user",
-    "roles/pubsub.publisher",
-    "roles/modelarmor.user",
-  ])
+  for_each = {
+    vertex_predict      = google_project_iam_custom_role.vertex_predict.name
+    modelarmor_sanitize = google_project_iam_custom_role.modelarmor_sanitize.name
+    datastore           = "roles/datastore.user"
+  }
   project = var.project_id
   role    = each.value
   member  = "serviceAccount:${google_service_account.site.email}"
@@ -93,9 +156,10 @@ resource "google_project_iam_member" "lobby_datastore" {
   member  = "serviceAccount:${google_service_account.lobby.email}"
 }
 
+# Loadtest SA: scoped strictly to custom Vertex predict (aiplatform.endpoints.predict only).
 resource "google_project_iam_member" "loadtest_aiplatform" {
   project = var.project_id
-  role    = "roles/aiplatform.user"
+  role    = google_project_iam_custom_role.vertex_predict.name
   member  = "serviceAccount:${google_service_account.loadtest.email}"
 }
 
@@ -148,7 +212,7 @@ resource "google_firestore_field" "journal_ttl" {
   depends_on = [google_project_service.apis]
 }
 
-# 6. Pub/Sub Topics & Subscriptions for Cross-Site Transfers
+# 6. Pub/Sub Topics, Subscriptions & Resource-Scoped IAM for Cross-Site Transfers
 resource "google_pubsub_topic" "site_transfers_dlq" {
   project    = var.project_id
   name       = "site-transfers-dlq${var.suffix}"
@@ -158,6 +222,124 @@ resource "google_pubsub_topic" "site_transfers_dlq" {
 resource "google_pubsub_topic" "site_transfers" {
   project    = var.project_id
   name       = "site-transfers${var.suffix}"
+  depends_on = [google_project_service.apis]
+}
+
+# Site SA can publish ONLY to the site-transfers topic (not project-wide).
+resource "google_pubsub_topic_iam_member" "site_transfers_publisher" {
+  project = var.project_id
+  topic   = google_pubsub_topic.site_transfers.name
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${google_service_account.site.email}"
+}
+
+# Pub/Sub service agent can mint OIDC push tokens ONLY for warehouse-pubsub-push SA.
+resource "google_service_account_iam_member" "pubsub_push_token_creator" {
+  service_account_id = google_service_account.pubsub_push.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+  depends_on         = [google_pubsub_topic.site_transfers]
+}
+
+# Pub/Sub service agent can publish dead-lettered messages ONLY to site-transfers-dlq.
+resource "google_pubsub_topic_iam_member" "pubsub_dlq_publisher" {
+  project = var.project_id
+  topic   = google_pubsub_topic.site_transfers_dlq.name
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+
+# 6b. Model Armor Template & GCP Cloud Quotas / Hard AI Usage Caps
+resource "google_model_armor_template" "warehouse_orders" {
+  project     = var.project_id
+  location    = var.region
+  template_id = "warehouse-orders${var.suffix}"
+
+  filter_config {
+    pi_and_jailbreak_filter_settings {
+      filter_enforcement = "ENABLED"
+      confidence_level   = "LOW_AND_ABOVE"
+    }
+    malicious_uri_filter_settings {
+      filter_enforcement = "ENABLED"
+    }
+    rai_settings {
+      rai_filters {
+        filter_type      = "DANGEROUS"
+        confidence_level = "MEDIUM_AND_ABOVE"
+      }
+      rai_filters {
+        filter_type      = "HATE_SPEECH"
+        confidence_level = "MEDIUM_AND_ABOVE"
+      }
+      rai_filters {
+        filter_type      = "HARASSMENT"
+        confidence_level = "MEDIUM_AND_ABOVE"
+      }
+      rai_filters {
+        filter_type      = "SEXUALLY_EXPLICIT"
+        confidence_level = "MEDIUM_AND_ABOVE"
+      }
+    }
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_cloud_quotas_quota_adjuster_settings" "disable_auto_increase" {
+  count      = var.suffix == "" ? 1 : 0
+  parent     = "projects/${var.project_id}"
+  enablement = "DISABLED"
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_cloud_quotas_quota_preference" "vertex_daily_tokens_cap" {
+  count                = var.suffix == "" ? 1 : 0
+  parent               = "projects/${var.project_id}"
+  name                 = "vertex-gemini-flash-lite-daily-input-tokens"
+  service              = "aiplatform.googleapis.com"
+  quota_id             = "GlobalGenerateContentInputTokensPerDayPerBaseModel"
+  dimensions           = { base_model = "gemini-3.5-flash-lite-qcd" }
+  ignore_safety_checks = "QUOTA_DECREASE_PERCENTAGE_TOO_HIGH"
+  justification        = "Hard daily input token cap for Freight Floor Gemini 3.5 Flash-Lite fleet"
+
+  quota_config {
+    preferred_value = tostring(var.vertex_daily_input_token_quota)
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_cloud_quotas_quota_preference" "vertex_rpm_tokens_cap" {
+  count                = var.suffix == "" ? 1 : 0
+  parent               = "projects/${var.project_id}"
+  name                 = "vertex-gemini-flash-lite-per-min-input-tokens"
+  service              = "aiplatform.googleapis.com"
+  quota_id             = "GlobalGenerateContentInputTokensPerMinutePerBaseModel"
+  dimensions           = { base_model = "gemini-3.5-flash-lite-qcd" }
+  ignore_safety_checks = "QUOTA_DECREASE_PERCENTAGE_TOO_HIGH"
+  justification        = "Hard per-minute input token cap for Freight Floor Gemini 3.5 Flash-Lite fleet"
+
+  quota_config {
+    preferred_value = tostring(var.vertex_per_minute_input_token_quota)
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_cloud_quotas_quota_preference" "model_armor_rpm_cap" {
+  count                = var.suffix == "" ? 1 : 0
+  parent               = "projects/${var.project_id}"
+  name                 = "modelarmor-requests-per-minute-cap"
+  service              = "modelarmor.googleapis.com"
+  quota_id             = "RequestsPerMinute"
+  ignore_safety_checks = "QUOTA_DECREASE_PERCENTAGE_TOO_HIGH"
+  justification        = "Hard per-minute request cap for Model Armor prompt/response screening"
+
+  quota_config {
+    preferred_value = tostring(var.model_armor_rpm_quota)
+  }
+
   depends_on = [google_project_service.apis]
 }
 
@@ -220,12 +402,28 @@ resource "google_cloud_run_v2_service" "site" {
         value = "global"
       }
       env {
+        name  = "AGENT_DAILY_BUDGET_USD"
+        value = tostring(var.agent_daily_budget_usd)
+      }
+      env {
+        name  = "NL_COMMAND_DAILY_BUDGET_USD"
+        value = tostring(var.nl_command_daily_budget_usd)
+      }
+      env {
+        name  = "BRAIN_MAX_RPM"
+        value = tostring(var.brain_max_rpm_per_site)
+      }
+      env {
+        name  = "MAX_CONCURRENT_BRAIN_CALLS"
+        value = tostring(var.max_concurrent_brain_calls)
+      }
+      env {
         name  = "TRANSFERS_TOPIC"
         value = google_pubsub_topic.site_transfers.name
       }
       env {
         name  = "MODEL_ARMOR_TEMPLATE"
-        value = "projects/${var.project_id}/locations/${var.region}/templates/warehouse-orders${var.suffix}"
+        value = google_model_armor_template.warehouse_orders.name
       }
       env {
         name  = "REQUIRE_PROXY_AUTH"
@@ -272,6 +470,8 @@ resource "google_cloud_run_v2_service" "site" {
     google_secret_manager_secret_version.ticket_hmac_key,
     google_secret_manager_secret_iam_member.site_secret_accessor,
     google_project_iam_member.site_roles,
+    google_pubsub_topic_iam_member.site_transfers_publisher,
+    google_model_armor_template.warehouse_orders,
   ]
 }
 
@@ -321,6 +521,20 @@ resource "google_pubsub_subscription" "site_transfer_push" {
     minimum_backoff = "5s"
     maximum_backoff = "60s"
   }
+
+  depends_on = [
+    google_service_account_iam_member.pubsub_push_token_creator,
+    google_pubsub_topic_iam_member.pubsub_dlq_publisher,
+  ]
+}
+
+# Pub/Sub service agent can acknowledge dead-lettered messages on each push subscription.
+resource "google_pubsub_subscription_iam_member" "pubsub_dlq_subscriber" {
+  for_each     = google_pubsub_subscription.site_transfer_push
+  project      = var.project_id
+  subscription = each.value.name
+  role         = "roles/pubsub.subscriber"
+  member       = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
 }
 
 # 8. Cloud Run v2 Service: Warehouse Lobby (Only Publicly Exposed Service)

@@ -472,6 +472,7 @@ export interface AgentBrainSchedulerOptions {
   persistence: PersistenceStore;
   modelName?: string;
   maxConcurrent?: number;
+  maxCallsPerMin?: number;
   retryDelayMs?: number;
   getArmorBlocks1h?: (nowMs: number) => number;
   onDecisionBroadcast?: (msg: BrainDecisionBroadcast) => void;
@@ -484,6 +485,7 @@ export class AgentBrainScheduler {
   private readonly persistence: PersistenceStore;
   public readonly modelName: string;
   private readonly maxConcurrent: number;
+  private readonly maxCallsPerMin: number;
   private readonly retryDelayMs: number;
   private readonly getArmorBlocks1h?: (nowMs: number) => number;
   private readonly onDecisionBroadcast?: (msg: BrainDecisionBroadcast) => void;
@@ -503,6 +505,7 @@ export class AgentBrainScheduler {
     this.client = opts.client ?? new VertexGeminiBrainClient({ model: this.modelName });
     this.persistence = opts.persistence;
     this.maxConcurrent = opts.maxConcurrent ?? MAX_CONCURRENT_BRAIN_CALLS;
+    this.maxCallsPerMin = opts.maxCallsPerMin ?? BRAIN_MAX_CALLS_PER_MIN;
     this.retryDelayMs = opts.retryDelayMs ?? 120;
     this.getArmorBlocks1h = opts.getArmorBlocks1h;
     this.onDecisionBroadcast = opts.onDecisionBroadcast;
@@ -628,9 +631,13 @@ export class AgentBrainScheduler {
         return a.tIssued - b.tIssued;
       });
 
+    this.pruneSamples(nowMs);
     const dispatched: Promise<void>[] = [];
     for (const req of candidates) {
       if (this.inFlightReqIds.size >= this.maxConcurrent) {
+        break;
+      }
+      if (this.callSamples.length + this.inFlightReqIds.size >= this.maxCallsPerMin) {
         break;
       }
       dispatched.push(this.dispatchOne(world, req, nowMs, extraUntrustedStrings));

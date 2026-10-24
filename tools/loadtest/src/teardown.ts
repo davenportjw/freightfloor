@@ -88,7 +88,7 @@ class FirestoreTeardownStore implements TeardownStore {
 export async function runLoadtestTeardown(
   options: TeardownOptions = {}
 ): Promise<TeardownReport> {
-  const projectId = options.projectId ?? process.env.GCP_PROJECT_ID ?? 'davenport-boutique';
+  const projectId = options.projectId ?? process.env.GCP_PROJECT_ID ?? 'davenporter-freightfloor';
   const prefix = options.prefix ?? process.env.FIRESTORE_PREFIX ?? '';
   const resetSnapshots = options.resetSnapshots ?? true;
 
