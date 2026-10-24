@@ -181,19 +181,57 @@ export const MCP_TOOLS_MANIFEST = [
   },
 ] as const;
 
+function resolveInitialWorkspaceRoot(rawRoot: string): string {
+  let curr = path.resolve(rawRoot);
+  while (true) {
+    if (!curr.includes('/.gemini/') && fs.existsSync(path.join(curr, '.git'))) {
+      return curr;
+    }
+    const parent = path.dirname(curr);
+    if (parent === curr) break;
+    curr = parent;
+  }
+  return path.resolve(rawRoot);
+}
+
 export class AstMcpServer {
-  public readonly workspaceRoot: string;
-  public readonly db: AstGraphDatabase;
-  public readonly indexer: AstGraphIndexer;
+  public workspaceRoot: string;
+  public db: AstGraphDatabase;
+  public indexer: AstGraphIndexer;
+  private readonly explicitDbPath?: string;
 
   constructor(workspaceRoot: string, dbPath?: string) {
-    this.workspaceRoot = path.resolve(workspaceRoot);
+    this.workspaceRoot = resolveInitialWorkspaceRoot(workspaceRoot);
+    this.explicitDbPath = dbPath;
     const resolvedDb =
       dbPath ??
       process.env.AST_GRAPH_DB_PATH ??
       path.join(this.workspaceRoot, '.ast-graph', 'ast.db');
     this.db = new AstGraphDatabase(resolvedDb);
     this.indexer = new AstGraphIndexer(this.workspaceRoot, this.db);
+  }
+
+  public rebindWorkspaceIfNeeded(candidateRoot: string): void {
+    const resolved = resolveInitialWorkspaceRoot(candidateRoot.replace(/^file:\/\//, ''));
+    if (
+      resolved &&
+      resolved !== this.workspaceRoot &&
+      fs.existsSync(resolved) &&
+      !this.explicitDbPath
+    ) {
+      try {
+        this.db.close();
+      } catch {
+        // Ignore
+      }
+      this.workspaceRoot = resolved;
+      const nextDbPath =
+        process.env.AST_GRAPH_DB_PATH && path.isAbsolute(process.env.AST_GRAPH_DB_PATH)
+          ? process.env.AST_GRAPH_DB_PATH
+          : path.join(this.workspaceRoot, '.ast-graph', 'ast.db');
+      this.db = new AstGraphDatabase(nextDbPath);
+      this.indexer = new AstGraphIndexer(this.workspaceRoot, this.db);
+    }
   }
 
   public handleRequest(req: JsonRpcRequest): JsonRpcResponse | null {
@@ -204,6 +242,16 @@ export class AstMcpServer {
     }
 
     if (req.method === 'initialize') {
+      const folders = Array.isArray(req.params?.workspaceFolders)
+        ? (req.params?.workspaceFolders as Array<{ uri?: string }>)
+        : [];
+      const initRoot =
+        (typeof folders[0]?.uri === 'string' ? folders[0].uri : undefined) ??
+        (typeof req.params?.rootUri === 'string' ? req.params.rootUri : undefined) ??
+        (typeof req.params?.rootPath === 'string' ? req.params.rootPath : undefined);
+      if (initRoot && this.workspaceRoot.includes('/.gemini/')) {
+        this.rebindWorkspaceIfNeeded(initRoot);
+      }
       return {
         jsonrpc: '2.0',
         id,

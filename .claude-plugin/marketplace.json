@@ -1,0 +1,19 @@
+{
+  "name": "freightfloor-plugins",
+  "owner": {
+    "name": "Jason Davenport",
+    "url": "https://github.com/davenportjw"
+  },
+  "metadata": {
+    "description": "Freight Floor AST GraphDB Traceability Plugin & Sidecar.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "warehouse-ast-graph",
+      "source": "./.agents/plugins/warehouse-ast-graph",
+      "description": "Multi-compiler AST & Cross-Layer Lineage GraphDB sidecar, MCP server, and targeted Vitest selection.",
+      "version": "0.1.0"
+    }
+  ]
+}

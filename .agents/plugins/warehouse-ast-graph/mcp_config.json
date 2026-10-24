@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "warehouse-ast-graph": {
+      "command": "node",
+      "args": [
+        "--no-warnings",
+        "../../../tools/ast-sidecar/dist/mcp.js",
+        "--workspace",
+        "../../.."
+      ]
+    }
+  }
+}

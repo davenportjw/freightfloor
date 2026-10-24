@@ -279,7 +279,9 @@ export class PythonCompilerAdapter implements CompilerAdapter {
           entry.name === 'dist' ||
           entry.name === '.git' ||
           entry.name === '.venv' ||
-          entry.name === '.ast-graph'
+          entry.name === '.ast-graph' ||
+          entry.name === '.agents' ||
+          entry.name === '.claude'
         ) {
           continue;
         }

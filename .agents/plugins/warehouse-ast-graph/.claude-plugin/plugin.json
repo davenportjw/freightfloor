@@ -1,0 +1,20 @@
+{
+  "name": "warehouse-ast-graph",
+  "version": "0.1.0",
+  "description": "Multi-compiler AST & Cross-Layer Lineage GraphDB sidecar, MCP server, and targeted Vitest selection for the Freight Floor monorepo.",
+  "author": {
+    "name": "Jason Davenport",
+    "url": "https://github.com/davenportjw"
+  },
+  "repository": "https://github.com/davenportjw/freightfloor",
+  "license": "Apache-2.0",
+  "keywords": [
+    "ast",
+    "scip",
+    "sqlite",
+    "graphdb",
+    "lineage",
+    "traceability",
+    "mcp"
+  ]
+}

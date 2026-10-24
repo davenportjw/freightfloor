@@ -425,6 +425,28 @@ describe('@warehouse/ast-sidecar — Multi-Compiler AST & Cross-Layer Lineage Gr
     expect(agyRes.stdoutJson).toEqual({});
     expect(agyRes.filePath).toContain('packages/armor/src/hygiene.ts');
 
+    // Antigravity PostToolUse payload (edit_file / write_file with args.Path & workspacePaths) -> returns `{}`
+    const agyEditFileRes = await handleHookInvocation(
+      'post-tool-use',
+      JSON.stringify({
+        conversationId: 'agy-conv-edit-file',
+        workspacePaths: [WORKSPACE_ROOT],
+        toolCall: {
+          name: 'edit_file',
+          args: {
+            Path: path.join(WORKSPACE_ROOT, 'packages/armor/src/hygiene.ts'),
+          },
+        },
+      }),
+      {
+        dbPath,
+        useDaemon: false,
+      },
+    );
+    expect(agyEditFileRes.harness).toBe('antigravity');
+    expect(agyEditFileRes.stdoutJson).toEqual({});
+    expect(agyEditFileRes.filePath).toContain('packages/armor/src/hygiene.ts');
+
     // Claude Code PostToolUse payload -> returns `{ continue: true }`
     const claudeRes = await handleHookInvocation(
       'post-tool-use',

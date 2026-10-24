@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import { performance } from 'node:perf_hooks';
@@ -28,11 +29,32 @@ export interface ParsedHookInput {
   harness: HookHarnessFormat;
   eventType: string;
   filePath?: string;
+  workspaceRoot?: string;
   rawPayload: Record<string, unknown>;
 }
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 4319;
+
+function findGitRootFrom(startPath: string): string | undefined {
+  let curr = path.resolve(startPath);
+  try {
+    if (fs.existsSync(curr) && fs.statSync(curr).isFile()) {
+      curr = path.dirname(curr);
+    }
+  } catch {
+    curr = path.dirname(curr);
+  }
+  while (true) {
+    if (!curr.includes('/.gemini/') && fs.existsSync(path.join(curr, '.git'))) {
+      return curr;
+    }
+    const parent = path.dirname(curr);
+    if (parent === curr) break;
+    curr = parent;
+  }
+  return undefined;
+}
 
 /**
  * Polymorphically parses stdin JSON from either Antigravity or Claude Code hook harnesses.
@@ -51,26 +73,38 @@ export function parseHookInput(eventTypeArg: string, rawStdinJson: string): Pars
     }
   }
 
-  // Detect Antigravity format: { toolCall: { name, args: { TargetFile, ... } } }
+  // Detect Antigravity format: { toolCall: { name, args: { Path, TargetFile, AbsolutePath, ... } }, workspacePaths: [...] }
   const toolCall = parsed.toolCall as Record<string, unknown> | undefined;
   const toolCallArgs = (toolCall?.args as Record<string, unknown> | undefined) ?? undefined;
   const agyTargetFile =
+    (typeof toolCallArgs?.Path === 'string' ? toolCallArgs.Path : undefined) ??
     (typeof toolCallArgs?.TargetFile === 'string' ? toolCallArgs.TargetFile : undefined) ??
     (typeof toolCallArgs?.AbsolutePath === 'string' ? toolCallArgs.AbsolutePath : undefined) ??
+    (typeof parsed.Path === 'string' ? parsed.Path : undefined) ??
     (typeof parsed.TargetFile === 'string' ? parsed.TargetFile : undefined);
 
-  // Detect Claude Code format: { hook_event_name, tool_name, tool_input: { file_path, path } }
+  const workspacePaths = Array.isArray(parsed.workspacePaths) ? parsed.workspacePaths : [];
+  const agyWorkspace =
+    typeof workspacePaths[0] === 'string' && workspacePaths[0].trim().length > 0
+      ? workspacePaths[0].replace(/^file:\/\//, '')
+      : undefined;
+
+  // Detect Claude Code format: { hook_event_name, tool_name, cwd, tool_input: { file_path, path } }
   const toolInput = parsed.tool_input as Record<string, unknown> | undefined;
   const claudeFilePath =
     (typeof toolInput?.file_path === 'string' ? toolInput.file_path : undefined) ??
     (typeof toolInput?.path === 'string' ? toolInput.path : undefined) ??
     (typeof parsed.file_path === 'string' ? parsed.file_path : undefined);
+  const claudeWorkspace =
+    typeof parsed.cwd === 'string' && parsed.cwd.trim().length > 0 ? parsed.cwd : undefined;
 
   let harness: HookHarnessFormat = 'unknown';
   if (
     toolCall !== undefined ||
     typeof parsed.conversationId === 'string' ||
-    typeof parsed.TargetFile === 'string'
+    typeof parsed.TargetFile === 'string' ||
+    typeof parsed.Path === 'string' ||
+    Array.isArray(parsed.workspacePaths)
   ) {
     harness = 'antigravity';
   } else if (
@@ -92,6 +126,7 @@ export function parseHookInput(eventTypeArg: string, rawStdinJson: string): Pars
     harness,
     eventType: normalizedEvent,
     filePath: agyTargetFile ?? claudeFilePath,
+    workspaceRoot: agyWorkspace ?? claudeWorkspace,
     rawPayload: parsed,
   };
 }
@@ -147,7 +182,16 @@ export async function handleHookInvocation(
 ): Promise<HookResult> {
   const startTime = performance.now();
   const parsed = parseHookInput(eventTypeArg, rawStdinJson);
-  const workspaceRoot = path.resolve(options?.workspaceRoot ?? process.cwd());
+  const resolvedRoot =
+    options?.workspaceRoot ??
+    parsed.workspaceRoot ??
+    process.env.AST_GRAPH_WORKSPACE ??
+    (parsed.filePath && path.isAbsolute(parsed.filePath)
+      ? findGitRootFrom(parsed.filePath)
+      : undefined) ??
+    findGitRootFrom(process.cwd()) ??
+    process.cwd();
+  const workspaceRoot = path.resolve(resolvedRoot);
   const dbPath =
     options?.dbPath ?? path.join(workspaceRoot, '.ast-graph', 'ast.db');
   const lowerEvent = parsed.eventType.toLowerCase();

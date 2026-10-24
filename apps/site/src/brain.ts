@@ -60,8 +60,14 @@ export const DEFAULT_GEMINI_LOCATION = 'global';
 export const DEFAULT_GCP_PROJECT =
   process.env.GCP_PROJECT_ID ||
   process.env.GOOGLE_CLOUD_PROJECT ||
-  'davenport-boutique';
-export const MAX_CONCURRENT_BRAIN_CALLS = 8;
+  'davenporter-freightfloor';
+export const MAX_CONCURRENT_BRAIN_CALLS =
+  Number(process.env.MAX_CONCURRENT_BRAIN_CALLS) > 0
+    ? Number(process.env.MAX_CONCURRENT_BRAIN_CALLS)
+    : 8;
+/** Maximum Gemini brain calls per minute per shard (sliding 60 s window). */
+export const BRAIN_MAX_CALLS_PER_MIN =
+  Number(process.env.BRAIN_MAX_RPM) > 0 ? Number(process.env.BRAIN_MAX_RPM) : 120;
 /**
  * Per-attempt Gemini timeout for brain decisions. Flash-Lite with `thinkingBudget: 0` and a
  * 120-token JSON answer returns well under a second, so 4 s bounds a hung call without

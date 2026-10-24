@@ -4,17 +4,17 @@
     "SessionStart": [
       {
         "type": "command",
-        "command": "node tools/ast-sidecar/dist/hook-handler.js session-start",
+        "command": "if [ -f tools/ast-sidecar/dist/hook-handler.js ]; then node --no-warnings tools/ast-sidecar/dist/hook-handler.js session-start; elif [ -f ../tools/ast-sidecar/dist/hook-handler.js ]; then cd .. && node --no-warnings tools/ast-sidecar/dist/hook-handler.js session-start; fi",
         "timeout": 15
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "write_to_file|replace_file_content|multi_replace_file_content",
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content",
         "hooks": [
           {
             "type": "command",
-            "command": "node tools/ast-sidecar/dist/hook-handler.js post-tool-use",
+            "command": "if [ -f tools/ast-sidecar/dist/hook-handler.js ]; then node --no-warnings tools/ast-sidecar/dist/hook-handler.js post-tool-use; elif [ -f ../tools/ast-sidecar/dist/hook-handler.js ]; then cd .. && node --no-warnings tools/ast-sidecar/dist/hook-handler.js post-tool-use; fi",
             "timeout": 10
           }
         ]

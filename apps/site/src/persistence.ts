@@ -13,8 +13,14 @@ import type { BrainHealth } from './brain.js';
 export type SitePhase = Phase;
 export type WorldSnapshot = WorldSnapshotV5;
 
-export const AGENT_DAILY_BUDGET_USD = 12.5;
-export const NL_COMMAND_DAILY_BUDGET_USD = 1.5;
+export const AGENT_DAILY_BUDGET_USD =
+  Number(process.env.AGENT_DAILY_BUDGET_USD) > 0
+    ? Number(process.env.AGENT_DAILY_BUDGET_USD)
+    : 12.5;
+export const NL_COMMAND_DAILY_BUDGET_USD =
+  Number(process.env.NL_COMMAND_DAILY_BUDGET_USD) > 0
+    ? Number(process.env.NL_COMMAND_DAILY_BUDGET_USD)
+    : 1.5;
 export const SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 export const JOURNAL_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -446,7 +452,7 @@ export class CloudPersistenceStore implements PersistenceStore {
   constructor(opts: CloudPersistenceOptions = {}) {
     this.budgetFlushIntervalMs = opts.budgetFlushIntervalMs ?? BUDGET_FLUSH_INTERVAL_MS;
     this.budgetCacheTtlMs = opts.budgetCacheTtlMs ?? BUDGET_CACHE_TTL_MS;
-    const projectId = opts.projectId ?? process.env.GCP_PROJECT_ID ?? 'davenport-boutique';
+    const projectId = opts.projectId ?? process.env.GCP_PROJECT_ID ?? 'davenporter-freightfloor';
     this.suffix = opts.suffix ?? process.env.SUFFIX ?? '';
     this.transfersTopic =
       opts.transfersTopic ?? process.env.TRANSFERS_TOPIC ?? `site-transfers${this.suffix}`;

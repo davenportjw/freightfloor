@@ -1,0 +1,6 @@
+[mcp_servers.warehouse-ast-graph]
+command = "node"
+args = ["--no-warnings", "tools/ast-sidecar/dist/mcp.js"]
+
+[mcp_servers.warehouse-ast-graph.env]
+AST_GRAPH_DB_PATH = ".ast-graph/ast.db"
