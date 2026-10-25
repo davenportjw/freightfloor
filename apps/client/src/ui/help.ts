@@ -119,7 +119,8 @@ export function isTouchControlsEnvironment(override?: boolean | (() => boolean))
       if (typeof window.matchMedia === 'function') {
         if (
           window.matchMedia('(pointer: coarse)').matches ||
-          window.matchMedia('(max-width: 900px), (max-height: 500px), (pointer: coarse)').matches
+          window.matchMedia('(hover: none)').matches ||
+          window.matchMedia('(max-width: 900px), (max-height: 500px), (pointer: coarse), (hover: none)').matches
         ) {
           return true;
         }
@@ -234,6 +235,10 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
   const chargeChip = el('span', { class: 'intro-chip' }, ['🔋 Low? Park on a green pad, press ', kbd('E')]);
   const manualSteeringText = el('span', { text: ' WASD steering & physics' });
   const manualOfferText = el('span', { text: ' Ranks 3 offers (Q), auto-picks in 5s' });
+  const glassBoxDesc = el('p', {
+    class: 'ai-concept-desc',
+    text: 'Click any AI forklift to see its Gemini model, latency, and why it made its last move. If a call fails, the truck holds and shows the real error — zero silent fallbacks.',
+  });
 
   let hotkeyECell: HTMLElement | null = null;
   const hotkeyRows = HOTKEYS.map((h) => {
@@ -285,6 +290,8 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       chargeChip.replaceChildren('🔋 Low? Park on a green pad, tap ', kbd('Charge'));
       manualSteeringText.textContent = ' Joystick steering & physics';
       manualOfferText.textContent = ' Ranks 3 offers, auto-picks in 5s';
+      glassBoxDesc.textContent =
+        'Tap any AI forklift to see its Gemini model, latency, and why it made its last move. If a call fails, the truck holds and shows the real error — zero silent fallbacks.';
     } else {
       step1Body.replaceChildren(
         'Hit ',
@@ -312,6 +319,8 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       chargeChip.replaceChildren('🔋 Low? Park on a green pad, press ', kbd('E'));
       manualSteeringText.textContent = ' WASD steering & physics';
       manualOfferText.textContent = ' Ranks 3 offers (Q), auto-picks in 5s';
+      glassBoxDesc.textContent =
+        'Click any AI forklift to see its Gemini model, latency, and why it made its last move. If a call fails, the truck holds and shows the real error — zero silent fallbacks.';
     }
 
     if (rackLift) {
@@ -372,12 +381,12 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
   );
 
   // ---- The AI Inside ----
-  const aiCard = (icon: string, title: string, body: string): HTMLElement =>
+  const aiCard = (icon: string, title: string, body: string | HTMLElement): HTMLElement =>
     el('article', { class: 'ai-concept-card' }, [
       el('div', { class: 'ai-concept-card__icon', text: icon, attrs: { 'aria-hidden': 'true' } }),
       el('div', {}, [
         el('h4', { class: 'ai-concept-card__title', text: title }),
-        el('p', { class: 'ai-concept-desc', text: body }),
+        typeof body === 'string' ? el('p', { class: 'ai-concept-desc', text: body }) : body,
       ]),
     ]);
 
@@ -406,11 +415,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
           'Competing strategies',
           'Five AI personas compete — Sprinter, Steady, Batcher, Opportunist, Strategist — each pairing distinct engine physics (speed, safety buffer, 2-pallet forks, poaching) with its own Gemini strategy prompt.',
         ),
-        aiCard(
-          '🔍',
-          'Glass-box decisions',
-          'Click any AI forklift to see its Gemini model, latency, and why it made its last move. If a call fails, the truck holds and shows the real error — zero silent fallbacks.',
-        ),
+        aiCard('🔍', 'Glass-box decisions', glassBoxDesc),
         aiCard(
           '🛡️',
           'Safe, cheap prompts',

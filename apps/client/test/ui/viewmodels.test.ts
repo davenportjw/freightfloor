@@ -1041,6 +1041,7 @@ describe('Shift Briefing / Help modal (mountHelp, How to Play + "How the AI work
       help.update();
 
       const playPane = overlay.queryAll((e) => e.getAttribute('data-pane') === 'rules')[0]!;
+      const aiPane = overlay.queryAll((e) => e.getAttribute('data-pane') === 'ai-concepts')[0]!;
       const lifecyclePane = overlay.queryAll((e) => e.getAttribute('data-pane') === 'decision-lifecycle')[0]!;
       const steps = playPane.queryAll((e) => e.className === 'intro-step__body');
       expect(steps).toHaveLength(3);
@@ -1055,6 +1056,8 @@ describe('Shift Briefing / Help modal (mountHelp, How to Play + "How the AI work
       expect(playText).not.toContain('W A S D');
       expect(playText).not.toContain('Hold Shift');
       expect(playText).not.toContain('press E');
+      expect(aiPane.textContent).toContain('Tap any AI forklift to see its Gemini model');
+      expect(aiPane.textContent).not.toContain('Click any AI forklift');
 
       const rows = playPane.queryAll((e) => e.tagName === 'TR');
       expect(rows).toHaveLength(TOUCH_CONTROLS.length);

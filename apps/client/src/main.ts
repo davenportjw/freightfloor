@@ -1599,6 +1599,7 @@ function boot(): void {
   window.addEventListener('resize', () => {
     renderer.resize();
     for (const p of flyouts.panels) p.onViewportResize();
+    help.update();
   });
 
   // ---- start --------------------------------------------------------------
