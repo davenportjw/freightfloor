@@ -114,10 +114,18 @@ export function showComboMeter(me: { runDeliveries?: number; fareTrips?: number 
   return (me.runDeliveries ?? 0) > 0 || (me.fareTrips ?? 0) > 0;
 }
 
-/** Progressive disclosure: the battery meter shows below 50% or while charging. */
+/** Progressive disclosure: the battery meter shows below 50%, while charging, or while boosting. */
 export const BATTERY_SHOW_PCT = 50;
-export function showBatteryMeter(me: { battery: number; humanCharging?: boolean }): boolean {
-  return Boolean(me.humanCharging) || Math.round(me.battery) < BATTERY_SHOW_PCT;
+export function showBatteryMeter(me: {
+  battery: number;
+  humanCharging?: boolean;
+  boosting?: boolean;
+}): boolean {
+  return (
+    Boolean(me.humanCharging) ||
+    Boolean(me.boosting) ||
+    Math.round(me.battery) < BATTERY_SHOW_PCT
+  );
 }
 
 /** Results headline vs the last finished run: "▲ 23 vs last run" / "▼ 5 vs last run" / "= last run". */

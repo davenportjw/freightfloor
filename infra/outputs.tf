@@ -39,3 +39,9 @@ output "ai_quotas_and_caps" {
     quota_adjuster_auto_increase        = "DISABLED"
   }
 }
+
+output "tfstate_bucket" {
+  description = "GCS bucket storing the remote Terraform state"
+  value       = var.suffix == "" ? "gs://${google_storage_bucket.tfstate[0].name}/terraform/state" : "gs://${var.project_id}-tfstate/terraform/state"
+}
+

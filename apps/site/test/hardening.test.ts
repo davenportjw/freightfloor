@@ -381,7 +381,7 @@ describe('site hardening regressions', () => {
   });
 
   describe('Pub/Sub push OIDC verification (createPubSubPushVerifier)', () => {
-    const PUSH_SA = 'warehouse-pubsub-push@davenport-boutique.iam.gserviceaccount.com';
+    const PUSH_SA = 'warehouse-pubsub-push@davenporter-freightfloor.iam.gserviceaccount.com';
     const AUD = 'https://warehouse-site-den-1.example.run.app/internal/transfer';
     const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
     const nowSec = () => Math.floor(Date.now() / 1000);

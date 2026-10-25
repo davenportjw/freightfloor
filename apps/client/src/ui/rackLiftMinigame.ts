@@ -404,12 +404,13 @@ export class RackLiftController {
   }
 
   cancel(vehicle?: Vehicle | null): void {
+    const wasActive = this.active;
     this.active = false;
     this.twoTapArmed = false;
     this.orderId = null;
     this.slot = null;
-    if (vehicle) {
-      vehicle.forkTarget = 0;
+    if (wasActive && vehicle) {
+      vehicle.forkTarget = vehicle.cargo?.length ? 0.3 : 0.15;
     }
   }
 }

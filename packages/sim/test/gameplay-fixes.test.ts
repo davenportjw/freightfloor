@@ -332,3 +332,33 @@ describe('#7 rival_snipe: any AI taking the order you are heading to', () => {
     expect(e!.reason).toBe('closest P0 to my dock');
   });
 });
+
+describe('#8 Smooth diagonal wall sliding without 60 Hz sawtooth bounce', () => {
+  it('slides smoothly along a rack row at an oblique angle without oscillating away from and back into the wall', () => {
+    const w = createWorld({ seed: 42 });
+    const v = spawnPlayerVehicle(w, 'DRV-01')!;
+    // Position player in aisle column x=16 (walkable), facing diagonally down-right into rack column x=17 (racks at y=14..18)
+    v.px = 16.88;
+    v.py = 14.5;
+    v.tile = { x: 16, y: 14 };
+    v.angle = 1.25; // ~71.6 deg: mostly +y with +x component pressing into rack at x=17
+    v.speedNow = 4.2;
+
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (let i = 0; i < 20; i++) {
+      stepHuman(w, v, { up: true, down: false, left: false, right: false, boost: false }, 1 / 60);
+      xs.push(v.px);
+      ys.push(v.py);
+    }
+
+    // Forward progress along the aisle (+y) must be strictly monotonic every 60 Hz frame
+    for (let i = 1; i < ys.length; i++) {
+      expect(ys[i]!).toBeGreaterThan(ys[i - 1]!);
+    }
+    // Once pressed against the x=18 rack contour, x must not sawtooth-bounce backward and forward
+    for (let i = 5; i < xs.length; i++) {
+      expect(Math.abs(xs[i]! - xs[i - 1]!)).toBeLessThan(1e-3);
+    }
+  });
+});

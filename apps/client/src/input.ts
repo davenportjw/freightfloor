@@ -458,7 +458,6 @@ export class InputController {
       return;
     }
 
-    this.unpredictedDt = 0;
     const prevAckT = this.lastAckT;
     if (typeof ack.t === 'number') {
       this.lastAckT = ack.t;
@@ -485,7 +484,12 @@ export class InputController {
         }
       }
       if (consumeDt > 1e-6 && this.tail.dt > 0) {
-        this.tail.dt = Math.max(0, this.tail.dt - consumeDt);
+        const usedTail = Math.min(this.tail.dt, consumeDt);
+        this.tail.dt = Math.max(0, this.tail.dt - usedTail);
+        consumeDt -= usedTail;
+      }
+      if (consumeDt > 1e-6 && this.unpredictedDt > 0) {
+        this.unpredictedDt = Math.max(0, this.unpredictedDt - consumeDt);
         consumeDt = 0;
       }
       while (this.frames.length > 0 && this.frames[0].dt <= 1e-6 && this.frames[0].seq <= ack.seq) {
@@ -504,9 +508,20 @@ export class InputController {
       if (typeof ack.angle === 'number') v.angle = ack.angle;
       if (typeof ack.speedNow === 'number') v.speedNow = ack.speedNow;
 
-      for (const frame of this.frames) stepInChunks(w, v, frame.input, frame.dt);
+      let unpredRemaining = this.unpredictedDt;
+      for (let i = 0; i < this.frames.length; i++) {
+        const frame = this.frames[i];
+        let stepDt = frame.dt;
+        if (i === this.frames.length - 1 && unpredRemaining > 0) {
+          const trim = Math.min(stepDt, unpredRemaining);
+          stepDt -= trim;
+          unpredRemaining -= trim;
+        }
+        if (stepDt > 1e-6) stepInChunks(w, v, frame.input, stepDt);
+      }
       if (this.tail.dt > 0) stepInChunks(w, v, this.tail.input, this.tail.dt);
     } else {
+      this.unpredictedDt = 0;
       this.frames = reconcilePredictedVehicle(w, v, ack, this.frames, this.tail);
     }
 

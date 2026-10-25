@@ -172,7 +172,10 @@ describe('@warehouse/client (M4)', () => {
     expect(v.px).toBeCloseTo(afterOneStepX, 5);
   });
 
-  it('syncs forkTarget from server fork deltas so local prediction does not bob the forks', () => {
+  it('syncs forkTarget from server fork deltas so local prediction does not bob the forks', async () => {
+    const { RackLiftController } = await import('../src/ui/rackLiftMinigame.js');
+    const { drawVehicle } = await import('../src/render/vehicles.js');
+    const { dashView } = await import('../src/ui/dash.js');
     const w = createWorld({ seed: 11, siteId: 'den-1' });
     const v = w.vehicles[0];
     v.human = true;
@@ -182,6 +185,7 @@ describe('@warehouse/client (M4)', () => {
     v.tile = { x: 10, y: 2 };
     v.fork = 0.15;
     v.forkTarget = 0; // stale target, e.g. left over from join or a cancelled rack lift
+    v.cargo = [{ id: 101, p0: false, bay: 'E1', value: 10, due: 100 } as any];
 
     applyQuantisedDelta(
       w,
@@ -192,10 +196,46 @@ describe('@warehouse/client (M4)', () => {
     expect(v.fork).toBe(0.3);
     expect(v.forkTarget).toBe(0.3);
 
-    // Local prediction between snapshots must hold the server fork height steady.
+    // Stepping RackLiftController while disabled (the default) must not reset forkTarget to 0,
+    // and drawVehicle must keep using sprite cargo at travel fork height 0.3 without blinking.
+    const rackLift = new RackLiftController();
     const inputForward = { up: true, down: false, left: false, right: false };
-    for (let i = 0; i < 10; i++) stepHuman(w, v, inputForward, 0.05);
+    const spriteFrames: number[] = [];
+    const mockPt: any = {
+      ctx: { save() {}, restore() {}, setLineDash() {}, globalAlpha: 1 },
+      circleGrid: () => [],
+      poly: () => {},
+      P: (x: number, y: number, z = 0) => [x, y - z],
+      oBox: () => {},
+      hasSprite: (k: string) => k.startsWith('cargo_'),
+      sprite: () => {
+        spriteFrames.push(1);
+        return true;
+      },
+    };
+    for (let i = 0; i < 10; i++) {
+      rackLift.step(16, w, v, false);
+      stepHuman(w, v, inputForward, 0.05);
+      drawVehicle(mockPt, v, { x: v.px, y: v.py, a: v.angle }, {
+        worldT: w.t,
+        dim: false,
+        emphasised: true,
+        brainError: false,
+        pulse: () => 0.5,
+        nowMs: i * 16,
+        siteId: 'den-1',
+      });
+    }
     expect(v.fork).toBeCloseTo(0.3, 6);
+    expect(v.forkTarget).toBe(0.3);
+    expect(spriteFrames).toHaveLength(10);
+
+    // dashView shows Battery immediately when boost is held and reflects fractional drain below 100%
+    expect(dashView({ battery: 100, input: { boost: false } }).showBattery).toBe(false);
+    const boostedDash = dashView({ battery: 99.8, input: { boost: true } });
+    expect(boostedDash.showBattery).toBe(true);
+    expect(boostedDash.battery).toBe(99);
+    expect(boostedDash.boosting).toBe(true);
   });
 
   it('keeps predicting while vehicle is coasting past PREDICTION_GRACE_MS and smooths ack visual corrections', () => {

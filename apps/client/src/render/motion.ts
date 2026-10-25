@@ -55,6 +55,7 @@ export function pickNearest(
 
 interface Track {
   prev: Pose;
+  mid: Pose;
   curr: Pose;
 }
 
@@ -62,10 +63,11 @@ interface Track {
 const SNAP_DIST = 4;
 
 /**
- * Keeps prev/curr poses per vehicle id and interpolates between them. `update` must be
- * called once per frame with the current world time; when world.t changes, every
- * track's `prev` becomes the pose that was on screen at that moment (no visible jump)
- * and the measured update interval is smoothed.
+ * Keeps prev/mid/curr poses per vehicle id and interpolates smoothly across server
+ * `world.t` ticks. During `[0, interval]` each track slides from its on-screen `prev`
+ * pose toward the 2-tick midpoint `mid = lerpPose(prevRaw, currRaw, 0.5)`, filtering out
+ * tile-center cadence variations in `stepAI`; during `(interval, 2 * interval]` it
+ * continues seamlessly from `mid` to `curr` so a late network frame never stalls at 0 px/frame.
  */
 export class PoseTracker {
   private tracks = new Map<string, Track>();
@@ -73,16 +75,24 @@ export class PoseTracker {
   private changedAt = 0;
   private interval = 100;
 
+  private evalTrack(tr: Track, nowMs: number): Pose {
+    if (!(this.interval > 0)) return tr.curr;
+    const u = Math.max(0, (nowMs - this.changedAt) / this.interval);
+    if (u <= 1) return lerpPose(tr.prev, tr.mid, u);
+    return lerpPose(tr.mid, tr.curr, Math.min(1, u - 1));
+  }
+
   update(
     worldT: number,
     nowMs: number,
     vehicles: ReadonlyArray<{ id: string; px: number; py: number; angle: number }>,
   ): void {
     const tChanged = worldT !== this.lastT;
-    const alpha = this.alpha(nowMs);
+    const prevChangedAt = this.changedAt;
+    const prevInterval = this.interval;
     if (tChanged) {
       if (!Number.isNaN(this.lastT)) {
-        const dt = nowMs - this.changedAt;
+        const dt = nowMs - prevChangedAt;
         if (dt > 0) this.interval = this.interval * 0.7 + Math.max(30, Math.min(1000, dt)) * 0.3;
       }
       this.lastT = worldT;
@@ -94,12 +104,29 @@ export class PoseTracker {
       const actual: Pose = { x: v.px, y: v.py, a: v.angle };
       const tr = this.tracks.get(v.id);
       if (!tr) {
-        this.tracks.set(v.id, { prev: actual, curr: actual });
+        this.tracks.set(v.id, { prev: actual, mid: actual, curr: actual });
         continue;
       }
-      if (tChanged) tr.prev = lerpPose(tr.prev, tr.curr, alpha);
-      tr.curr = actual;
-      if (Math.hypot(tr.curr.x - tr.prev.x, tr.curr.y - tr.prev.y) > SNAP_DIST) tr.prev = actual;
+      if (tChanged) {
+        const u = prevInterval > 0 ? Math.max(0, (nowMs - prevChangedAt) / prevInterval) : 2;
+        const onScreen =
+          u <= 1 ? lerpPose(tr.prev, tr.mid, u) : lerpPose(tr.mid, tr.curr, Math.min(1, u - 1));
+        if (Math.hypot(actual.x - onScreen.x, actual.y - onScreen.y) > SNAP_DIST) {
+          tr.prev = actual;
+          tr.mid = actual;
+          tr.curr = actual;
+        } else {
+          tr.prev = onScreen;
+          tr.mid = lerpPose(tr.curr, actual, 0.5);
+          tr.curr = actual;
+        }
+      } else {
+        tr.curr = actual;
+        if (Math.hypot(tr.curr.x - tr.prev.x, tr.curr.y - tr.prev.y) > SNAP_DIST) {
+          tr.prev = actual;
+          tr.mid = actual;
+        }
+      }
     }
     for (const id of this.tracks.keys()) if (!seen.has(id)) this.tracks.delete(id);
   }
@@ -111,7 +138,7 @@ export class PoseTracker {
   /** Interpolated pose, or null for an unknown id. */
   pose(id: string, nowMs: number): Pose | null {
     const tr = this.tracks.get(id);
-    return tr ? lerpPose(tr.prev, tr.curr, this.alpha(nowMs)) : null;
+    return tr ? this.evalTrack(tr, nowMs) : null;
   }
 
   clear(): void {

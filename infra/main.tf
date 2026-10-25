@@ -18,7 +18,9 @@ locals {
     "secretmanager.googleapis.com",
     "modelarmor.googleapis.com",
     "cloudquotas.googleapis.com",
+    "cloudresourcemanager.googleapis.com",
     "iam.googleapis.com",
+    "storage.googleapis.com",
   ]
 
   sites = {
@@ -52,6 +54,26 @@ resource "google_artifact_registry_repository" "warehouse" {
     most_recent_versions {
       keep_count = 5
     }
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+# 2b. Remote Terraform State GCS Bucket (Versioning + Uniform Access + Public Access Prevention)
+resource "google_storage_bucket" "tfstate" {
+  count                       = var.suffix == "" ? 1 : 0
+  project                     = var.project_id
+  name                        = "${var.project_id}-tfstate"
+  location                    = upper(var.region)
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+
+  versioning {
+    enabled = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
   }
 
   depends_on = [google_project_service.apis]
@@ -199,17 +221,31 @@ resource "google_secret_manager_secret_iam_member" "lobby_secret_accessor" {
   member    = "serviceAccount:${google_service_account.lobby.email}"
 }
 
-# 5. Firestore TTL Policy on `journal` collection group (`expireAt` field)
+# 5. Firestore Native Database & TTL Policy on `journal` collection group (`expireAt` field)
+resource "google_firestore_database" "default" {
+  count       = var.suffix == "" ? 1 : 0
+  project     = var.project_id
+  name        = var.firestore_database_id
+  location_id = var.region
+  type        = "FIRESTORE_NATIVE"
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
 resource "google_firestore_field" "journal_ttl" {
   count      = var.suffix == "" ? 1 : 0
   project    = var.project_id
-  database   = var.firestore_database_id
+  database   = google_firestore_database.default[0].name
   collection = "journal"
   field      = "expireAt"
 
   ttl_config {}
 
-  depends_on = [google_project_service.apis]
+  depends_on = [google_firestore_database.default]
 }
 
 # 6. Pub/Sub Topics, Subscriptions & Resource-Scoped IAM for Cross-Site Transfers

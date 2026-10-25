@@ -6,7 +6,7 @@ This guide applies across **Google Antigravity (`agy`)**, **OpenAI Codex CLI (`c
 
 ## 1. Repository Architecture & Workspaces
 
-`warehouse` is a TypeScript ESM monorepo orchestrated with **Wireit** and deployed to Google Cloud Run (`davenport-boutique`):
+`warehouse` is a TypeScript ESM monorepo orchestrated with **Wireit** and deployed to Google Cloud Run (`davenporter-freightfloor`):
 
 - **`packages/protocol` (`@warehouse/protocol`)**: Shared Zod runtime schemas (`ClientMessageSchema`, `ServerMessageSchema`), wire quantization, regional `SITE_THEMES`, and TypeScript contracts.
 - **`packages/sim` (`@warehouse/sim`)**: Deterministic 10 Hz warehouse physics, A* pathfinding, occupancy reservations, contract generation, and AI driver archetypes (`Sprinter`, `Steady`, `Batcher`, `Opportunist`, `Strategist`).
@@ -86,9 +86,9 @@ npm run ast:export
 2. **Never Mock Directive**:
    - Never introduce fake trajectories, mock inference fallbacks, or synthetic data in production routes, studios, or benchmarks. Surface real errors directly.
 3. **Hardware & GCP Guardrails**:
-   - Local host is Apple Silicon macOS without Docker. Container builds run on Cloud Build (`gcloud builds submit --config=cloudbuild.yaml --project=davenport-boutique .`).
+   - Local host is Apple Silicon macOS without Docker. Container builds run on Cloud Build (`gcloud builds submit --config=cloudbuild.yaml --project=davenporter-freightfloor .`).
    - Always run `terraform -chdir=infra fmt` and `terraform -chdir=infra validate` when modifying `infra/*.tf`.
-   - Use Google Cloud ADC (`gcloud auth application-default`) in project `davenport-boutique`; never require or hardcode API keys.
+   - Use Google Cloud ADC (`gcloud auth application-default`) in project `davenporter-freightfloor`; never require or hardcode API keys.
 4. **UI Theme Exception (Repo Override)**:
    - This repository does **not** use the global sepia / academic-light theme. Keep the existing client palette and styling in `apps/client/src/styles.css`; do not restyle toward sepia, even though the user-level UI rule says to. UI changes should be minimal and scoped to the feature being built.
 5. **Git Hygiene & Doc-Code-Test Parity**:

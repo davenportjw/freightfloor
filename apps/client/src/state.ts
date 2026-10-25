@@ -358,6 +358,16 @@ export function applyQuantisedDelta(
       v.tile = { x: Math.floor(targetX), y: Math.floor(targetY) };
       if (typeof d.angle === 'number') v.angle = d.angle;
       if (typeof d.speedNow === 'number') v.speedNow = d.speedNow;
+      if (!v.human || isAutopilot) {
+        if ((v.speedNow ?? 0) > 0.05) {
+          v.moveTo = {
+            x: Math.floor(targetX + Math.cos(v.angle) * 0.48),
+            y: Math.floor(targetY + Math.sin(v.angle) * 0.48),
+          };
+        } else {
+          v.moveTo = null;
+        }
+      }
     }
 
     if (typeof d.state === 'string') v.state = d.state as Vehicle['state'];

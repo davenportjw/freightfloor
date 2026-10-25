@@ -1004,6 +1004,82 @@ describe('Shift Briefing / Help modal (mountHelp, How to Play + "How the AI work
     }
   });
 
+  it('shows joystick & touch button instructions (not keyboard buttons) when on mobile / coarse-pointer viewports', async () => {
+    const prevDoc = (globalThis as Record<string, unknown>).document;
+    const prevWin = (globalThis as Record<string, unknown>).window;
+    (globalThis as Record<string, unknown>).document = {
+      createElement: (tag: string) => new MiniElement(tag),
+      createElementNS: (_ns: string, tag: string) => new MiniElement(tag),
+      createTextNode: (text: string) => new MiniText(text),
+    };
+    (globalThis as Record<string, unknown>).window = {
+      innerWidth: 390,
+      innerHeight: 844,
+      matchMedia: (q: string) => ({ matches: q.includes('pointer: coarse') || q.includes('max-width: 900px') }),
+    };
+
+    try {
+      const { mountHelp, TOUCH_CONTROLS } = await import('../../src/ui/help.js');
+      const { ClientStore } = await import('../../src/state.js');
+
+      const overlay = new MiniElement('div');
+      const store = new ClientStore();
+      store.ui.helpOpen = true;
+      const ctx = {
+        store,
+        actions: {
+          showHelp: (open: boolean) => {
+            store.ui.helpOpen = open;
+          },
+          quickDrive: () => {},
+        },
+      } as unknown as import('../../src/ui/context.js').UiCtx;
+
+      const help = mountHelp(overlay as unknown as HTMLElement, ctx, {
+        getCallsign: () => 'Forklift-Ace',
+      });
+      help.update();
+
+      const playPane = overlay.queryAll((e) => e.getAttribute('data-pane') === 'rules')[0]!;
+      const lifecyclePane = overlay.queryAll((e) => e.getAttribute('data-pane') === 'decision-lifecycle')[0]!;
+      const steps = playPane.queryAll((e) => e.className === 'intro-step__body');
+      expect(steps).toHaveLength(3);
+      expect(steps[0]!.textContent).toBe('Tap Start driving to grab a forklift. Drag the bottom-left joystick to steer.');
+      expect(steps[1]!.textContent).toBe('Pull up to a glowing pallet and tap Pick on the bottom-right.');
+      expect(steps[2]!.textContent).toBe('Drop it at the blue Shipping Bay by tapping Drop.');
+
+      const playText = playPane.textContent;
+      expect(playText).toContain('Hold Boost to boost');
+      expect(playText).toContain('Park on a green pad, tap Charge');
+      expect(playText).not.toContain('WASD');
+      expect(playText).not.toContain('W A S D');
+      expect(playText).not.toContain('Hold Shift');
+      expect(playText).not.toContain('press E');
+
+      const rows = playPane.queryAll((e) => e.tagName === 'TR');
+      expect(rows).toHaveLength(TOUCH_CONTROLS.length);
+      expect(rows[0]!.children[0]?.textContent).toBe('Joystick');
+      const interactRow = rows.find((r) => r.children[0]?.textContent === 'Pick / Drop / Charge')!;
+      expect(interactRow.children[1]?.textContent).toBe('Pick up pallet, drop at bay, clear spill, or start charging');
+
+      // Rack lift minigame reactive update on mobile
+      store.setRackLiftMinigame(true);
+      help.update();
+      expect(steps[1]!.textContent).toBe(
+        'Pull up to a glowing rack pallet, hold Pick to raise forks (L1–L3), and release Pick in the sweet spot.',
+      );
+      expect(interactRow.children[1]?.textContent).toBe(
+        'Hold & release at rack to lift (L1–L3), or tap at bay / charger / spill',
+      );
+
+      expect(lifecyclePane.textContent).toContain('Joystick steering & physics');
+      expect(lifecyclePane.textContent).not.toContain('WASD steering & physics');
+    } finally {
+      (globalThis as Record<string, unknown>).document = prevDoc;
+      (globalThis as Record<string, unknown>).window = prevWin;
+    }
+  });
+
   it('handles ClientStore.applyRunEvicted, mountRunEnd slot release & Get Back in Line, and mountFloorView queue banner states', async () => {
     const prevDoc = (globalThis as Record<string, unknown>).document;
     const byId = new Map<string, MiniElement>();

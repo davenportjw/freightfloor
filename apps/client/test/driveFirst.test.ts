@@ -92,6 +92,7 @@ describe('Run 1 drive-first onboarding', () => {
     expect(showBatteryMeter({ battery: 80 })).toBe(false);
     expect(showBatteryMeter({ battery: 49 })).toBe(true);
     expect(showBatteryMeter({ battery: 90, humanCharging: true })).toBe(true);
+    expect(showBatteryMeter({ battery: 90, boosting: true })).toBe(true);
   });
 
   it('results headline compares against the last run', () => {

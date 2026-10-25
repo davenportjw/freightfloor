@@ -113,6 +113,24 @@ describe('render/motion', () => {
     expect(tr.pose('FL-01', 200)).toBeNull();
   });
 
+  it('PoseTracker midpoint spline smooths 2-tick AI step cadence and continues seamlessly past 100ms', () => {
+    const tr = new PoseTracker();
+    const v = { id: 'FL-02', px: 10, py: 5, angle: 0 };
+    tr.update(1.0, 0, [v]);
+    // Simulate stepAI's 2-tick tile-center cadence: 0.75 step then 0.25 step (average 0.5 tiles/tick)
+    v.px = 10.75;
+    tr.update(1.1, 100, [v]);
+    v.px = 11.0;
+    tr.update(1.2, 200, [v]);
+    // At t=200ms (u=0), pose starts at mid of [10, 10.75] = 10.375
+    // At t=300ms (u=1), pose reaches mid of [10.75, 11.0] = 10.875 (exact 0.50 tile advance!)
+    expect(tr.pose('FL-02', 200)!.x).toBeCloseTo(10.375, 5);
+    expect(tr.pose('FL-02', 250)!.x).toBeCloseTo(10.625, 5);
+    expect(tr.pose('FL-02', 300)!.x).toBeCloseTo(10.875, 5);
+    // If next WebSocket delta arrives at 316ms (7th 60 Hz frame), pose keeps advancing past u=1 instead of freezing
+    expect(tr.pose('FL-02', 316)!.x).toBeGreaterThan(10.875);
+  });
+
   it('pickNearest returns the closest pose within the radius, else null', () => {
     const poses = new Map([
       ['A', { x: 10, y: 10 }],

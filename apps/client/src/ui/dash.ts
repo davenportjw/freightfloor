@@ -29,11 +29,12 @@ export function dashView(me: {
   input?: { boost?: boolean };
   cargo?: readonly unknown[] | null;
 }): DashView {
-  const battery = Math.max(0, Math.min(100, Math.round(me.battery)));
+  const rawBat = Math.max(0, Math.min(100, me.battery));
+  const battery = rawBat <= 0 ? 0 : rawBat < 100 ? Math.max(1, Math.floor(rawBat)) : 100;
   const boosting = Boolean(me.input?.boost) && battery > 0;
   return {
     battery,
-    showBattery: showBatteryMeter({ battery, humanCharging: me.humanCharging }),
+    showBattery: showBatteryMeter({ battery, humanCharging: me.humanCharging, boosting }),
     low: battery < LOW_BATTERY_PCT,
     boosting,
     boostDisabled: battery <= 0,
@@ -110,6 +111,7 @@ export function mountDash(root: HTMLElement, ctx: UiCtx): UiModule {
   root.replaceChildren(battery, driveKeys, boost, hints);
 
   let last = '';
+  let seenBoost = false;
   return {
     update() {
       const { store } = ctx;
@@ -117,16 +119,20 @@ export function mountDash(root: HTMLElement, ctx: UiCtx): UiModule {
       const ov = store.activeOverlay();
       root.hidden = !me || ov === 'results' || ov === 'pick' || ov === 'chat';
       if (!me || root.hidden) {
+        if (!me) seenBoost = false;
         last = '';
         return;
       }
       const v = dashView(me);
-      const key = JSON.stringify([v, store.ui.hudMinimal]);
+      if (v.boosting) seenBoost = true;
+      else if (v.battery >= 100) seenBoost = false;
+      const showBattery = v.showBattery || seenBoost;
+      const key = JSON.stringify([v, showBattery, store.ui.hudMinimal]);
       if (key === last) return;
       last = key;
       hints.hidden = store.ui.hudMinimal;
       driveKeys.hidden = store.ui.hudMinimal;
-      battery.hidden = !v.showBattery;
+      battery.hidden = !showBattery;
       battery.classList.toggle('low', v.low);
       batFill.style.width = `${v.battery}%`;
       batVal.textContent = `${v.battery}%`;
@@ -138,7 +144,7 @@ export function mountDash(root: HTMLElement, ctx: UiCtx): UiModule {
         : v.cargoRisk
           ? 'Boosting with cargo — a collision drops your pallets!'
           : 'Hold Shift / Space (or hold here) to boost: +120% speed, extra battery drain; collisions drop carried pallets';
-      boostFill.style.width = v.boosting ? '100%' : '0%';
+      boostFill.style.width = v.boosting ? `${v.battery}%` : '0%';
       boostVal.textContent = v.boosting ? 'ON' : 'Shift';
       copilot.classList.toggle('on', v.autopilot);
       copilotLabel.textContent = v.autopilot ? 'Take back control' : 'Co-Pilot';

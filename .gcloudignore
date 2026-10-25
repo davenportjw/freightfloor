@@ -41,6 +41,9 @@ playwright-report/
 test-results/
 tools/smoke/out/
 .ast-graph/
+scripts/local/
+*.local.mjs
+*.local.sh
 *.log
 .DS_Store
 .idea/

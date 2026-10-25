@@ -2,7 +2,7 @@
 
 ## Overview
 
-**Freight Floor** (`freightfloor.com` · `https://github.com/davenportjw/freightfloor`) is an authoritative, always-running, multiplayer distribution network built on Google Cloud Run (`davenport-boutique`), Firestore, Pub/Sub, and Vertex AI (`gemini-3.5-flash-lite`).
+**Freight Floor** (`freightfloor.com` · `https://github.com/davenportjw/freightfloor`) is an authoritative, always-running, multiplayer distribution network built on Google Cloud Run (`davenporter-freightfloor`), Firestore, Pub/Sub, and Vertex AI (`gemini-3.5-flash-lite`).
 
 Rather than placing 128 forklifts onto a single gridlocked warehouse floor, the network shards players across **four regional warehouse sites**, each with its own deterministic floor layout (`buildMap(tier, siteId)`), storage district arrangement, visual color palette, and 3D isometric cargo models (`SITE_THEMES`):
 - **DEN-1 — Rocky Mountain Freight Hub** (`site-den-1`): Primary home site (`min=0`, `IDLE_POLICY=break`, 20 default AI agents; wakes on demand when a player joins and scales to zero when empty). Classic 3-column × 2-band rack layout with banded freight cartons (`cargoKind: 'boxes'`, `DEN-*` SKUs).

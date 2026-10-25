@@ -100,7 +100,7 @@ describe.skipIf(!runLive)(
 
         // Verify No-Mock Policy against real Vertex AI: bad model name surfaces as true brainError
         const badClient = new VertexGeminiBrainClient({
-          projectId: 'davenport-boutique',
+          projectId: 'davenporter-freightfloor',
           location: 'global',
           model: 'gemini-nonexistent-model',
         });

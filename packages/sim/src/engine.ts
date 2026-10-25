@@ -4312,12 +4312,13 @@ function stepHumanSingle(
             : [];
         for (const candTx of candidates) {
           const distToCenter = Math.abs(candTx + 0.5 - v.px);
+          const signX = Math.sign(candTx + 0.5 - v.px);
           if (
             distToCenter <= 1.15 &&
+            signX * cosA * dir >= -0.05 &&
             !isBlocked(w, candTx, targetY) &&
             !isBlocked(w, candTx, curTy)
           ) {
-            const signX = Math.sign(candTx + 0.5 - v.px);
             const candidateNx = v.px + signX * Math.min(distToCenter, slideStep);
             const candidateFtx = Math.floor(candidateNx);
             if (!isBlocked(w, candidateFtx, curTy)) {
@@ -4341,12 +4342,13 @@ function stepHumanSingle(
             : [];
         for (const candTy of candidates) {
           const distToCenter = Math.abs(candTy + 0.5 - v.py);
+          const signY = Math.sign(candTy + 0.5 - v.py);
           if (
             distToCenter <= 1.15 &&
+            signY * sinA * dir >= -0.05 &&
             !isBlocked(w, targetX, candTy) &&
             !isBlocked(w, curTx, candTy)
           ) {
-            const signY = Math.sign(candTy + 0.5 - v.py);
             const candidateNy = v.py + signY * Math.min(distToCenter, slideStep);
             const candidateFty = Math.floor(candidateNy);
             if (!isBlocked(w, curTx, candidateFty)) {
@@ -4381,13 +4383,37 @@ function stepHumanSingle(
           !isBlocked(w, Math.floor(nxY), Math.floor(nyY));
 
         if (canX && (!canY || Math.abs(cosA) >= Math.abs(sinA))) {
+          const centerDy = ftyX + 0.5 - nyX;
+          let slideY = nyX;
+          if (sinA * dir > 0) {
+            const limitY = ftyX + 1 - sinA * 0.32 * dir - 1e-4;
+            slideY = Math.max(nyX, Math.min(ny, limitY));
+          } else if (sinA * dir < 0) {
+            const limitY = ftyX - sinA * 0.32 * dir + 1e-4;
+            slideY = Math.min(nyX, Math.max(ny, limitY));
+          }
+          if (centerDy * sinA * dir >= 0) {
+            slideY += centerDy * Math.min(1, dt * 6);
+          }
           nx = nxX;
-          ny = nyX + (Math.floor(nyX) + 0.5 - nyX) * Math.min(1, dt * 6);
+          ny = slideY;
           ftx = ftxX;
           fty = ftyX;
           slid = true;
         } else if (canY) {
-          nx = nxY + (Math.floor(nxY) + 0.5 - nxY) * Math.min(1, dt * 6);
+          const centerDx = ftxY + 0.5 - nxY;
+          let slideX = nxY;
+          if (cosA * dir > 0) {
+            const limitX = ftxY + 1 - cosA * 0.32 * dir - 1e-4;
+            slideX = Math.max(nxY, Math.min(nx, limitX));
+          } else if (cosA * dir < 0) {
+            const limitX = ftxY - cosA * 0.32 * dir + 1e-4;
+            slideX = Math.min(nxY, Math.max(nx, limitX));
+          }
+          if (centerDx * cosA * dir >= 0) {
+            slideX += centerDx * Math.min(1, dt * 6);
+          }
+          nx = slideX;
           ny = nyY;
           ftx = ftxY;
           fty = ftyY;

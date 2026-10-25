@@ -970,11 +970,12 @@ export class WarehouseRenderer {
         },
       });
     }
-    // totes riding the conveyor line (positions are a pure function of sim time)
+    // totes riding the conveyor line (positions are a pure function of interpolated sim time)
+    const dockT = this.dockClock.update(world.t, this.nowMs);
     const NCV = map.conveyors.length;
     if (NCV) {
       for (let i = 0; i < 16; i++) {
-        const p = (world.t * 0.6 + (i * NCV) / 16) % NCV;
+        const p = (dockT * 0.6 + (i * NCV) / 16) % NCV;
         const c = map.conveyors[Math.floor(p)];
         if (!c || !this.visible(c.x + 0.5, c.y + 0.5)) continue;
         const fy = p - Math.floor(p);
@@ -1009,7 +1010,6 @@ export class WarehouseRenderer {
     }
     // east shipping bays: full rig pulls away when the trailer leaves full, the next one
     // reverses in over the sim's 3-minute swap window; fill bar while docked
-    const dockT = this.dockClock.update(world.t, this.nowMs);
     for (const bay of map.bays) {
       if (bay.id === 'RET') continue;
       const b = world.bays.find((s) => s.id === bay.id);

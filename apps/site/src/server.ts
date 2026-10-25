@@ -2548,6 +2548,13 @@ export async function createSiteServer(
               } else {
                 const carried = v.inputCarriedDt ?? 0;
                 remDt = Math.min(TICK_MIN, Math.max(0, sliceDt - carried));
+                if (inputChanged && remDt <= 1e-6 && sliceDt > 1e-6) {
+                  const elapsedInTick = Math.min(
+                    TICK_MIN,
+                    Math.max(0, (nowMs - lastTickAtMs) * 0.001),
+                  );
+                  remDt = Math.min(sliceDt, Math.max(0, elapsedInTick - queuedTotal));
+                }
               }
               const allowed = Math.max(0, TICK_MIN * 1.5 - queuedTotal);
               if (remDt > 1e-6 && allowed > 1e-6) {
@@ -2582,13 +2589,16 @@ export async function createSiteServer(
         conn.lastInputAtMs = nowMs;
         conn.lastHumanActivityAt = nowMs;
         if (conn.vid) {
-          humanInteract(
+          const acted = humanInteract(
             world,
             conn.vid,
             enableRackLiftMinigame && msg.forkHeight !== undefined
               ? { forkHeight: msg.forkHeight }
               : undefined,
           );
+          if (acted) {
+            broadcastDelta(pendingEvents.splice(0), true, nowMs);
+          }
         }
         break;
       }

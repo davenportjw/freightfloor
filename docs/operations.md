@@ -36,23 +36,24 @@ RUN_LIVE=1 npm run test:redteam -w @warehouse/site
 
 ---
 
-## 2. Cloud Build & Production Deployment (`davenport-boutique`)
+## 2. Cloud Build & Production Deployment (`davenporter-freightfloor`)
 
 ### Step 1: Build and Push Container Images
-Submit the multi-stage Docker builds (`Dockerfile.site`, `Dockerfile.lobby`, `Dockerfile.loadtest`) to Google Cloud Build, which pushes to Artifact Registry (`us-central1-docker.pkg.dev/davenport-boutique/warehouse/`):
+Submit the multi-stage Docker builds (`Dockerfile.site`, `Dockerfile.lobby`, `Dockerfile.loadtest`) to Google Cloud Build using the least-privilege `warehouse-cloudbuild` service account, which pushes to Artifact Registry (`us-central1-docker.pkg.dev/davenporter-freightfloor/warehouse/`):
 
 ```bash
-gcloud builds submit --config=cloudbuild.yaml --project=davenport-boutique .
+gcloud builds submit --config=cloudbuild.yaml --project=davenporter-freightfloor \
+  --service-account=projects/davenporter-freightfloor/serviceAccounts/warehouse-cloudbuild@davenporter-freightfloor.iam.gserviceaccount.com .
 ```
 
 ### Step 2: Format, Validate, and Apply Terraform (`infra/`)
-Always run `terraform fmt` and `terraform validate` before applying infrastructure changes:
+Terraform state is stored remotely in GCS (`gs://davenporter-freightfloor-tfstate/terraform/state` with object versioning, uniform bucket-level access, and public access prevention enabled). Always run `terraform fmt` and `terraform validate` before applying infrastructure changes:
 
 ```bash
 terraform -chdir=infra fmt
 terraform -chdir=infra init
 terraform -chdir=infra validate
-terraform -chdir=infra apply -var="project_id=davenport-boutique" -var="suffix="
+terraform -chdir=infra apply -var="project_id=davenporter-freightfloor" -var="suffix="
 ```
 
 This provisions:
@@ -120,13 +121,13 @@ To validate 128 concurrent drivers without disrupting production, deploy an isol
 
 ```bash
 terraform -chdir=infra apply \
-  -var="project_id=davenport-boutique" \
+  -var="project_id=davenporter-freightfloor" \
   -var="suffix=-stg" \
   -var="enable_loadtest_job=true"
 ```
 
 ### Full-Flow Bot Architecture (112 Protocol Bots + 16 Gemini Pilots)
-The Cloud Run Job `loadtest-128-stg` runs as service account `warehouse-loadtest-stg@`, which has **only `roles/aiplatform.user`** and zero access to Firestore or Secret Manager. Every bot connects purely as an external client through the public lobby and WebSockets:
+The Cloud Run Job `loadtest-128-stg` runs as service account `warehouse-loadtest-stg@`, which has **only custom role `warehouseVertexPredict` (`aiplatform.endpoints.predict`)** and zero access to Firestore or Secret Manager. Every bot connects purely as an external client through the public lobby and WebSockets:
 1. Calls `POST /api/join` on `warehouse-lobby-stg`.
 2. Receives a signed 60-second HMAC ticket.
 3. Connects via WebSocket `hello { ticket }`.
@@ -140,7 +141,7 @@ The Cloud Run Job `loadtest-128-stg` runs as service account `warehouse-loadtest
 - **Isolated Pilot Budget**: Pilots track spend against `PILOT_BUDGET_USD` (default **$1.50 per run**), separate from the sites' $12.50/day Firestore brain ledger. If a pilot's Gemini call fails, the pilot holds position and logs the error—it never falls back to scripted play.
 - **Executing the Load Test**:
   ```bash
-  gcloud run jobs execute loadtest-128-stg --region=us-central1 --project=davenport-boutique --wait
+  gcloud run jobs execute loadtest-128-stg --region=us-central1 --project=davenporter-freightfloor --wait
   ```
 
 ### Load Test Pass Criteria (128 Concurrent Clients over 10 Minutes)
@@ -163,7 +164,7 @@ In accordance with the resource lifecycle policy, every staging load test or smo
    - Deletes staging snapshots under `sites/*-stg/snapshots/*` and directory docs `sites/*-stg`.
    - Scales all `-stg` Cloud Run services back to zero (or destroys the `-stg` Terraform workspace):
      ```bash
-     terraform -chdir=infra destroy -var="project_id=davenport-boutique" -var="suffix=-stg" -auto-approve
+     terraform -chdir=infra destroy -var="project_id=davenporter-freightfloor" -var="suffix=-stg" -auto-approve
      ```
 
 ---
@@ -172,7 +173,8 @@ In accordance with the resource lifecycle policy, every staging load test or smo
 
 | Resource | Guardrail / Cap | Enforcement Mechanism |
 |---|---|---|
-| **Site AI Brains (`gemini-3.5-flash-lite`)** | **$12.50 / UTC day** global cap across all sites | Firestore ledger (`budget/{yyyy-mm-dd}`). Each instance buffers spend and writes `FieldValue.increment` every 10 s and on shutdown, and checks a cached doc plus its unflushed delta, so the cap can overshoot by about 10 s of spend per instance. When exhausted, agents hold with `"daily brain budget reached"`. Brain calls time out after 4 s. |
+| **Site AI Brains (`gemini-3.5-flash-lite`)** | **$12.50 / UTC day** global cap across all sites + **120 RPM** / **8 concurrent** per shard | Firestore ledger (`budget/{yyyy-mm-dd}`) + `BRAIN_MAX_RPM` sliding-window rate cap in `AgentBrainScheduler`. Each instance buffers spend and writes `FieldValue.increment` every 10 s and on shutdown, and checks a cached doc plus its unflushed delta. When exhausted, agents hold with `"daily brain budget reached"`. Brain calls time out after 4 s. |
+| **GCP Cloud Quotas (`aiplatform.googleapis.com` & `modelarmor.googleapis.com`)** | **50M input tokens/day**, **1M input tokens/min**, **120 Model Armor RPM**, **Quota Adjuster DISABLED** | Enforced via Terraform `google_cloud_quotas_quota_preference` (`GlobalGenerateContentInputTokensPerDayPerBaseModel`, `GlobalGenerateContentInputTokensPerMinutePerBaseModel`, `RequestsPerMinute`) and `google_cloud_quotas_quota_adjuster_settings` (`DISABLED`). |
 | **Typed Orders (`nlCommand`)** | **$1.50 / UTC day** cap on the daily ledger | Dedicated counter on `budget/{yyyy-mm-dd}` + 6/min per player rate limit + 3-strike 15-min mute. |
 | **Loadtest Gemini Pilots** | **$1.50 / job run** (`PILOT_BUDGET_USD=1.5`) | In-process token counter inside `tools/loadtest`; pilots hold when cap is reached. |
 | **Overflow Shards (`slc-2`, `phx-3`, `abq-4`)** | `min_instance_count = 0`, `IDLE_POLICY = break`, 12 agents | Automatically enter factory break after 2 minutes with 0 players, freezing the clock and stopping all Gemini calls so Cloud Run scales to zero. |

@@ -82,6 +82,53 @@ export function introSpinupStatus(state: IntroSpinupState): IntroSpinupStatus {
 export interface HelpMountOptions {
   /** Current saved or default callsign to display in the assigned callsign badge. */
   getCallsign?: () => string;
+  /** Optional override for whether mobile/touch joystick controls are active. */
+  isMobile?: boolean | (() => boolean);
+}
+
+/** Touch / mobile controls shown in "All controls" when on a mobile / coarse-pointer viewport. */
+export const TOUCH_CONTROLS: ReadonlyArray<{ control: string; action: string }> = [
+  { control: 'Joystick', action: 'Drag bottom-left thumbstick to steer (instant manual takeover from Co-Pilot)' },
+  { control: 'Boost', action: 'Hold bottom-right Boost (+120% speed; collisions drop carried pallets!)' },
+  { control: 'Pick / Drop / Charge', action: 'Pick up pallet, drop at bay, clear spill, or start charging' },
+  { control: 'Take #Order', action: 'Tap bottom-right action button (or an order card) to claim an order offer' },
+  { control: '🤖 Auto / 🕹️ Manual', action: 'Tap top-right HUD button to toggle Co-Pilot autopilot or manual driving' },
+  { control: 'Tap Forklift', action: 'Inspect any forklift’s Gemini model, persona, latency, and last decision' },
+  { control: 'Pinch / Drag', action: 'Pinch to zoom · drag the floor to pan the camera in Floor view' },
+  { control: '☰ Menu', action: 'Open Floor / Drive switcher, Standings, Tune Co-Pilot, and settings' },
+];
+
+/**
+ * Returns `true` when the client is on a mobile / coarse-pointer viewport where the virtual
+ * joystick (`#touchControls`) is used instead of keyboard buttons.
+ */
+export function isTouchControlsEnvironment(override?: boolean | (() => boolean)): boolean {
+  if (typeof override === 'function') return Boolean(override());
+  if (typeof override === 'boolean') return override;
+  try {
+    if (typeof window !== 'undefined') {
+      if (
+        typeof window.innerWidth === 'number' &&
+        window.innerWidth > 0 &&
+        typeof window.innerHeight === 'number' &&
+        window.innerHeight > 0 &&
+        (window.innerWidth <= 900 || window.innerHeight <= 500)
+      ) {
+        return true;
+      }
+      if (typeof window.matchMedia === 'function') {
+        if (
+          window.matchMedia('(pointer: coarse)').matches ||
+          window.matchMedia('(max-width: 900px), (max-height: 500px), (pointer: coarse)').matches
+        ) {
+          return true;
+        }
+      }
+    }
+  } catch {
+    /* non-DOM environment */
+  }
+  return false;
 }
 
 /**
@@ -169,9 +216,25 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       Array.isArray(body) ? el('p', { class: 'intro-step__body' }, body) : body,
     ]);
 
+  const step1Body = el('p', { class: 'intro-step__body' }, [
+    'Hit ',
+    b('Start driving'),
+    ' to grab a forklift. Steer with ',
+    kbd('W'),
+    kbd('A'),
+    kbd('S'),
+    kbd('D'),
+    '.',
+  ]);
   const step2Body = el('p', { class: 'intro-step__body' }, ['Pull up to a glowing pallet and press ', kbd('E'), '.']);
+  const step3Body = el('p', { class: 'intro-step__body' }, ['Drop it at the blue Shipping Bay with ', kbd('E'), '.']);
   const perfectLiftChip = el('span', { class: 'intro-chip' }, ['+$5–$10 perfect lift']);
   perfectLiftChip.hidden = true;
+  const boostChip = el('span', { class: 'intro-chip' }, ['Hold ', kbd('Shift'), ' to boost — crashing drops your load']);
+  const chargeChip = el('span', { class: 'intro-chip' }, ['🔋 Low? Park on a green pad, press ', kbd('E')]);
+  const manualSteeringText = el('span', { text: ' WASD steering & physics' });
+  const manualOfferText = el('span', { text: ' Ranks 3 offers (Q), auto-picks in 5s' });
+
   let hotkeyECell: HTMLElement | null = null;
   const hotkeyRows = HOTKEYS.map((h) => {
     const actionCell = el('td', {
@@ -181,18 +244,77 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     return el('tr', {}, [el('td', {}, [kbd(h.key)]), actionCell]);
   });
 
+  let touchInteractCell: HTMLElement | null = null;
+  const touchControlRows = TOUCH_CONTROLS.map((c) => {
+    const actionCell = el('td', { text: c.action });
+    if (c.control === 'Pick / Drop / Charge') touchInteractCell = actionCell;
+    return el('tr', {}, [el('td', {}, [kbd(c.control)]), actionCell]);
+  });
+
+  const controlsTable = el('table', { class: 'keys' }, hotkeyRows);
+
   let lastRackLift: boolean | null = null;
-  const syncRackLiftHelp = (rackLift: boolean): void => {
-    if (lastRackLift === rackLift) return;
+  let lastMobile: boolean | null = null;
+  const syncRackLiftHelp = (rackLift: boolean, mobile: boolean): void => {
+    if (lastRackLift === rackLift && lastMobile === mobile) return;
+    const modeChanged = lastMobile !== mobile;
     lastRackLift = rackLift;
-    if (rackLift) {
-      step2Body.replaceChildren(
-        'Pull up to a glowing rack pallet, hold ',
-        kbd('E'),
-        ' to raise forks (L1–L3), and release ',
-        kbd('E'),
-        ' in the sweet spot.',
+    lastMobile = mobile;
+
+    if (mobile) {
+      step1Body.replaceChildren(
+        'Tap ',
+        b('Start driving'),
+        ' to grab a forklift. Drag the bottom-left ',
+        b('joystick'),
+        ' to steer.',
       );
+      if (rackLift) {
+        step2Body.replaceChildren(
+          'Pull up to a glowing rack pallet, hold ',
+          kbd('Pick'),
+          ' to raise forks (L1–L3), and release ',
+          kbd('Pick'),
+          ' in the sweet spot.',
+        );
+      } else {
+        step2Body.replaceChildren('Pull up to a glowing pallet and tap ', kbd('Pick'), ' on the bottom-right.');
+      }
+      step3Body.replaceChildren('Drop it at the blue Shipping Bay by tapping ', kbd('Drop'), '.');
+      boostChip.replaceChildren('Hold ', kbd('Boost'), ' to boost — crashing drops your load');
+      chargeChip.replaceChildren('🔋 Low? Park on a green pad, tap ', kbd('Charge'));
+      manualSteeringText.textContent = ' Joystick steering & physics';
+      manualOfferText.textContent = ' Ranks 3 offers, auto-picks in 5s';
+    } else {
+      step1Body.replaceChildren(
+        'Hit ',
+        b('Start driving'),
+        ' to grab a forklift. Steer with ',
+        kbd('W'),
+        kbd('A'),
+        kbd('S'),
+        kbd('D'),
+        '.',
+      );
+      if (rackLift) {
+        step2Body.replaceChildren(
+          'Pull up to a glowing rack pallet, hold ',
+          kbd('E'),
+          ' to raise forks (L1–L3), and release ',
+          kbd('E'),
+          ' in the sweet spot.',
+        );
+      } else {
+        step2Body.replaceChildren('Pull up to a glowing pallet and press ', kbd('E'), '.');
+      }
+      step3Body.replaceChildren('Drop it at the blue Shipping Bay with ', kbd('E'), '.');
+      boostChip.replaceChildren('Hold ', kbd('Shift'), ' to boost — crashing drops your load');
+      chargeChip.replaceChildren('🔋 Low? Park on a green pad, press ', kbd('E'));
+      manualSteeringText.textContent = ' WASD steering & physics';
+      manualOfferText.textContent = ' Ranks 3 offers (Q), auto-picks in 5s';
+    }
+
+    if (rackLift) {
       perfectLiftChip.hidden = false;
       if (perfectLiftChip.style) {
         perfectLiftChip.style.display = '';
@@ -201,8 +323,10 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       if (hotkeyECell) {
         hotkeyECell.textContent = 'Hold & release at rack to lift (L1–L3), or press at bay / charger';
       }
+      if (touchInteractCell) {
+        touchInteractCell.textContent = 'Hold & release at rack to lift (L1–L3), or tap at bay / charger / spill';
+      }
     } else {
-      step2Body.replaceChildren('Pull up to a glowing pallet and press ', kbd('E'), '.');
       perfectLiftChip.hidden = true;
       if (perfectLiftChip.style) {
         perfectLiftChip.style.display = 'none';
@@ -211,31 +335,38 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       if (hotkeyECell) {
         hotkeyECell.textContent = 'Pick up pallet, drop at bay, or start charging';
       }
+      if (touchInteractCell) {
+        touchInteractCell.textContent = 'Pick up pallet, drop at bay, clear spill, or start charging';
+      }
+    }
+
+    if (modeChanged) {
+      controlsTable.replaceChildren(...(mobile ? touchControlRows : hotkeyRows));
     }
   };
-  syncRackLiftHelp(ctx.store.isRackLiftEnabled());
+  syncRackLiftHelp(ctx.store.isRackLiftEnabled(), isTouchControlsEnvironment(opts.isMobile));
 
   const playPane = el(
     'section',
     { class: 'intro-pane', attrs: { 'data-pane': 'rules', role: 'region', 'aria-label': 'How to Play' } },
     [
       el('ol', { class: 'intro-steps' }, [
-        step('1', '🚜', 'Drive', ['Hit ', b('Start driving'), ' to grab a forklift. Steer with ', kbd('W'), kbd('A'), kbd('S'), kbd('D'), '.']),
+        step('1', '🚜', 'Drive', step1Body),
         step('2', '📦', 'Pick up', step2Body),
-        step('3', '🏁', 'Deliver', ['Drop it at the blue Shipping Bay with ', kbd('E'), '.']),
+        step('3', '🏁', 'Deliver', step3Body),
       ]),
       el('div', { class: 'intro-chips' }, [
         el('span', { class: 'intro-chip good' }, [b('+10'), ' pallet']),
         el('span', { class: 'intro-chip accent' }, [b('+40'), ' ★ rush order']),
         perfectLiftChip,
         el('span', { class: 'intro-chip bad' }, [b('−15'), ' crash']),
-        el('span', { class: 'intro-chip' }, ['Hold ', kbd('Shift'), ' to boost — crashing drops your load']),
-        el('span', { class: 'intro-chip' }, ['🔋 Low? Park on a green pad, press ', kbd('E')]),
+        boostChip,
+        chargeChip,
       ]),
       el('p', { class: 'intro-goal' }, ['Out-ship the AI forklifts and finish the shift ', b('#1'), '.']),
       el('details', { class: 'intro-keys' }, [
         el('summary', { text: 'All controls' }),
-        el('table', { class: 'keys' }, hotkeyRows),
+        controlsTable,
       ]),
     ],
   );
@@ -809,8 +940,8 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
             matrixRow(
               '🕹️ Player Manual (Drive / Take Wheel)',
               'engine',
-              [lcChip('● Human + Engine', 'engine'), ' WASD steering & physics'],
-              [lcChip('● Engine Only', 'engine'), ' Ranks 3 offers (Q), auto-picks in 5s'],
+              [lcChip('● Human + Engine', 'engine'), manualSteeringText],
+              [lcChip('● Engine Only', 'engine'), manualOfferText],
               [lcChip('● 0 LLM Calls', 'engine'), ' Pending requests stripped on takeover'],
             ),
             matrixRow(
@@ -963,7 +1094,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     switchTab,
     start: tryEnterFloor,
     update() {
-      syncRackLiftHelp(ctx.store.isRackLiftEnabled());
+      syncRackLiftHelp(ctx.store.isRackLiftEnabled(), isTouchControlsEnvironment(opts.isMobile));
       syncSpinup();
       const pending = Boolean(ctx.store.ui.pendingDrive);
       const label = introStartLabel(pending);

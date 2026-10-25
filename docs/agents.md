@@ -2,7 +2,7 @@
 
 ## Overview
 
-Every AI vehicle in the Warehouse distribution network is controlled by an asynchronous **Gemini 3.5 Flash-Lite** brain (`gemini-3.5-flash-lite`) hosted on Vertex AI (`location: 'global'`, `project: 'davenport-boutique'`), authenticated via Google Cloud Application Default Credentials (ADC). Allowed models exported in `ALLOWED_GEMINI_MODELS` are `'gemini-3.8-flash'`, `'gemini-3.5-flash-lite'`, and `'gemini-4-argon'`.
+Every AI vehicle in the Warehouse distribution network is controlled by an asynchronous **Gemini 3.5 Flash-Lite** brain (`gemini-3.5-flash-lite`) hosted on Vertex AI (`location: 'global'`, `project: 'davenporter-freightfloor'`), authenticated via Google Cloud Application Default Credentials (ADC). Allowed models exported in `ALLOWED_GEMINI_MODELS` are `'gemini-3.8-flash'`, `'gemini-3.5-flash-lite'`, and `'gemini-4-argon'`.
 
 - **10 Hz Non-Blocking Execution**: The 10 Hz deterministic simulation loop (`packages/sim`) never blocks on network I/O. Instead, `packages/sim` emits `DecisionRequest` events ahead of time, and deterministic pathfinding (`A*`, reservation tables, steering) drives the vehicle between decisions.
 - **Asynchronous Validation (`applyDecision`)**: When the Vertex AI response arrives, the site server passes it into `applyDecision(world, reqId, decision, meta)`. The simulation validates that the request has not expired (`deadline`) and that the chosen option is still legal in the current world state.
@@ -17,7 +17,7 @@ Brain requests use the official `@google/genai` SDK configured for Vertex AI wit
 ```ts
 const ai = new GoogleGenAI({
   vertexai: true,
-  project: 'davenport-boutique',
+  project: 'davenporter-freightfloor',
   location: 'global',
 });
 

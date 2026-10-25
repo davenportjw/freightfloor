@@ -50,3 +50,9 @@ tools/smoke/out/
 
 # AST GraphDB Sidecar storage & exports
 .ast-graph/
+
+# Local private scripts (excluded from GitHub)
+scripts/local/
+*.local.mjs
+*.local.sh
+

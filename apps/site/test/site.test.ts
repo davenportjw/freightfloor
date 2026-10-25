@@ -30,6 +30,7 @@ import {
   parseAndMapDecision,
   ALLOWED_GEMINI_MODELS,
   DEFAULT_GEMINI_MODEL,
+  BRAIN_MAX_CALLS_PER_MIN,
   AGENT_DAILY_BUDGET_USD,
   NL_COMMAND_DAILY_BUDGET_USD,
   estimateGeminiFlashCostUsd,
@@ -1112,6 +1113,7 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     ]);
     expect(AGENT_DAILY_BUDGET_USD).toBe(12.5);
     expect(NL_COMMAND_DAILY_BUDGET_USD).toBe(1.5);
+    expect(BRAIN_MAX_CALLS_PER_MIN).toBe(120);
     expect(estimateGeminiFlashCostUsd(1_000_000, 1_000_000)).toBeCloseTo(0.375, 5);
 
     const world = createWorld({ siteId: 'den-1', seed: 101, agents: 4 });

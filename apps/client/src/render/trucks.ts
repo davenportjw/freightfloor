@@ -71,7 +71,7 @@ export class SimClock {
   private prevT = Number.NaN;
   private currT = Number.NaN;
   private changedAt = 0;
-  private interval = 100;
+  private interval = 120;
 
   update(worldT: number, nowMs: number): number {
     if (worldT !== this.currT) {
@@ -80,7 +80,7 @@ export class SimClock {
       } else {
         this.prevT = this.value(nowMs);
         const dt = nowMs - this.changedAt;
-        if (dt > 0) this.interval = this.interval * 0.7 + Math.max(30, Math.min(1000, dt)) * 0.3;
+        if (dt > 0) this.interval = this.interval * 0.7 + Math.max(120, Math.min(1000, dt * 1.2)) * 0.3;
       }
       this.currT = worldT;
       this.changedAt = nowMs;

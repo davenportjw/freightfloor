@@ -1324,6 +1324,7 @@ function boot(): void {
     }
     const predicting = Boolean(me && input.predicting(now, me));
     if (me && predicting) input.predict(store.world, me, elapsed);
+    input.tick(now, document.hasFocus());
     const rackLiftEnabled = store.isRackLiftEnabled();
     rackLift.step(elapsed, store.world, me, rackLiftEnabled);
     const myPose = me && predicting ? input.visualPose(me) : null;

@@ -218,7 +218,7 @@ export function drawVehicle(
   }
 
   const cargo = v.cargo ?? [];
-  const forkRaised = (v.fork ?? 0) > 0.22;
+  const forkRaised = (v.fork ?? 0) > 0.35;
   const useSpriteCargo =
     !forkRaised &&
     cargo.length > 0 &&
