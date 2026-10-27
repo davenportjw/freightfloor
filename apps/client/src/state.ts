@@ -708,10 +708,11 @@ export function saveHudMinimal(on: boolean): void {
   }
 }
 
-export function readRackLiftOverride(): boolean | null {
+export function readRackLiftOverride(storage?: Pick<Storage, 'getItem'> | null): boolean | null {
   try {
     if (typeof window !== 'undefined' && window.location?.search) {
-      const q = new URLSearchParams(window.location.search).get('rackLift');
+      const params = new URLSearchParams(window.location.search);
+      const q = params.get('rackLift') ?? params.get('liftMode') ?? params.get('lift');
       if (q === '1' || q === 'true') return true;
       if (q === '0' || q === 'false') return false;
     }
@@ -719,8 +720,9 @@ export function readRackLiftOverride(): boolean | null {
     /* ignore URL parsing errors */
   }
   try {
-    if (typeof localStorage !== 'undefined') {
-      const v = localStorage.getItem(RACK_LIFT_KEY);
+    const s = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
+    if (s) {
+      const v = s.getItem(RACK_LIFT_KEY);
       if (v === '1') return true;
       if (v === '0') return false;
     }

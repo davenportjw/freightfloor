@@ -232,13 +232,17 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
         remove: () => {},
         contains: () => false,
       };
+      private attrs = new Map<string, string>();
+      private listeners = new Map<string, Array<(ev: unknown) => void>>();
       constructor(tag: string) {
         super();
         this.tagName = tag.toUpperCase();
       }
-      setAttribute(): void {}
-      getAttribute(): string | null {
-        return null;
+      setAttribute(k: string, v: string): void {
+        this.attrs.set(k, String(v));
+      }
+      getAttribute(k: string): string | null {
+        return this.attrs.get(k) ?? null;
       }
       append(...nodes: Array<MiniElement | MiniText | string>): void {
         for (const n of nodes) {
@@ -249,7 +253,16 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
         this.children = [];
         this.append(...nodes);
       }
-      addEventListener(): void {}
+      addEventListener(type: string, fn: (ev: unknown) => void): void {
+        const list = this.listeners.get(type) ?? [];
+        list.push(fn);
+        this.listeners.set(type, list);
+      }
+      click(): void {
+        for (const fn of this.listeners.get('click') ?? []) {
+          fn({ target: this, preventDefault() {} });
+        }
+      }
       focus(): void {}
       queryAll(pred: (el: MiniElement) => boolean): MiniElement[] {
         const out: MiniElement[] = [];
@@ -296,9 +309,29 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
       const eRow = rows.find((r) => r.children[0]?.textContent === 'E')!;
       expect(eRow.children[1]?.textContent).toBe('Pick up pallet, drop at bay, or start charging');
 
-      // Enable rackLiftMinigame -> reactive update
-      store.setRackLiftMinigame(true);
-      helpMod.update();
+      const toggleBtn = overlay.queryAll((e) => e.getAttribute('data-role') === 'lift-mode-toggle')[0]!;
+      const explainer = overlay.queryAll((e) => e.getAttribute('data-role') === 'lift-mode-explainer')[0]!;
+      expect(toggleBtn).toBeDefined();
+      expect(explainer).toBeDefined();
+      expect(toggleBtn.textContent).toBe('Lift Mode: OFF');
+      expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
+      expect(explainer.hidden).toBe(true);
+      expect(explainer.style.display).toBe('none');
+
+      // Clicking the intro page Lift Mode toggle button enables the feature flag and shows the explanation
+      toggleBtn.click();
+      expect(store.isRackLiftEnabled()).toBe(true);
+      expect(toggleBtn.textContent).toBe('Lift Mode: ON');
+      expect(toggleBtn.getAttribute('aria-pressed')).toBe('true');
+      expect(explainer.hidden).toBe(false);
+      expect(explainer.style.display).toBe('');
+      expect(explainer.textContent).toContain('How Lift Mode works:');
+      expect(explainer.textContent).toContain('L1 Low');
+      expect(explainer.textContent).toContain('L2 Mid');
+      expect(explainer.textContent).toContain('L3 High');
+      expect(explainer.textContent).toContain('Perfect Lift');
+      expect(explainer.textContent).toContain('Clean Lift');
+      expect(explainer.textContent).toContain('Rack Scrape');
       expect(steps[1]?.textContent).toBe(
         'Pull up to a glowing rack pallet, hold E to raise forks (L1–L3), and release E in the sweet spot.',
       );
@@ -308,9 +341,13 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
         'Hold & release at rack to lift (L1–L3), or press at bay / charger',
       );
 
-      // Disable again -> reverts cleanly
+      // Disable again -> reverts cleanly and hides the explanation
       store.setRackLiftMinigame(false);
       helpMod.update();
+      expect(toggleBtn.textContent).toBe('Lift Mode: OFF');
+      expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
+      expect(explainer.hidden).toBe(true);
+      expect(explainer.style.display).toBe('none');
       expect(steps[1]?.textContent).toBe('Pull up to a glowing pallet and press E.');
       expect(liftChip.hidden).toBe(true);
       expect(liftChip.style.display).toBe('none');

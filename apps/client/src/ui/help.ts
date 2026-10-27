@@ -258,6 +258,59 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
 
   const controlsTable = el('table', { class: 'keys' }, hotkeyRows);
 
+  const liftModeBtn = el('button', {
+    class: 'btn intro-lift-toggle',
+    text: `Lift Mode: ${ctx.store.isRackLiftEnabled() ? 'ON' : 'OFF'}`,
+    title: 'Toggle Lift Mode feature flag: 3D vertical rack shelf lifting (L1 Low / L2 Mid / L3 High)',
+    attrs: {
+      type: 'button',
+      'data-act': 'toggle-rack-lift',
+      'data-action': 'toggle-lift-mode',
+      'data-role': 'lift-mode-toggle',
+      'aria-pressed': ctx.store.isRackLiftEnabled() ? 'true' : 'false',
+      'aria-expanded': ctx.store.isRackLiftEnabled() ? 'true' : 'false',
+      'aria-controls': 'introLiftExplainer',
+    },
+    onClick: () => {
+      const next = !ctx.store.isRackLiftEnabled();
+      ctx.store.setRackLiftMinigame(next);
+      syncRackLiftHelp(ctx.store.isRackLiftEnabled(), isTouchControlsEnvironment(opts.isMobile));
+    },
+  });
+
+  const liftExplainer = el('div', {
+    class: 'intro-lift-explainer',
+    attrs: {
+      id: 'introLiftExplainer',
+      'data-role': 'lift-mode-explainer',
+      role: 'region',
+      'aria-label': 'How Lift Mode works',
+    },
+  });
+  liftExplainer.hidden = true;
+
+  const liftModeBox = el(
+    'div',
+    {
+      class: 'intro-lift-mode',
+      attrs: { 'data-role': 'intro-lift-mode', 'data-enabled': ctx.store.isRackLiftEnabled() ? 'true' : 'false' },
+    },
+    [
+      el('div', { class: 'intro-lift-mode__bar' }, [
+        el('div', { class: 'intro-lift-mode__info' }, [
+          el('span', { class: 'intro-lift-mode__title' }, ['🏗️ ', b('Lift Mode')]),
+          el('span', { class: 'intro-lift-mode__flag num', text: 'FEATURE FLAG' }),
+          el('span', {
+            class: 'intro-lift-mode__sub',
+            text: 'Opt-in 3D vertical rack shelf lifting (L1–L3) with sweet-spot bonuses.',
+          }),
+        ]),
+        liftModeBtn,
+      ]),
+      liftExplainer,
+    ],
+  );
+
   let lastRackLift: boolean | null = null;
   let lastMobile: boolean | null = null;
   const syncRackLiftHelp = (rackLift: boolean, mobile: boolean): void => {
@@ -265,6 +318,13 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     const modeChanged = lastMobile !== mobile;
     lastRackLift = rackLift;
     lastMobile = mobile;
+
+    liftModeBox.dataset.enabled = rackLift ? 'true' : 'false';
+    liftModeBox.classList.toggle('active', rackLift);
+    liftModeBtn.textContent = `Lift Mode: ${rackLift ? 'ON' : 'OFF'}`;
+    liftModeBtn.setAttribute('aria-pressed', rackLift ? 'true' : 'false');
+    liftModeBtn.setAttribute('aria-expanded', rackLift ? 'true' : 'false');
+    liftModeBtn.classList.toggle('active', rackLift);
 
     if (mobile) {
       step1Body.replaceChildren(
@@ -329,6 +389,50 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
         perfectLiftChip.style.display = '';
         perfectLiftChip.style.setProperty?.('display', '');
       }
+      liftExplainer.hidden = false;
+      if (liftExplainer.style) {
+        liftExplainer.style.display = '';
+        liftExplainer.style.setProperty?.('display', '');
+      }
+      const keyLabel = mobile ? 'Pick' : 'E';
+      liftExplainer.replaceChildren(
+        el('p', { class: 'intro-lift-explainer__lead' }, [
+          b('How Lift Mode works: '),
+          'Rack pallets sit on 3 shelf tiers (',
+          b('L1 Low'),
+          ', ',
+          b('L2 Mid'),
+          ', ',
+          b('L3 High'),
+          '). At a rack, hold ',
+          kbd(keyLabel),
+          ' to raise your 3D forks along the vertical gauge and release ',
+          kbd(keyLabel),
+          ' inside the green target band. Quick-tapping ',
+          kbd(keyLabel),
+          ' on L2/L3 keeps the forks rising so a second ',
+          kbd(keyLabel),
+          ' locks the height.',
+        ]),
+        el('div', { class: 'intro-lift-grades' }, [
+          el('span', { class: 'intro-lift-grade good' }, [
+            b('🎯 Perfect Lift (+$5 to +$8)'),
+            ' · Release in the sweet spot (+speed boost; +$10 Slide & Snatch when braking in)',
+          ]),
+          el('span', { class: 'intro-lift-grade neutral' }, [
+            b('✓ Clean Lift ($0)'),
+            ' · Outer green band for a smooth grab with no penalty',
+          ]),
+          el('span', { class: 'intro-lift-grade bad' }, [
+            b('⚠️ Rack Scrape (−$2 to −$4)'),
+            ' · Miss the shelf band and trigger a brief fork wobble',
+          ]),
+        ]),
+        el('p', {
+          class: 'intro-lift-explainer__note',
+          text: 'Shipping bays, floor spills, inbound docks, and green charging pads stay instant 1-tap actions.',
+        }),
+      );
       if (hotkeyECell) {
         hotkeyECell.textContent = 'Hold & release at rack to lift (L1–L3), or press at bay / charger';
       }
@@ -341,6 +445,12 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
         perfectLiftChip.style.display = 'none';
         perfectLiftChip.style.setProperty?.('display', 'none');
       }
+      liftExplainer.hidden = true;
+      if (liftExplainer.style) {
+        liftExplainer.style.display = 'none';
+        liftExplainer.style.setProperty?.('display', 'none');
+      }
+      liftExplainer.replaceChildren();
       if (hotkeyECell) {
         hotkeyECell.textContent = 'Pick up pallet, drop at bay, or start charging';
       }
@@ -372,6 +482,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
         boostChip,
         chargeChip,
       ]),
+      liftModeBox,
       el('p', { class: 'intro-goal' }, ['Out-ship the AI forklifts and finish the shift ', b('#1'), '.']),
       el('details', { class: 'intro-keys' }, [
         el('summary', { text: 'All controls' }),
