@@ -392,10 +392,11 @@ describe('mobile HUD + touch controls view-model', () => {
   });
 });
 
-describe('GitHub repository links (Intro modal and HUD)', () => {
+describe('GitHub repository and Powered by Davenporter links (Intro modal, HUD, and Menu)', () => {
   const EXPECTED_GITHUB_URL = 'https://github.com/davenportjw/freightfloor';
+  const EXPECTED_DAVENPORTER_URL = 'https://davenporter.com';
 
-  it('renders #githubBtn in index.html HUD with expected href, target, rel, aria-label, and inline SVG icon', async () => {
+  it('renders #githubBtn and #brandBadge with #davenporterHudLink in index.html HUD with expected href, target, rel, aria-label, and inline SVG icon', async () => {
     const { readFileSync } = await import('node:fs');
     const { resolve } = await import('node:path');
     const html = readFileSync(resolve(import.meta.dirname, '../../index.html'), 'utf8');
@@ -419,6 +420,9 @@ describe('GitHub repository links (Intro modal and HUD)', () => {
     expect(badgeMatch![1]).toContain('src="/favicon.svg"');
     expect(badgeMatch![1]).toContain('FREIGHT');
     expect(badgeMatch![1]).toContain('FLOOR');
+    expect(badgeMatch![1]).toContain('id="davenporterHudLink"');
+    expect(badgeMatch![1]).toContain(`href="${EXPECTED_DAVENPORTER_URL}"`);
+    expect(badgeMatch![1]).toContain('Powered by Davenporter');
 
     const css = readFileSync(resolve(import.meta.dirname, '../../src/styles.css'), 'utf8');
     const brandBlock = css.match(/#brandBadge\s*\{([^}]*)\}/)?.[1] ?? '';
@@ -431,7 +435,7 @@ describe('GitHub repository links (Intro modal and HUD)', () => {
     expect(kpisOffset).toBeGreaterThanOrEqual(brandOffset + brandWidth + 8);
   });
 
-  it('mounts .intro-github-link inside the Intro modal header with expected href, target, rel, aria-label, and inline SVG icon', async () => {
+  it('mounts .intro-github-link and .intro-powered-link inside the Intro modal and .menu-powered-link inside the menu', async () => {
     class MiniText {
       constructor(public data: string) {}
     }
@@ -556,6 +560,28 @@ describe('GitHub repository links (Intro modal and HUD)', () => {
       expect(callsignInputs).toHaveLength(0);
       const badges = overlay.queryAll((e) => e.getAttribute('id') === 'introAssignedCallsign');
       expect(badges).toHaveLength(1);
+
+      const poweredLinks = overlay.queryAll((e) => e.tagName === 'A' && e.classList.contains('intro-powered-link'));
+      expect(poweredLinks).toHaveLength(1);
+      const poweredLink = poweredLinks[0]!;
+      expect(poweredLink.getAttribute('href')).toBe(EXPECTED_DAVENPORTER_URL);
+      expect(poweredLink.getAttribute('target')).toBe('_blank');
+      expect(poweredLink.getAttribute('rel')).toBe('noopener noreferrer');
+      expect(poweredLink.getAttribute('aria-label')).toBe('Powered by Davenporter');
+
+      const { mountMenu } = await import('../../src/ui/menu.js');
+      const menuBtn = new MiniElement('button');
+      const menuRoot = new MiniElement('nav');
+      store.ui.helpOpen = false;
+      store.ui.overlay = 'menu';
+      const menuMod = mountMenu(menuBtn as unknown as HTMLElement, menuRoot as unknown as HTMLElement, ctx);
+      menuMod.update();
+
+      const menuPoweredLinks = menuRoot.queryAll((e) => e.tagName === 'A' && e.classList.contains('menu-powered-link'));
+      expect(menuPoweredLinks).toHaveLength(1);
+      expect(menuPoweredLinks[0]!.getAttribute('href')).toBe(EXPECTED_DAVENPORTER_URL);
+      expect(menuPoweredLinks[0]!.getAttribute('target')).toBe('_blank');
+      expect(menuPoweredLinks[0]!.getAttribute('rel')).toBe('noopener noreferrer');
     } finally {
       (globalThis as Record<string, unknown>).document = prevDoc;
     }

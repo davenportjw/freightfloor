@@ -1137,11 +1137,26 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
   };
   syncSpinup();
 
-  // ---- footer: callsign + CTA ----
+  // ---- footer: callsign + powered-by credit + CTA ----
+  const davenporterLink = el(
+    'a',
+    {
+      class: 'intro-powered-link',
+      attrs: {
+        href: 'https://davenporter.com',
+        target: '_blank',
+        rel: 'noopener noreferrer',
+        'aria-label': 'Powered by Davenporter',
+        title: 'Visit Davenporter (davenporter.com)',
+      },
+    },
+    ['Powered by ', el('strong', { text: 'Davenporter' }), ' ↗'],
+  );
   const footer = el('form', { class: 'intro-footer' }, [
     el('div', { class: 'intro-callsign-box' }, [
       el('span', { class: 'muted', text: 'You are' }),
       assignedBadge,
+      davenporterLink,
     ]),
     startBtn,
   ]);

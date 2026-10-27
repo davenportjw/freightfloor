@@ -190,7 +190,7 @@ The client renderer (`apps/client/src/renderer.ts`, `apps/client/src/render/*`) 
 
 ## AI Concepts & Client Intro Briefing
 
-When the client loads (`apps/client/src/ui/help.ts`), the **Intro Page** (`#help`) opens by default (`shouldShowHelpOnBoot`), featuring a GitHub repository icon link (`.intro-github-link` → `https://github.com/davenportjw/freightfloor`) in its header. Its default **How to Play** tab is three steps and a big **Enter Floor** button. The AI architecture is in the **The AI Inside** and **Decision Lifecycle** tabs:
+When the client loads (`apps/client/src/ui/help.ts`), the **Intro Page** (`#help`) opens by default (`shouldShowHelpOnBoot`), featuring a GitHub repository icon link (`.intro-github-link` → `https://github.com/davenportjw/freightfloor`) in its header and a "Powered by Davenporter" pill link (`.intro-powered-link` → `https://davenporter.com`) in its footer. Its default **How to Play** tab is three steps and a big **Enter Floor** button. The AI architecture is in the **The AI Inside** and **Decision Lifecycle** tabs:
 1. **Hybrid Neuro-Symbolic Agent Control**: Separates high-level tactical reasoning (`gemini-3.5-flash-lite` structured JSON decisions for `tactics`, `cards`, and `nlCommand` / `a2uiScreen` routing) from deterministic 10 Hz physics, occupancy reservation, and A* pathfinding (`packages/sim`).
 2. **Multi-Agent Strategy Evaluation**: Continuously benchmarks the AI driving styles (sim `Archetype`: `Sprinter`, `Steady`, `Batcher`, `Opportunist`, `Strategist`) alongside `Human` drivers on **Team Standings** (☰ → Team Standings / `B`; data from `stats.board`, ranked by orders/hr per truck) and the `Value Created` chart.
 3. **Real-Time Observability & Cost/Security Guardrails**: Exposes every agent's active thought reason, path, and token/latency metrics in the Inspector and History Drawer (`Brain log`), while protecting inference via Model Armor prompt screening, per-player governance cooldowns, and the Firestore daily budget ledger.
@@ -211,7 +211,7 @@ The client (`apps/client`, vanilla TypeScript + Canvas2D, Vite) has two HUD layo
 | `ui/standings.ts` | `#standingsSheet` | Hold-Tab standings + difficulty vote |
 | `ui/runEnd.ts` | `#runEnd` | Results sheet |
 | `ui/chat.ts` | `#chat` | Co-Pilot (`agentCommand`) / Floor (`nlCommand`) chat |
-| `ui/menu.ts` | `#menuBtn`, `#githubBtn`, `#menu`, `#flyout` | ☰ menu, top-left GitHub repository icon link (`#githubBtn`), and flyouts (Fleet, Drivers, Value, Network, Layers, Settings) |
+| `ui/menu.ts` | `#menuBtn`, `#githubBtn`, `#brandBadge`, `#menu`, `#flyout` | ☰ menu (with `.menu-powered-link` → `https://davenporter.com`), top-left GitHub repository icon link (`#githubBtn`), brand badge (`#brandBadge` with `#davenporterHudLink` → `https://davenporter.com`), and flyouts (Fleet, Drivers, Value, Network, Layers, Settings) |
 | `ui/teamStandings.ts` | `#standFly` | Team Standings flyout (`stats.board`) |
 | `ui/floorView.ts` | `#kpis`, `#floorBanner`, `#feed` | Floor: KPI strip, Drive banner (incl. run-over points), event feed merged with client notices |
 | `ui/notify.ts` | — | Pure notification routing (event kind × mode → popup / alert / feed / order line / banner / drop); replaces the toast stack |

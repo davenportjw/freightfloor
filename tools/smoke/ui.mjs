@@ -288,6 +288,14 @@ try {
     `visible=${introGithubVisible} href=${introGithubHref}`,
   );
 
+  const introPoweredVisible = await page.locator('#help .intro-powered-link').isVisible().catch(() => false);
+  const introPoweredHref = (await page.locator('#help .intro-powered-link').getAttribute('href').catch(() => '')) ?? '';
+  check(
+    'intro modal (.intro-powered-link) visible with davenporter.com href',
+    introPoweredVisible && introPoweredHref === 'https://davenporter.com',
+    `visible=${introPoweredVisible} href=${introPoweredHref}`,
+  );
+
   const rulesVisible = await page.locator('#help [data-pane="rules"]').isVisible().catch(() => false);
   const stepCount = await page.locator('#help [data-pane="rules"] .intro-step').count().catch(() => 0);
   check('intro How to Play tab shows 3 steps by default', rulesVisible && stepCount === 3, `rules=${rulesVisible} steps=${stepCount}`);

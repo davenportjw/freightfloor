@@ -145,8 +145,8 @@ export function mountMenu(menuBtn: HTMLElement, root: HTMLElement, ctx: UiCtx): 
         ],
       ];
       const key = JSON.stringify(groups.map(([g, items]) => [g, items.map((i) => [i.label, i.detail, i.active])]));
-      view.render(key, () =>
-        groups.map(([title, items]) =>
+      view.render(key, () => [
+        ...groups.map(([title, items]) =>
           el('div', { class: 'menu-group' }, [
             el('div', { class: 'sub', text: title }),
             ...items.map((i) =>
@@ -163,7 +163,23 @@ export function mountMenu(menuBtn: HTMLElement, root: HTMLElement, ctx: UiCtx): 
             ),
           ]),
         ),
-      );
+        el('div', { class: 'menu-group menu-credits' }, [
+          el(
+            'a',
+            {
+              class: 'menu-item menu-powered-link',
+              title: 'Visit Davenporter (davenporter.com)',
+              attrs: {
+                href: 'https://davenporter.com',
+                target: '_blank',
+                rel: 'noopener noreferrer',
+                'aria-label': 'Powered by Davenporter',
+              },
+            },
+            [el('span', { class: 'grow' }, ['Powered by ', el('strong', { text: 'Davenporter' })]), el('span', { class: 'muted', text: '↗' })],
+          ),
+        ]),
+      ]);
     },
   };
 }
