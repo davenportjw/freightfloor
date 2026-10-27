@@ -1161,7 +1161,7 @@ export async function createSiteServer(
         braking: v.braking,
         stunnedUntil: v.stunnedUntil,
         sPts: Math.round(v.sPts),
-        sShipped: Math.max(v.sShipped, v.deliveries),
+        sShipped: v.human ? Math.max(v.sShipped, v.deliveries) : v.sShipped,
         msg: v.msg,
         brainThinking: pendingByAgent.has(v.id),
         brainError: v.brainError,

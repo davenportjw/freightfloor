@@ -9,6 +9,7 @@ import {
   buildOccupancy,
   compactFacilityIfNeeded,
   computeBlitzPacePts,
+  computeBlitzPaceShipped,
   computeDriverOnTimePct,
   computeDriverPpm,
   ContractOption,
@@ -1366,6 +1367,8 @@ describe('Speed boost and collision pallet drop', () => {
 
     const blitzPts = computeBlitzPacePts(ai, w);
     expect(blitzPts).toBe(150);
+    const blitzShipped = computeBlitzPaceShipped(ai, w);
+    expect(blitzShipped).toBe(5);
 
     // A human who scored 180 points in a 3-minute Blitz outranks the AI on blitzLeaderboard
     // even though the AI has 1000 raw shift points
@@ -1380,11 +1383,14 @@ describe('Speed boost and collision pallet drop', () => {
 
     const shiftRows = leaderboard(w);
     expect(shiftRows[0]!.id).toBe(ai.id); // Raw shift leaderboard has 1000 > 180
+    expect(shiftRows.find((r) => r.id === ai.id)?.shipped).toBe(30);
 
     const blitzRows = blitzLeaderboard(w);
     expect(blitzRows[0]!.id).toBe(human.id); // Normalized 3m Blitz leaderboard has 180 > 150
     expect(blitzRows[0]!.blitzPts).toBe(180);
+    expect(blitzRows[0]!.shipped).toBe(8);
     expect(blitzRows.find((r) => r.id === ai.id)?.blitzPts).toBe(150);
+    expect(blitzRows.find((r) => r.id === ai.id)?.shipped).toBe(5);
     expect(blitzRows.find((r) => r.id === ai.id)?.ppm).toBeCloseTo(1.5, 5);
   });
 

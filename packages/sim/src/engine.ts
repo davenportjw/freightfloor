@@ -875,13 +875,44 @@ export function computeBlitzPacePts(
   const v = (isVFirst ? wOrV : vOrW) as Vehicle;
   const w = (isVFirst ? vOrW : wOrV) as Pick<World, 't' | 'shiftTime'>;
   if (v.human) {
-    return Math.round(v.runPts ?? v.sPts ?? 0);
+    const rawPts = v.runPts ?? v.sPts ?? 0;
+    if (v.runMode === 'freerange' && v.runStartedAt != null) {
+      const end =
+        v.runFinished && (v.runEndsAt ?? 0) > v.runStartedAt ? (v.runEndsAt ?? w.t) : w.t;
+      const elapsedSimMin = Math.max(BLITZ_DURATION_MIN, end - v.runStartedAt);
+      return Math.round((rawPts * BLITZ_DURATION_MIN) / elapsedSimMin);
+    }
+    return Math.round(rawPts);
   }
   const shiftSimMin = Math.max(
     BLITZ_DURATION_MIN,
     (w.shiftTime && w.shiftTime > 0 ? w.shiftTime : w.t % 480) || 60,
   );
   return Math.round(((v.sPts ?? 0) * BLITZ_DURATION_MIN) / shiftSimMin);
+}
+
+export function computeBlitzPaceShipped(
+  wOrV: Pick<World, 't' | 'shiftTime'> | Vehicle,
+  vOrW: Vehicle | Pick<World, 't' | 'shiftTime'>,
+): number {
+  const isVFirst = 'human' in wOrV && !('vehicles' in wOrV);
+  const v = (isVFirst ? wOrV : vOrW) as Vehicle;
+  const w = (isVFirst ? vOrW : wOrV) as Pick<World, 't' | 'shiftTime'>;
+  if (v.human) {
+    const shipped = Math.max(v.runDeliveries ?? 0, v.sShipped ?? 0);
+    if (v.runMode === 'freerange' && v.runStartedAt != null) {
+      const end =
+        v.runFinished && (v.runEndsAt ?? 0) > v.runStartedAt ? (v.runEndsAt ?? w.t) : w.t;
+      const elapsedSimMin = Math.max(BLITZ_DURATION_MIN, end - v.runStartedAt);
+      return Math.round((shipped * BLITZ_DURATION_MIN) / elapsedSimMin);
+    }
+    return shipped;
+  }
+  const shiftSimMin = Math.max(
+    BLITZ_DURATION_MIN,
+    (w.shiftTime && w.shiftTime > 0 ? w.shiftTime : w.t % 480) || 60,
+  );
+  return Math.round(((v.sShipped ?? 0) * BLITZ_DURATION_MIN) / shiftSimMin);
 }
 
 export function computeDriverOnTimePct(v: Vehicle): number {
@@ -5050,6 +5081,7 @@ export function leaderboard(w: World) {
         strat: stratOf(v),
         pts: v.sPts,
         blitzPts: computeBlitzPacePts(w, v),
+        blitzShipped: computeBlitzPaceShipped(w, v),
         shipped,
         human: v.human,
         driver: v.driver || v.id,
@@ -5089,6 +5121,7 @@ export function leaderboard(w: World) {
         strat: 'Human' as const,
         pts: rec.pts,
         blitzPts: rec.pts,
+        blitzShipped: rec.shipped,
         shipped: rec.shipped,
         human: true,
         driver: rec.driver,
@@ -5112,9 +5145,12 @@ export function leaderboard(w: World) {
 }
 
 export function blitzLeaderboard(w: World) {
-  return leaderboard(w).sort(
-    (a, b) => b.blitzPts - a.blitzPts || b.shipped - a.shipped || b.ppm - a.ppm,
-  );
+  return leaderboard(w)
+    .map((r) => ({
+      ...r,
+      shipped: r.blitzShipped ?? r.shipped,
+    }))
+    .sort((a, b) => b.blitzPts - a.blitzPts || b.shipped - a.shipped || b.ppm - a.ppm);
 }
 
 function onShiftEnd(w: World): void {
@@ -5172,6 +5208,8 @@ function onShiftEnd(w: World): void {
     v.sPts = 0;
     v.bankedPts = 0;
     v.sShipped = 0;
+    setComboStep(v, 0);
+    v.streak = 0;
   });
 
   // Apply difficulty votes at shift change
