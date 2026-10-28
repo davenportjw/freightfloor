@@ -14,6 +14,20 @@ export interface Part {
   z0: number;
   h: number;
   hex: string;
+  /** Semantic tag for parts other renderers re-style (e.g. the Cab View splits mast stages into rails). */
+  role?: 'mast';
+}
+
+/** Collapsed (fully lowered) mast height in iso-px for counterbalance trucks. */
+export const MAST_COLLAPSED_COUNTERBALANCE = 18;
+/** Collapsed (fully lowered) mast height in iso-px for reach / turret trucks. */
+export const MAST_COLLAPSED_REACH = 20;
+/** Fork carriage backrest height (iso-px) plus the clearance the inner mast keeps above it. */
+const CARRIAGE_TOP_CLEARANCE = 5.5 + 1.5;
+
+/** Top of the telescoping mast (iso-px): stays collapsed until the carriage needs to rise past it. */
+export function mastTopZ(forkZ: number, collapsed: number): number {
+  return Math.max(collapsed, forkZ + CARRIAGE_TOP_CLEARANCE);
 }
 
 export type ModelKind = 'agv' | 'reach' | 'counterbalance';
@@ -39,8 +53,8 @@ export function vehicleParts(
   const theme = getSiteTheme(siteId);
   const parts: Part[] = [];
   const model = modelOf(v.type);
-  const add = (ox: number, oy: number, len: number, wid: number, z0: number, h: number, hex: string) =>
-    parts.push({ cx: p.x + ca * ox - sa * oy, cy: p.y + sa * ox + ca * oy, len, wid, z0, h, hex });
+  const add = (ox: number, oy: number, len: number, wid: number, z0: number, h: number, hex: string, role?: Part['role']) =>
+    parts.push({ cx: p.x + ca * ox - sa * oy, cy: p.y + sa * ox + ca * oy, len, wid, z0, h, hex, ...(role ? { role } : {}) });
   const fork = Number.isFinite(v.fork) ? v.fork : 0;
   const forkZ = isoZ(forkHeightM(fork)); // blade bottom, shared with rack beams (liftGeometry)
   const cargo = includeCargo ? (v.cargo ?? []) : [];
@@ -84,9 +98,17 @@ export function vehicleParts(
     } else {
       add(-0.1, 0, 0.3, 0.3, 10, 6, '#64748B');
     }
-    const mastH = reach ? 40 : 32;
-    add(0.4, 0, 0.08, wid - 0.08, 0, mastH, '#334155');
-    add(0.38, 0, 0.05, 0.05, 2, mastH - 4, '#CBD5E1'); // hydraulic lift cylinder
+    // Telescoping mast: a short fixed outer stage, plus an inner stage that only slides up once
+    // the carriage needs to rise past it (previously a fixed 32/40 iso-px slab towered over the
+    // truck even with the forks on the floor).
+    const mastBase = reach ? MAST_COLLAPSED_REACH : MAST_COLLAPSED_COUNTERBALANCE;
+    const mastTop = mastTopZ(forkZ, mastBase);
+    add(0.4, 0, 0.08, wid - 0.08, 0, mastBase, '#334155', 'mast');
+    if (mastTop > mastBase + 0.25) {
+      // Inner stage: same length as the outer one, slid up so its top meets the carriage.
+      add(0.41, 0, 0.06, wid - 0.12, mastTop - mastBase, mastBase, '#3B4A61', 'mast');
+    }
+    add(0.38, 0, 0.05, 0.05, 2, mastTop - 4, '#CBD5E1'); // hydraulic lift cylinder
     add(0.44, 0, 0.04, wid - 0.06, forkZ, 5.5, '#1E293B'); // fork carriage backrest
     for (const sy of [-1, 1]) {
       add(0.62, sy * 0.12, 0.42, 0.06, forkZ, 2, '#475569');

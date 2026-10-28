@@ -741,9 +741,10 @@ export class CabRenderer {
     const ca = Math.cos(p.a);
     const sa = Math.sin(p.a);
     const forkZ = isoZ(forkHeightM(me.fork ?? 0));
+    const mastTop = Math.max(0, ...bare.filter((q) => q.role === 'mast').map((q) => q.z0 + q.h));
     for (const q of bare) {
       const hex = q.hex.toUpperCase();
-      const isMast = q.z0 === 0 && q.h >= 30 && hex === '#334155';
+      const isMast = q.role === 'mast';
       const isGuardPost = hex === '#334155' && q.z0 === 10 && q.h === 14;
       const isGuardRoof = hex === '#475569' && q.z0 === 24 && q.wid > 0.3;
       const isCylinder = hex === '#CBD5E1' && q.z0 === 2;
@@ -753,9 +754,11 @@ export class CabRenderer {
       if (isMast) {
         const half = q.wid / 2 - 0.02;
         for (const sgn of [-1, 1]) {
-          rec.oBox(q.cx - sa * half * sgn, q.cy + ca * half * sgn, 0.05, 0.025, p.a, 0, q.h, q.hex);
+          rec.oBox(q.cx - sa * half * sgn, q.cy + ca * half * sgn, 0.05, 0.025, p.a, q.z0, q.h, q.hex);
         }
-        rec.oBox(q.cx, q.cy, 0.05, q.wid, p.a, q.h - 1.2, 1.2, q.hex);
+        // Crossbar only on the topmost stage, so the collapsed outer stage doesn't bar the view once
+        // the inner stage telescopes up.
+        if (q.z0 + q.h >= mastTop - 1e-6) rec.oBox(q.cx, q.cy, 0.05, q.wid, p.a, q.z0 + q.h - 1.2, 1.2, q.hex);
         continue;
       }
       rec.alphaMul = isFork ? 1 : isBackrest ? 0.4 : 0.2;

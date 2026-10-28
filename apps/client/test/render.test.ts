@@ -301,6 +301,23 @@ describe('render/scenery & multi-site visual themes', () => {
     expect(abqParts).not.toEqual(denParts);
   });
 
+  it('telescopes the forklift mast: short when lowered, extends with the forks', async () => {
+    const { vehicleParts, MAST_COLLAPSED_COUNTERBALANCE } = await import('../src/render/vehicles.js');
+    const pose = { x: 10, y: 10, a: 0 };
+    const mastTop = (fork: number) => {
+      const v: any = { id: 'FL-02', type: 'counterbalance', fork, cargo: [], orders: [] };
+      const mast = vehicleParts(v, pose, 0, 'den-1').filter((q) => q.role === 'mast');
+      return { n: mast.length, top: Math.max(...mast.map((q) => q.z0 + q.h)) };
+    };
+    const low = mastTop(0);
+    expect(low.n).toBe(1);
+    expect(low.top).toBe(MAST_COLLAPSED_COUNTERBALANCE);
+    const high = mastTop(1);
+    expect(high.n).toBe(2);
+    expect(high.top).toBeGreaterThan(MAST_COLLAPSED_COUNTERBALANCE);
+    expect(mastTop(0.5).top).toBeLessThan(high.top);
+  });
+
   it('resolves regional cargo and conveyor sprite keys and blits via Painter.sprite when atlas is loaded', async () => {
     const {
       drawCargoItem,
