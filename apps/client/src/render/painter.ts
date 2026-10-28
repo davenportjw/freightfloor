@@ -2,7 +2,7 @@
  * Canvas2D isometric drawing primitives (mock: poly, shade, oBox, aaBox, circleGrid, pill, star, sprite).
  * A Painter binds a 2D context to a live camera; all coordinates are grid tiles unless noted.
  */
-import { type Camera, TH, TW } from './iso.js';
+import { type Camera, rotateGrid, TH, TW } from './iso.js';
 
 export type Pt = [number, number];
 
@@ -71,6 +71,7 @@ export class Painter {
     const img = this.atlasImage;
     const entry = this.atlasFrames?.[key];
     if (!img || !entry || typeof this.ctx?.drawImage !== 'function') return false;
+    if (Math.abs(this.cam.rot ?? 0) > 1e-4) return false;
     const rect = 'frame' in entry ? entry.frame : entry;
     const anchor = entry.anchor ?? ('frame' in entry ? entry.frame.anchor : undefined);
     if (!rect || !rect.w || !rect.h) return false;
@@ -96,7 +97,8 @@ export class Painter {
   /** Project grid (gx, gy, z) to screen. */
   P(gx: number, gy: number, z = 0): Pt {
     const c = this.cam;
-    return [c.x + (((gx - gy) * TW) / 2) * c.zoom, c.y + (((gx + gy) * TH) / 2 - z) * c.zoom];
+    const [rx, ry] = rotateGrid(gx, gy, c.rot ?? 0);
+    return [c.x + (((rx - ry) * TW) / 2) * c.zoom, c.y + (((rx + ry) * TH) / 2 - z) * c.zoom];
   }
 
   poly(pts: Pt[], fill: string | null, stroke?: string | null, lw = 1): void {
@@ -153,11 +155,19 @@ export class Painter {
   /** Floor-plane quad for a whole tile (or w x h tiles). */
   tile(x: number, y: number, fill: string | null, stroke?: string | null, lw = 1, w = 1, h = 1): void {
     const c = this.cam;
+    const xw = x + w;
+    const yh = y + h;
+    if (c.rot) {
+      const [x0, y0] = this.P(x, y);
+      const [x1, y1] = this.P(xw, y);
+      const [x2, y2] = this.P(xw, yh);
+      const [x3, y3] = this.P(x, yh);
+      this.quad(x0, y0, x1, y1, x2, y2, x3, y3, fill, stroke, lw);
+      return;
+    }
     const z = c.zoom;
     const hw = (TW / 2) * z;
     const hh = (TH / 2) * z;
-    const xw = x + w;
-    const yh = y + h;
     this.quad(
       c.x + (x - y) * hw,
       c.y + (x + y) * hh,
@@ -189,30 +199,33 @@ export class Painter {
     hex: string,
     stroke?: string,
   ): void {
-    if (a === 0) {
+    const c = this.cam;
+    const rot = c.rot ?? 0;
+    if (a === 0 && !rot) {
       this.aaBox(cx - len / 2, cy - wid / 2, len, wid, z0, h, hex, stroke);
       return;
     }
-    const c = this.cam;
+    const [rcx, rcy] = rotateGrid(cx, cy, rot);
+    const ra = a + rot;
     const z = c.zoom;
     const hw = (TW / 2) * z;
     const hh = (TH / 2) * z;
     const zOff0 = z0 * z;
     const dz = h * z;
 
-    const ca = Math.cos(a);
-    const sa = Math.sin(a);
+    const ca = Math.cos(ra);
+    const sa = Math.sin(ra);
     const hl = len / 2;
     const hwid = wid / 2;
 
-    const gx0 = cx + ca * hl - sa * hwid;
-    const gy0 = cy + sa * hl + ca * hwid;
-    const gx1 = cx + ca * hl + sa * hwid;
-    const gy1 = cy + sa * hl - ca * hwid;
-    const gx2 = cx - ca * hl + sa * hwid;
-    const gy2 = cy - sa * hl - ca * hwid;
-    const gx3 = cx - ca * hl - sa * hwid;
-    const gy3 = cy - sa * hl + ca * hwid;
+    const gx0 = rcx + ca * hl - sa * hwid;
+    const gy0 = rcy + sa * hl + ca * hwid;
+    const gx1 = rcx + ca * hl + sa * hwid;
+    const gy1 = rcy + sa * hl - ca * hwid;
+    const gx2 = rcx - ca * hl + sa * hwid;
+    const gy2 = rcy - sa * hl - ca * hwid;
+    const gx3 = rcx - ca * hl - sa * hwid;
+    const gy3 = rcy - sa * hl + ca * hwid;
 
     const sx0 = c.x + (gx0 - gy0) * hw;
     const sy0 = c.y + (gx0 + gy0) * hh - zOff0;
@@ -239,8 +252,8 @@ export class Painter {
       const j = (i + 1) & 3;
       const mx = (gxs[i] + gxs[j]) * 0.5;
       const my = (gys[i] + gys[j]) * 0.5;
-      const nx = mx - cx;
-      const ny = my - cy;
+      const nx = mx - rcx;
+      const ny = my - rcy;
       if (nx + ny > 0.001) {
         const d = mx + my;
         const left = ny > nx;
@@ -322,6 +335,10 @@ export class Painter {
   /** Axis-aligned box with corner (x, y), footprint w x d, and top specular bevel highlight. Zero allocations. */
   aaBox(x: number, y: number, w: number, d: number, z0: number, h: number, hex: string, stroke?: string): void {
     const c = this.cam;
+    if (c.rot) {
+      this.oBox(x + w / 2, y + d / 2, w, d, 0, z0, h, hex, stroke);
+      return;
+    }
     const z = c.zoom;
     const hw = (TW / 2) * z;
     const hh = (TH / 2) * z;

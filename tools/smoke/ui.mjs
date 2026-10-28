@@ -15,7 +15,8 @@
  *     exactly the 5 drive elements; no overlapping cards and ≤15% floor coverage at 1600x900 and
  *     1280x760 (steady state: measured after a transient order-choice card resolves); hold-Tab
  *     Standings with the difficulty vote; Enter chat; HUD Minimal (V) persists across reload; the
- *     history drawer opens and every tab renders
+ *     history drawer opens and every tab renders; Cab View (P) shows the first-person canvas, still
+ *     drives (server acks) and P returns to iso
  *   - Run complete sheet (timer end) → Watch the floor
  *   - Floor view: KPI clock "Day N · HH:MM · Shift X" (no duplicated day), Floor orders bar present
  *     with every disabled order explaining why, no overlapping HUD cards; Team Standings (B) and
@@ -471,6 +472,36 @@ try {
     check('drawer opens with all tabs', drawerOpen && tabCount >= 5, tabTexts.join(' '));
     await blur();
     await page.keyboard.press('KeyH');
+
+    // Cab View (P): the lazy three.js chunk loads, the first-person canvas shows and draws, drive
+    // input still moves the truck (server acks), and P returns to the iso view.
+    await blur();
+    await page.keyboard.press('KeyP');
+    let cabShown = false;
+    for (let i = 0; i < 20 && !cabShown; i++) {
+      await page.waitForTimeout(250);
+      cabShown = await page
+        .locator('canvas.cab-canvas')
+        .evaluate((c) => getComputedStyle(c).display !== 'none' && c.width > 0)
+        .catch(() => false);
+    }
+    check('Cab View (P) shows the first-person canvas', cabShown);
+    if (cabShown) {
+      const acksBefore = acks.length;
+      await page.keyboard.down('KeyW');
+      await page.waitForTimeout(1200);
+      await page.keyboard.up('KeyW');
+      await page.waitForTimeout(400);
+      check('driving in Cab View gets server acks', acks.length > acksBefore, `acks ${acksBefore}→${acks.length}`);
+      await page.screenshot({ path: join(outDir, 'ui-1280-cab.png') });
+    }
+    await page.keyboard.press('KeyP');
+    await page.waitForTimeout(400);
+    const cabHidden = await page
+      .locator('canvas.cab-canvas')
+      .evaluate((c) => getComputedStyle(c).display === 'none')
+      .catch(() => true);
+    check('P again returns to the iso view', cabHidden);
 
     // HUD Minimal (V) persists across reload; the intro still opens on a subsequent visit,
     // and dismissing it never opens a second blocking #pickSheet modal even for returning players.

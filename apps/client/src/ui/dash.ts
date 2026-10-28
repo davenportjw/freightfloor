@@ -92,6 +92,24 @@ export function mountDash(root: HTMLElement, ctx: UiCtx): UiModule {
     },
     [copilotKey, copilotLabel],
   );
+  const cameraLabel = el('span', { text: 'Fixed floor' });
+  const cameraBtn = el(
+    'button',
+    {
+      class: 'hint-key',
+      title: 'Drive camera (R): toggle between Fixed floor aspect and Forklift up (rotate floor beneath you)',
+      attrs: {
+        type: 'button',
+        'data-role': 'drive-camera-toggle',
+        'data-act': 'toggle-drive-camera',
+      },
+      onClick: () => {
+        if (typeof actions.toggleDriveCamera === 'function') actions.toggleDriveCamera();
+        else if (typeof ctx.store.toggleDriveCameraMode === 'function') ctx.store.toggleDriveCameraMode();
+      },
+    },
+    [kbd('R'), cameraLabel],
+  );
   const chat = el(
     'button',
     { class: 'hint-key', title: 'Chat with your Co-Pilot or the Floor', attrs: { type: 'button' }, onClick: () => actions.setOverlay('chat') },
@@ -107,7 +125,7 @@ export function mountDash(root: HTMLElement, ctx: UiCtx): UiModule {
     { class: 'hint-key', title: 'All controls (How to play)', attrs: { type: 'button', 'data-role': 'all-controls' }, onClick: () => actions.showHelp(true) },
     [kbd('?'), el('span', { text: 'Controls' })],
   );
-  const hints = el('div', { class: 'hints' }, [el('span', { class: 'dash-sep' }), copilot, chat, standings, allControls]);
+  const hints = el('div', { class: 'hints' }, [el('span', { class: 'dash-sep' }), copilot, cameraBtn, chat, standings, allControls]);
   root.replaceChildren(battery, driveKeys, boost, hints);
 
   let last = '';
@@ -127,7 +145,11 @@ export function mountDash(root: HTMLElement, ctx: UiCtx): UiModule {
       if (v.boosting) seenBoost = true;
       else if (v.battery >= 100) seenBoost = false;
       const showBattery = v.showBattery || seenBoost;
-      const key = JSON.stringify([v, showBattery, store.ui.hudMinimal]);
+      const camMode =
+        typeof store.driveCameraMode === 'function'
+          ? store.driveCameraMode()
+          : (store.ui?.driveCameraMode ?? 'fixed');
+      const key = JSON.stringify([v, showBattery, store.ui.hudMinimal, camMode]);
       if (key === last) return;
       last = key;
       hints.hidden = store.ui.hudMinimal;
@@ -152,6 +174,13 @@ export function mountDash(root: HTMLElement, ctx: UiCtx): UiModule {
       copilot.title = v.autopilot
         ? 'Co-Pilot is driving — click (or press W A S D) to take back control'
         : 'Hand the wheel to your Co-Pilot (C) — you keep your vehicle and score';
+      const headingUp = camMode === 'headingUp';
+      cameraBtn.classList.toggle('on', headingUp);
+      cameraBtn.setAttribute('aria-pressed', headingUp ? 'true' : 'false');
+      cameraLabel.textContent = headingUp ? 'Forklift up' : 'Fixed floor';
+      cameraBtn.title = headingUp
+        ? 'Drive camera: Forklift up (floor rotates as you steer) — click or press R for Fixed floor'
+        : 'Drive camera: Fixed floor aspect — click or press R for Forklift up (rotate floor as you steer)';
     },
   };
 }

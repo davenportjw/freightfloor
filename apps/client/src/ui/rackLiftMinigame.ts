@@ -20,6 +20,7 @@ import {
   KINDS,
   RACK_LEVEL_FORK_TARGETS,
   RACK_LEVEL_LABELS,
+  rackLiftWindows,
   requiresRackLift,
   type DistrictKind,
   type Order,
@@ -97,7 +98,7 @@ export interface RackLiftFlash {
   untilMs: number;
 }
 
-function resolveDistrict(w: World, o: Order, slot: Slot): DistrictKind {
+export function resolveDistrict(w: World, o: Order, slot: Slot): DistrictKind {
   const rawZone = (o as { zone?: string }).zone ?? slot.zone;
   if (rawZone && rawZone in KINDS) return rawZone as DistrictKind;
   const rack = w.map?.racks?.find((r) => r.id === slot.rackId);
@@ -133,6 +134,16 @@ export class RackLiftController {
   startedAtMs = 0;
   forkLiftMul = 1;
   flash: RackLiftFlash | null = null;
+  /**
+   * True when the site does not grade lifts (`limits.rackLiftMinigame` off ⇒ server kill switch),
+   * but the player enabled Lift Mode locally (or is in Cab View). Flashes say PRACTICE, no $.
+   */
+  practice = false;
+
+  /** Server-identical grading windows for the active (or given) target level. */
+  windows(level: 0 | 1 | 2 = this.targetLevel): ReturnType<typeof rackLiftWindows> {
+    return rackLiftWindows(level, { forkLiftMul: this.forkLiftMul, district: this.district });
+  }
 
   resolveCandidate(
     world: World,
@@ -337,6 +348,14 @@ export class RackLiftController {
         untilMs: nowMs + 850,
       };
     }
+    if (this.practice) {
+      // The site does not grade lifts (server kill switch): never claim a $ swing that won't happen.
+      this.flash = {
+        ...this.flash,
+        label: `PRACTICE · ${this.flash.label.replace(/!$/, '')}`,
+        sublabel: 'Not scored on this site',
+      };
+    }
     if (vehicle) {
       vehicle.fork = fork;
       vehicle.forkTarget = 0.3;
@@ -346,32 +365,16 @@ export class RackLiftController {
     sendInteract(fork);
   }
 
-  step(
-    dtOrElapsedMs: number,
-    nowOrWorld: number | World | null,
-    worldOrVehicle: World | Vehicle | null,
-    vehicleOrEnabled?: Vehicle | boolean | null,
-  ): void {
-    let dtSec: number;
-    let world: World | null;
-    let vehicle: Vehicle | null;
-    if (typeof nowOrWorld === 'number') {
-      dtSec = dtOrElapsedMs > 2 ? dtOrElapsedMs / 1000 : dtOrElapsedMs;
-      const nowMs = nowOrWorld;
-      world = (worldOrVehicle as World | null) ?? null;
-      vehicle = (vehicleOrEnabled as Vehicle | null) ?? null;
-      if (this.flash && nowMs >= this.flash.untilMs) {
-        this.flash = null;
-      }
-    } else {
-      dtSec = dtOrElapsedMs > 2 ? dtOrElapsedMs / 1000 : dtOrElapsedMs;
-      world = nowOrWorld;
-      vehicle = (worldOrVehicle as Vehicle | null) ?? null;
-      if (vehicleOrEnabled === false) {
-        this.cancel(vehicle);
-        return;
-      }
+  /**
+   * Advance the mast oscillation by `dtMs` real milliseconds (always milliseconds; the old
+   * `dt > 2 ? ms : s` heuristic misread sub-2 ms frames on high-refresh displays as seconds).
+   */
+  step(dtMs: number, world: World | null, vehicle: Vehicle | null, enabled = true): void {
+    if (!enabled) {
+      this.cancel(vehicle);
+      return;
     }
+    const dtSec = Math.max(0, Number.isFinite(dtMs) ? dtMs : 0) / 1000;
     if (!this.active) return;
     if (!world || !vehicle || !this.slot) {
       this.cancel(vehicle);
@@ -393,14 +396,6 @@ export class RackLiftController {
     }
     vehicle.fork = this.currentFork;
     vehicle.forkTarget = this.currentFork;
-    const damp = Math.max(0.5, 1 - dtSec * 6);
-    const vDyn = vehicle as Vehicle & { v?: number; speed?: number };
-    if (typeof vDyn.v === 'number' && Math.abs(vDyn.v) > 1.8) {
-      vDyn.v *= damp;
-    }
-    if (typeof vDyn.speed === 'number' && Math.abs(vDyn.speed) > 1.8) {
-      vDyn.speed *= damp;
-    }
   }
 
   cancel(vehicle?: Vehicle | null): void {

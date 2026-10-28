@@ -71,6 +71,7 @@ import {
   MAX_TIER,
   TICK_MIN,
   TIER_STEP,
+  applyClientInputSlice,
   type BoardRow,
   type Card,
   type CardHand,
@@ -123,6 +124,9 @@ import {
 } from './dispatchersCall.js';
 
 export const MAX_SOCKETS = 300;
+/** Client-timed input stream: initial and maximum wall-clock budget (game-min) for slices. */
+const STREAM_BUDGET_START_MIN = 0.3;
+const STREAM_BUDGET_MAX_MIN = 0.6;
 export const MAX_DRIVERS = 32;
 export const FREE_RANGE_SOFT_CAP = 26;
 export const RELOCATION_BONUS_PTS = 75;
@@ -625,6 +629,10 @@ export interface ConnectedClient {
   floorOrdersSentAtMs?: number;
   /** True when the client sends sub-tick `dt` on `input` messages. */
   subTickClient?: boolean;
+  /** Client-timed stream budget (game-min) that caps applied slice time to wall-clock time. */
+  streamBudget?: number;
+  /** Wall-clock ms the stream budget was last accrued. */
+  streamBudgetAtMs?: number;
 }
 
 export interface SiteServerOptions {
@@ -929,7 +937,6 @@ export async function createSiteServer(
   });
 
   let lastHumanActiveAtMs = Date.now();
-  let lastTickAtMs = Date.now();
   let windingDownStartedAtMs: number | null = null;
   let lastBroadcastPhase = world.phase;
   let shuttingDown = false;
@@ -1847,7 +1854,6 @@ export async function createSiteServer(
 
     const prevPhase = world.phase;
     tick(world);
-    lastTickAtMs = nowMs;
 
     // Dispatcher's Call: detect real situations in each human's Blitz window and ask
     // Gemini (the coordinator de-duplicates in-flight calls per vehicle). Background
@@ -1884,7 +1890,8 @@ export async function createSiteServer(
       }
       if (nowMs - c.lastInputAtMs > inputLeaseMs) continue;
       const v = world.vehicles.find((x) => x.id === c.vid && x.human);
-      if (!v || v.autopilot) continue;
+      // Client-timed streams are acked on every input (pose only changes on input arrival).
+      if (!v || v.autopilot || v.clientTimed) continue;
       sendTo(c.socket, {
         type: 'ack',
         seq: c.lastInputSeq,
@@ -2520,51 +2527,26 @@ export async function createSiteServer(
               boost: Boolean(msg.boost),
               moveAngle: hasMoveAngle ? msg.moveAngle : null,
             };
-            const inputChanged =
-              v.input.up !== nextInput.up ||
-              v.input.down !== nextInput.down ||
-              v.input.left !== nextInput.left ||
-              v.input.right !== nextInput.right ||
-              Boolean(v.input.boost) !== Boolean(nextInput.boost) ||
               (v.input.moveAngle ?? null) !== (nextInput.moveAngle ?? null);
             if (typeof msg.dt === 'number' && Number.isFinite(msg.dt)) {
+              // Client-timed stream: `msg.dt` is how long the PREVIOUS input was held, as
+              // measured by the client's own prediction. Apply exactly that slice now, so the
+              // ack below is the pose the client reproduces (no re-timing to server ticks).
+              // A wall-clock budget caps applied time so a client cannot speed-hack via dt.
               conn.subTickClient = true;
-              const sliceDt = Math.max(0, msg.dt);
-              if (!v.inputQueue) v.inputQueue = [];
-              const queuedTotal = v.inputQueue.reduce((s, x) => s + x.dt, 0);
-              const prevActive =
-                v.input.up ||
-                v.input.down ||
-                v.input.left ||
-                v.input.right ||
-                (typeof v.input.moveAngle === 'number' && Number.isFinite(v.input.moveAngle));
-              let remDt: number;
-              if (inputChanged && !prevActive) {
-                const elapsedInTick = Math.min(
-                  TICK_MIN,
-                  Math.max(0, (nowMs - lastTickAtMs) * 0.001),
-                );
-                remDt = Math.max(0, elapsedInTick - queuedTotal);
-              } else {
-                const carried = v.inputCarriedDt ?? 0;
-                remDt = Math.min(TICK_MIN, Math.max(0, sliceDt - carried));
-                if (inputChanged && remDt <= 1e-6 && sliceDt > 1e-6) {
-                  const elapsedInTick = Math.min(
-                    TICK_MIN,
-                    Math.max(0, (nowMs - lastTickAtMs) * 0.001),
-                  );
-                  remDt = Math.min(sliceDt, Math.max(0, elapsedInTick - queuedTotal));
-                }
-              }
-              const allowed = Math.max(0, TICK_MIN * 1.5 - queuedTotal);
-              if (remDt > 1e-6 && allowed > 1e-6) {
-                v.inputQueue.push({ input: { ...v.input }, dt: Math.min(remDt, allowed) });
-              }
-              v.inputCarriedDt = inputChanged
-                ? 0
-                : Math.max(0, (v.inputCarriedDt ?? 0) - sliceDt);
+              const accrued =
+                conn.streamBudgetAtMs === undefined
+                  ? STREAM_BUDGET_START_MIN
+                  : (conn.streamBudget ?? 0) +
+                    Math.max(0, nowMs - conn.streamBudgetAtMs) * (TICK_MIN / SITE_TICK_MS);
+              const budget = Math.min(STREAM_BUDGET_MAX_MIN, accrued);
+              const sliceDt = Math.min(Math.max(0, msg.dt), budget);
+              conn.streamBudget = budget - sliceDt;
+              conn.streamBudgetAtMs = nowMs;
+              applyClientInputSlice(world, v, { ...v.input }, sliceDt, nextInput);
+            } else {
+              v.input = nextInput;
             }
-            v.input = nextInput;
           }
         }
         sendTo(conn.socket, {

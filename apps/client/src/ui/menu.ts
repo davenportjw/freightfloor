@@ -102,6 +102,35 @@ export function mountMenu(menuBtn: HTMLElement, root: HTMLElement, ctx: UiCtx): 
               title: floor ? 'Full / Minimal applies to the driving HUD' : 'Minimal hides the key hints and the contracts card',
               onClick: () => actions.toggleMinimal(),
             },
+            {
+              label: 'Drive camera',
+              key: 'R',
+              detail:
+                (typeof store.driveCameraMode === 'function'
+                  ? store.driveCameraMode()
+                  : (store.ui?.driveCameraMode ?? 'fixed')) === 'headingUp'
+                  ? 'Forklift up'
+                  : 'Fixed floor',
+              active:
+                (typeof store.driveCameraMode === 'function'
+                  ? store.driveCameraMode()
+                  : (store.ui?.driveCameraMode ?? 'fixed')) === 'headingUp',
+              attrs: { 'data-role': 'menu-drive-camera-toggle', 'data-act': 'toggle-drive-camera' },
+              title: 'Switch between driving with a fixed floor aspect or rotating the floor so the forklift always drives up',
+              onClick: () => {
+                if (typeof actions.toggleDriveCamera === 'function') actions.toggleDriveCamera();
+                else if (typeof store.toggleDriveCameraMode === 'function') store.toggleDriveCameraMode();
+              },
+            },
+            {
+              label: 'Cab View',
+              key: 'P',
+              detail: store.isCabViewPref() ? 'First person' : 'Off',
+              active: store.isCabViewPref(),
+              attrs: { 'data-role': 'menu-cab-view-toggle', 'data-act': 'toggle-cab-view' },
+              title: 'Drive from the forklift seat (first person). Turns Lift Mode on while you are in the cab.',
+              onClick: () => actions.toggleCabView?.(),
+            },
           ],
         ],
         [
@@ -214,6 +243,37 @@ export function mountFlyouts(root: HTMLElement, ctx: UiCtx): UiModule & { panels
   // Layers
   const layersView = new KeyedView(sections.get('layers')!);
   // Settings: camera + experimental gameplay.
+  const getCamMode = () =>
+    typeof ctx.store.driveCameraMode === 'function'
+      ? ctx.store.driveCameraMode()
+      : (ctx.store.ui?.driveCameraMode ?? 'fixed');
+  const driveCamBtn = el('button', {
+    class: 'btn',
+    text: `Drive Camera: ${getCamMode() === 'headingUp' ? 'Forklift Up (Rotate Floor)' : 'Fixed Floor'}`,
+    title: 'Choose whether the freight floor stays locked in its fixed isometric aspect or rotates so your forklift always drives up (R)',
+    attrs: {
+      type: 'button',
+      'data-act': 'toggle-drive-camera',
+      'data-role': 'settings-drive-camera-toggle',
+      'aria-pressed': getCamMode() === 'headingUp' ? 'true' : 'false',
+    },
+    onClick: () => {
+      if (typeof ctx.actions.toggleDriveCamera === 'function') ctx.actions.toggleDriveCamera();
+      else if (typeof ctx.store.toggleDriveCameraMode === 'function') ctx.store.toggleDriveCameraMode();
+    },
+  });
+  const cabViewBtn = el('button', {
+    class: 'btn',
+    text: `Cab View: ${ctx.store.isCabViewPref() ? 'ON' : 'OFF'}`,
+    title: 'First-person camera from the forklift seat while driving (P). Lift Mode is on while you are in the cab.',
+    attrs: {
+      type: 'button',
+      'data-act': 'toggle-cab-view',
+      'data-role': 'settings-cab-view-toggle',
+      'aria-pressed': ctx.store.isCabViewPref() ? 'true' : 'false',
+    },
+    onClick: () => ctx.actions.toggleCabView?.(),
+  });
   const rackLiftBtn = el('button', {
     class: 'btn',
     text: `Rack Lift Minigame: ${ctx.store.isRackLiftEnabled() ? 'ON' : 'OFF'}`,
@@ -243,6 +303,12 @@ export function mountFlyouts(root: HTMLElement, ctx: UiCtx): UiModule & { panels
       el('button', { class: 'btn', text: 'Zoom +', attrs: { type: 'button' }, onClick: () => ctx.actions.zoomBy(1.2) }),
       el('button', { class: 'btn', text: 'Zoom −', attrs: { type: 'button' }, onClick: () => ctx.actions.zoomBy(1 / 1.2) }),
     ]),
+    el('div', { class: 'row' }, [driveCamBtn]),
+    el('div', { class: 'row' }, [cabViewBtn]),
+    el('div', {
+      class: 'hint',
+      text: 'Fixed Floor keeps the board orientation locked; Forklift Up rotates the floor so your forklift always drives up.',
+    }),
     el('div', { class: 'sub', text: 'Gameplay' }),
     el('div', { class: 'row' }, [rackLiftBtn]),
     el('div', { class: 'hint', text: 'Hold E at racks to raise forks to shelf L1 / L2 / L3 and release in the sweet spot.' }),
@@ -272,8 +338,18 @@ export function mountFlyouts(root: HTMLElement, ctx: UiCtx): UiModule & { panels
         );
       }
       if (id === 'settings') {
+        const headingUp = getCamMode() === 'headingUp';
+        driveCamBtn.textContent = `Drive Camera: ${headingUp ? 'Forklift Up (Rotate Floor)' : 'Fixed Floor'}`;
+        driveCamBtn.setAttribute('aria-pressed', headingUp ? 'true' : 'false');
+        driveCamBtn.classList.toggle('active', headingUp);
+        const cabOn = store.isCabViewPref();
+        cabViewBtn.textContent = `Cab View: ${cabOn ? 'ON' : 'OFF'}`;
+        cabViewBtn.setAttribute('aria-pressed', cabOn ? 'true' : 'false');
+        cabViewBtn.classList.toggle('active', cabOn);
         const on = store.isRackLiftEnabled();
-        rackLiftBtn.textContent = `Rack Lift Minigame: ${on ? 'ON' : 'OFF'}`;
+        // Site doesn't grade lifts (server kill switch) → the minigame is ungraded practice here.
+        const graded = store.isRackLiftGraded();
+        rackLiftBtn.textContent = `Rack Lift Minigame: ${on ? 'ON' : 'OFF'}${on && !graded ? ' (practice)' : ''}`;
         rackLiftBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
         rackLiftBtn.classList.toggle('active', on);
         const dc = store.ui.dispatchersCall;

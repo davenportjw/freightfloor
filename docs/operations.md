@@ -95,7 +95,7 @@ node tools/smoke/armor.mjs "${LOBBY_URL}"
 #    ☰ stays usable, ↵ takes the deal and starts the run) → Drive HUD (5 elements, ≤15% coverage
 #    once a transient order-choice card has resolved,
 #    driving moves the vehicle, hold-Tab Standings, Enter chat, drawer tabs, HUD Minimal (V)
-#    persists across reload) → Co-Pilot until the 5-minute Blitz ends (RUN_END_WAIT_MS, default
+#    persists across reload, Cab View (P) first-person canvas + acks, P back to iso) → Co-Pilot until the 5-minute Blitz ends (RUN_END_WAIT_MS, default
 #    360000) → Run complete → "Watch the floor" → Floor HUD (KPI clock format, Floor orders with
 #    disabled reasons, floorOrders WS frame, ★ P0 changes server floorOrders, B Team Standings /
 #    ☰ Value updates within 60 s, 4 Dispatch drawer, 3 cone mode) → 🚜 Drive [F] again.

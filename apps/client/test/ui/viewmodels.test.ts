@@ -311,7 +311,7 @@ describe('driving input controller', () => {
     expect(c.held.boost).toBe(false);
   });
 
-  it('consumes server elapsed dt on applyAck rather than dropping extra client frames when timers cross', async () => {
+  it('client-timed ack N drops every frame with seq <= N and replays only newer slices', async () => {
     const { createWorld, spawnPlayerVehicle } = await import('@warehouse/sim');
     const { voteCounts, voteLevelOf, VOTE_LEVELS, difficultyTooltip } = await import('../../src/ui/format.js');
     expect(VOTE_LEVELS).toEqual(['easy', 'normal', 'hard', 'turbo']);
@@ -332,26 +332,27 @@ describe('driving input controller', () => {
     v.py = 13.5;
     v.angle = 0;
 
-    const { c } = make();
+    const { c, sent } = make();
     c.keyDown({ code: 'KeyW' }, 0);
     c.predict(w, v, 100);
-    c.tick(100); // closes seq 2 (dt=0.1), opens tail
+    c.tick(100); // closes seq 2 with exactly the predicted 0.1 min
+    expect(sent.at(-1)).toMatchObject({ seq: 2, dt: 0.1 });
 
-    // Initial ack establishes baseline lastAckT = 10.0 at seq 1
     c.applyAck(w, v, { type: 'ack', seq: 1, t: 10.0, x: 4.6, y: 13.5, angle: 0, speedNow: 0.5 });
     expect(c.frames.map((f) => f.seq)).toEqual([2]);
 
-    // Client ticks again before server's next tick arrives (seq 3 has 0.1 min, seq 2 has 0.1 min)
     c.predict(w, v, 100);
     c.tick(200);
-    expect(c.frames.length).toBe(2);
+    expect(c.frames.map((f) => f.seq)).toEqual([2, 3]);
 
-    // Server advances by 1 tick (0.1 min: t=10.0 -> 10.1), but acks seq 3 because seq 3 arrived just before server step
+    // Ack 3: the server has applied seq 2 and 3's slices; only the open tail is replayed.
     c.applyAck(w, v, { type: 'ack', seq: 3, t: 10.1, x: 4.7, y: 13.5, angle: 0, speedNow: 1.0 });
-    // Only 0.1 min was consumed on the server, so 0.1 min of unapplied prediction remains in frames
-    const remainingDt = c.frames.reduce((s, f) => s + f.dt, 0);
-    expect(remainingDt).toBeCloseTo(0.1, 4);
-    expect(v.px).toBeGreaterThan(4.7);
+    expect(c.frames).toEqual([]);
+    expect(v.px).toBeCloseTo(4.7, 6);
+
+    // An out-of-order older ack is ignored.
+    c.applyAck(w, v, { type: 'ack', seq: 2, t: 10.1, x: 1, y: 1, angle: 2, speedNow: 0 });
+    expect(v.px).toBeCloseTo(4.7, 6);
   });
 });
 

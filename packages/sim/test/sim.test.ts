@@ -1502,6 +1502,22 @@ describe('Speed boost and collision pallet drop', () => {
     release(wSub, vSub.id);
     expect(vSub.inputQueue).toEqual([]);
     expect(vSub.inputCarriedDt).toBe(0);
+
+    // 5. Reversing from a stop while steering turns monotonically in the reverse direction
+    // without a +2.0 -> -3.2 sign flip across the -0.05 speed threshold.
+    const wRev = createWorld({ seed: 3033, agents: 0 });
+    const vRev = spawnPlayerVehicle(wRev, 'c-rev', 'RevDriver')!;
+    vRev.px = 8.5;
+    vRev.py = 13.5;
+    vRev.tile = { x: 8, y: 13 };
+    vRev.angle = 0;
+    vRev.speedNow = 0;
+    let prevAngle = vRev.angle;
+    for (let i = 0; i < 15; i++) {
+      stepHuman(wRev, vRev, { up: false, down: true, left: false, right: true }, 0.005);
+      expect(vRev.angle).toBeLessThan(prevAngle);
+      prevAngle = vRev.angle;
+    }
   });
 
   it('supports overflow regional shard IDs in getSiteTheme, buildMap, and createWorld', () => {

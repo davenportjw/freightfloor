@@ -33,6 +33,8 @@ export type HotkeyAction =
   | 'standings'
   | 'chat'
   | 'hudMinimal'
+  | 'driveCamera'
+  | 'cabView'
   | 'drive'
   | 'pick:1'
   | 'pick:2'
@@ -60,6 +62,8 @@ export const HOTKEYS: ReadonlyArray<{ key: string; action: string }> = [
   { key: 'C', action: 'Co-Pilot on / off (hand the wheel to your Co-Pilot, or take it back; only while driving)' },
   { key: 'M', action: 'Open / close the ☰ menu' },
   { key: 'V', action: 'HUD Full / Minimal (minimal hides hints and the contracts card)' },
+  { key: 'R', action: 'Drive camera: Fixed floor vs Forklift up (rotate floor while driving)' },
+  { key: 'P', action: 'Cab View on / off: first-person from the forklift seat (while driving; turns Lift Mode on)' },
   { key: '1 2 3', action: 'Contract pick sheet: toggle card 1 / 2 / 3' },
   { key: '1 2 3 4', action: 'Floor view: Floor orders — 1 Rush · 2 ★ P0 · 3 🚧 Cones · 4 📦 Dispatch' },
   { key: 'B', action: 'Floor view: open / close Team Standings' },
@@ -202,6 +206,10 @@ export function resolveHotkey(ev: HotkeyEvent, ctx: HotkeyContext): HotkeyAction
       return 'menu';
     case 'KeyV':
       return 'hudMinimal';
+    case 'KeyR':
+      return 'driveCamera';
+    case 'KeyP':
+      return 'cabView';
     case 'KeyC':
       return ctx.driving && !overlay ? 'toggleCopilot' : null;
     case 'KeyG':

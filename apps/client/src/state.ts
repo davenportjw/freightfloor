@@ -5,6 +5,8 @@
  * presence, brainHealth, phase, /api/network). Nothing is invented: values that
  * have not arrived yet stay `null` and the UI renders "—".
  */
+import type { DriveCameraMode } from './render/iso.js';
+export type { DriveCameraMode };
 import {
   dequantiseCoord,
   type A2uiScreenMessage,
@@ -634,8 +636,19 @@ export interface UiState {
   chatTarget: 'copilot' | 'floor';
   /** HUD Full (false) / Minimal (true): minimal hides dash hints and the contracts card. Persisted. */
   hudMinimal: boolean;
+  /**
+   * Driving camera orientation mode:
+   * - `'fixed'` (default): floor stays locked in its standard isometric aspect while the forklift rotates.
+   * - `'headingUp'`: while driving, the forklift always drives straight up on screen and steering rotates the board.
+   */
+  driveCameraMode: DriveCameraMode;
   /** Opt-in Rack Lift Minigame (3D vertical shelf lifting + Hold-E height gauge); default false. */
   rackLiftMinigame: boolean;
+  /**
+   * Cab View (first-person forklift camera) preference; default false. Only takes effect while
+   * driving (Floor mode always uses the iso view) and auto-enables Lift Mode while active.
+   */
+  cabView: boolean;
   /**
    * Player's Dispatcher's Call preference (`?dispatch=` / localStorage; default true). The
    * site must also enable it (`welcome.limits.dispatchersCall`).
@@ -690,6 +703,43 @@ export const FLYOUT_IDS: FlyoutId[] = ['board', 'fleet', 'drivers', 'value', 'ne
 
 const HUD_MINIMAL_KEY = 'warehouse.hud.minimal';
 export const RACK_LIFT_KEY = 'warehouse.feature.rackLift';
+export const DRIVE_CAMERA_KEY = 'warehouse.camera.driveMode';
+
+export function readDriveCameraMode(storage?: Pick<Storage, 'getItem'> | null): DriveCameraMode {
+  try {
+    if (typeof window !== 'undefined' && window.location?.search) {
+      const params = new URLSearchParams(window.location.search);
+      const q = (params.get('driveCamera') ?? params.get('camera') ?? params.get('cam') ?? '').toLowerCase();
+      if (q === 'headingup' || q === 'heading-up' || q === 'rotate' || q === 'chase' || q === 'up') {
+        return 'headingUp';
+      }
+      if (q === 'fixed' || q === 'iso' || q === 'locked') {
+        return 'fixed';
+      }
+    }
+  } catch {
+    /* ignore URL parsing errors */
+  }
+  try {
+    const s = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
+    if (s) {
+      const v = s.getItem(DRIVE_CAMERA_KEY);
+      if (v === 'headingUp') return 'headingUp';
+      if (v === 'fixed') return 'fixed';
+    }
+  } catch {
+    /* storage unavailable */
+  }
+  return 'fixed';
+}
+
+export function saveDriveCameraMode(mode: DriveCameraMode): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(DRIVE_CAMERA_KEY, mode);
+  } catch {
+    /* storage unavailable */
+  }
+}
 
 function readHudMinimal(): boolean {
   try {
@@ -735,6 +785,39 @@ export function readRackLiftOverride(storage?: Pick<Storage, 'getItem'> | null):
 export function saveRackLiftPref(on: boolean): void {
   try {
     if (typeof localStorage !== 'undefined') localStorage.setItem(RACK_LIFT_KEY, on ? '1' : '0');
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+export const CAB_VIEW_KEY = 'warehouse.camera.cabView';
+
+/** Cab View preference: `?view=cab|iso` (also `?cab=1|0`) beats localStorage; default off. */
+export function readCabViewPref(storage?: Pick<Storage, 'getItem'> | null): boolean {
+  try {
+    if (typeof window !== 'undefined' && window.location?.search) {
+      const params = new URLSearchParams(window.location.search);
+      const view = (params.get('view') ?? '').toLowerCase();
+      if (view === 'cab' || view === 'fpv' || view === 'first-person') return true;
+      if (view === 'iso') return false;
+      const q = params.get('cab');
+      if (q === '1' || q === 'true') return true;
+      if (q === '0' || q === 'false') return false;
+    }
+  } catch {
+    /* ignore URL parsing errors */
+  }
+  try {
+    const s = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
+    return s?.getItem(CAB_VIEW_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function saveCabViewPref(on: boolean): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(CAB_VIEW_KEY, on ? '1' : '0');
   } catch {
     /* storage unavailable */
   }
@@ -866,7 +949,9 @@ export class ClientStore {
     dispatchDraft: defaultDispatchDraft(),
     chatTarget: 'copilot',
     hudMinimal: readHudMinimal(),
+    driveCameraMode: readDriveCameraMode(),
     rackLiftMinigame: readRackLiftOverride() ?? false,
+    cabView: readCabViewPref(),
     dispatchersCall: readDispatchersCallOverride() ?? true,
     contractsCollapsed: defaultContractsCollapsed(),
     followVid: null,
@@ -925,6 +1010,23 @@ export class ClientStore {
     this.changed();
   }
 
+  driveCameraMode(): DriveCameraMode {
+    return this.ui.driveCameraMode === 'headingUp' ? 'headingUp' : 'fixed';
+  }
+
+  setDriveCameraMode(mode: DriveCameraMode): void {
+    const next: DriveCameraMode = mode === 'headingUp' ? 'headingUp' : 'fixed';
+    this.ui.driveCameraMode = next;
+    saveDriveCameraMode(next);
+    this.changed();
+  }
+
+  toggleDriveCameraMode(): DriveCameraMode {
+    const next: DriveCameraMode = this.driveCameraMode() === 'headingUp' ? 'fixed' : 'headingUp';
+    this.setDriveCameraMode(next);
+    return next;
+  }
+
   isRackLiftEnabled(): boolean {
     return Boolean(this.ui.rackLiftMinigame);
   }
@@ -934,6 +1036,44 @@ export class ClientStore {
     this.ui.rackLiftMinigame = next;
     saveRackLiftPref(next);
     this.changed();
+  }
+
+  /** Player's Cab View preference (may be on while in Floor mode; see `isCabViewActive`). */
+  isCabViewPref(): boolean {
+    return Boolean(this.ui.cabView);
+  }
+
+  setCabView(on: boolean): void {
+    const next = Boolean(on);
+    this.ui.cabView = next;
+    saveCabViewPref(next);
+    this.changed();
+  }
+
+  toggleCabView(): boolean {
+    this.setCabView(!this.isCabViewPref());
+    return this.isCabViewPref();
+  }
+
+  /** Cab View is drawn only while this client drives (Floor mode always uses the iso view). */
+  isCabViewActive(): boolean {
+    return this.isCabViewPref() && this.hudMode() === 'driving';
+  }
+
+  /**
+   * Lift Mode in effect right now: the player's toggle, or forced on while in the Cab View
+   * (first-person without the mast game is just a worse camera).
+   */
+  isRackLiftActive(): boolean {
+    return this.isRackLiftEnabled() || this.isCabViewActive();
+  }
+
+  /**
+   * Whether this site actually grades lifts (`limits.rackLiftMinigame`; otherwise the server's
+   * kill switch ignores `forkHeight`). When false, an active Lift Mode is ungraded practice.
+   */
+  isRackLiftGraded(): boolean {
+    return Boolean(this.limits?.rackLiftMinigame);
   }
 
   /** Dispatcher's Call on for this player: site flag AND the player's preference. */

@@ -209,7 +209,7 @@ export function mountObjective(
       }
 
       // ---- objective ----
-      const rackLiftOn = store.isRackLiftEnabled();
+      const rackLiftOn = typeof store.isRackLiftActive === 'function' ? store.isRackLiftActive() : store.isRackLiftEnabled();
       const activeGuide =
         store.myGuide() ?? (rackLiftOn && store.world.orders.length > 0 ? (simGuide(store.world, me) as GuideInfo | null) : null);
       const rackLiftLevel = rackLiftOn ? resolveRackLiftGuideLevel(activeGuide, store.world, me) : null;

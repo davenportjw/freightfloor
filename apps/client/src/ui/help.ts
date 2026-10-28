@@ -95,6 +95,7 @@ export const TOUCH_CONTROLS: ReadonlyArray<{ control: string; action: string }> 
   { control: '🤖 Auto / 🕹️ Manual', action: 'Tap top-right HUD button to toggle Co-Pilot autopilot or manual driving' },
   { control: 'Tap Forklift', action: 'Inspect any forklift’s Gemini model, persona, latency, and last decision' },
   { control: 'Pinch / Drag', action: 'Pinch to zoom · drag the floor to pan the camera in Floor view' },
+  { control: 'Drive Camera', action: 'Switch between Fixed Floor aspect and Forklift Up (rotating floor) in ☰ → View / Settings' },
   { control: '☰ Menu', action: 'Open Floor / Drive switcher, Standings, Tune Co-Pilot, and settings' },
 ];
 
@@ -311,6 +312,90 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     ],
   );
 
+  const getDriveCameraMode = () =>
+    typeof ctx.store.driveCameraMode === 'function'
+      ? ctx.store.driveCameraMode()
+      : (ctx.store.ui?.driveCameraMode ?? 'fixed');
+
+  const driveCameraBtn = el('button', {
+    class: 'btn intro-lift-toggle',
+    text: getDriveCameraMode() === 'headingUp' ? 'Forklift Up' : 'Fixed Floor',
+    title: 'Toggle driving camera orientation (R): Fixed Floor aspect vs. Forklift Up (rotate floor orientation as you steer)',
+    attrs: {
+      type: 'button',
+      'data-act': 'toggle-drive-camera',
+      'data-action': 'toggle-drive-camera',
+      'data-role': 'drive-camera-mode-toggle',
+      'aria-pressed': getDriveCameraMode() === 'headingUp' ? 'true' : 'false',
+    },
+    onClick: () => {
+      if (typeof ctx.actions.toggleDriveCamera === 'function') ctx.actions.toggleDriveCamera();
+      else if (typeof ctx.store.toggleDriveCameraMode === 'function') ctx.store.toggleDriveCameraMode();
+      syncDriveCameraHelp();
+    },
+  });
+
+  const syncDriveCameraHelp = (): void => {
+    const mode = getDriveCameraMode();
+    const headingUp = mode === 'headingUp';
+    cameraBox.dataset.mode = mode;
+    driveCameraBtn.textContent = headingUp ? 'Forklift Up' : 'Fixed Floor';
+    driveCameraBtn.setAttribute('aria-pressed', headingUp ? 'true' : 'false');
+    driveCameraBtn.classList.toggle('active', headingUp);
+  };
+
+  // Cab View: first-person from the forklift seat (auto-enables Lift Mode while in the cab).
+  const cabViewBtn = el('button', {
+    class: 'btn intro-lift-toggle',
+    text: `Cab View: ${ctx.store.isCabViewPref() ? 'ON' : 'OFF'}`,
+    title: 'Toggle Cab View (P): drive from the forklift seat in first person. Lift Mode is on while you are in the cab.',
+    attrs: {
+      type: 'button',
+      'data-act': 'toggle-cab-view',
+      'data-role': 'intro-cab-view-toggle',
+      'aria-pressed': ctx.store.isCabViewPref() ? 'true' : 'false',
+    },
+    onClick: () => {
+      if (typeof ctx.actions.toggleCabView === 'function') ctx.actions.toggleCabView();
+      else ctx.store.toggleCabView();
+      syncCabViewHelp();
+    },
+  });
+  // One compact Camera card for both view controls (orientation + first-person cab), so the
+  // intro fits on one screen.
+  const cameraBox = el(
+    'div',
+    {
+      class: 'intro-lift-mode intro-camera',
+      attrs: {
+        'data-role': 'intro-camera',
+        'data-mode': getDriveCameraMode(),
+        'data-cab': ctx.store.isCabViewPref() ? 'true' : 'false',
+      },
+    },
+    [
+      el('div', { class: 'intro-lift-mode__bar' }, [
+        el('div', { class: 'intro-lift-mode__info' }, [
+          el('span', { class: 'intro-lift-mode__title' }, ['🎥 ', b('Camera')]),
+          el('span', { class: 'intro-lift-mode__flag num', text: 'R · P' }),
+          el('span', {
+            class: 'intro-lift-mode__sub',
+            text: 'Forklift Up rotates the floor as you steer (R). Cab View drives from the seat with Lift Mode on (P).',
+          }),
+        ]),
+        el('div', { class: 'intro-camera__btns' }, [driveCameraBtn, cabViewBtn]),
+      ]),
+    ],
+  );
+  const syncCabViewHelp = (): void => {
+    const on = ctx.store.isCabViewPref();
+    cameraBox.dataset.cab = on ? 'true' : 'false';
+    cabViewBtn.textContent = `Cab View: ${on ? 'ON' : 'OFF'}`;
+    cabViewBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    cabViewBtn.classList.toggle('active', on);
+  };
+  syncDriveCameraHelp();
+
   let lastRackLift: boolean | null = null;
   let lastMobile: boolean | null = null;
   const syncRackLiftHelp = (rackLift: boolean, mobile: boolean): void => {
@@ -483,6 +568,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
         chargeChip,
       ]),
       liftModeBox,
+      cameraBox,
       el('p', { class: 'intro-goal' }, ['Out-ship the AI forklifts and finish the shift ', b('#1'), '.']),
       el('details', { class: 'intro-keys' }, [
         el('summary', { text: 'All controls' }),
@@ -1226,6 +1312,8 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     start: tryEnterFloor,
     update() {
       syncRackLiftHelp(ctx.store.isRackLiftEnabled(), isTouchControlsEnvironment(opts.isMobile));
+      syncDriveCameraHelp();
+      syncCabViewHelp();
       syncSpinup();
       const pending = Boolean(ctx.store.ui.pendingDrive);
       const label = introStartLabel(pending);

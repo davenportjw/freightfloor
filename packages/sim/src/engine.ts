@@ -1615,6 +1615,9 @@ export function takeWheel(
     if (dv) {
       dv.input = { up: false, down: false, left: false, right: false, boost: false };
       dv.inputQueue = [];
+      dv.clientTimed = false;
+      dv.streamIdleDt = 0;
+      dv.streamDebtDt = 0;
       dv.inputCarriedDt = 0;
       dv.speedNow = 0;
       dv.humanCharging = false;
@@ -1656,6 +1659,9 @@ export function takeWheel(
   v.playerOpaqueId = session.opaqueId;
   v.input = { up: false, down: false, left: false, right: false, boost: false };
   v.inputQueue = [];
+  v.clientTimed = false;
+  v.streamIdleDt = 0;
+  v.streamDebtDt = 0;
   v.inputCarriedDt = 0;
   v.state = 'driven';
   v.path = [];
@@ -1692,6 +1698,9 @@ export function release(w: World, vid: string): void {
     v.directive = null;
     v.input = { up: false, down: false, left: false, right: false, boost: false };
     v.inputQueue = [];
+    v.clientTimed = false;
+    v.streamIdleDt = 0;
+    v.streamDebtDt = 0;
     v.inputCarriedDt = 0;
     v.speedNow = 0;
     return;
@@ -1705,6 +1714,9 @@ export function release(w: World, vid: string): void {
   v.playerOpaqueId = null;
   v.input = { up: false, down: false, left: false, right: false, boost: false };
   v.inputQueue = [];
+  v.clientTimed = false;
+  v.streamIdleDt = 0;
+  v.streamDebtDt = 0;
   v.inputCarriedDt = 0;
   v.speedNow = 0;
   v.humanCharging = false;
@@ -1816,6 +1828,9 @@ export function setVehicleAutopilot(
   v.autopilot = next;
   v.input = { up: false, down: false, left: false, right: false, boost: false };
   v.inputQueue = [];
+  v.clientTimed = false;
+  v.streamIdleDt = 0;
+  v.streamDebtDt = 0;
   v.inputCarriedDt = 0;
   v.speedNow = 0;
   v.humanCharging = false;
@@ -1915,6 +1930,21 @@ export function requiresRackLift(order: Order | null | undefined, action: 'pick'
   return Boolean(order?.putaway && isRackSlot(order.putaway));
 }
 
+/**
+ * Grading windows (normalized fork units, ± around `targetFork`) used by `evaluateRackLift`.
+ * Exported so clients draw exactly the tolerance the server grades against.
+ */
+export function rackLiftWindows(
+  targetLevel: 0 | 1 | 2,
+  opts?: { forkLiftMul?: number; district?: DistrictKind },
+): { targetFork: number; perfectWindow: number; cleanWindow: number } {
+  const level = Math.max(0, Math.min(2, Math.floor(targetLevel))) as 0 | 1 | 2;
+  const mul =
+    Math.max(0.5, Math.min(2, opts?.forkLiftMul ?? 1)) *
+    (opts?.district === 'fast' ? 1.2 : opts?.district === 'haz' ? 0.9 : 1);
+  return { targetFork: RACK_LEVEL_FORK_TARGETS[level], perfectWindow: 0.085 * mul, cleanWindow: 0.185 * mul };
+}
+
 export function evaluateRackLift(
   forkHeight: number,
   targetLevel: 0 | 1 | 2,
@@ -1922,12 +1952,7 @@ export function evaluateRackLift(
 ): RackLiftEvaluation {
   const clampedFork = Math.max(0, Math.min(1, Number.isFinite(forkHeight) ? forkHeight : 0));
   const level = Math.max(0, Math.min(2, Math.floor(targetLevel))) as 0 | 1 | 2;
-  const targetFork = RACK_LEVEL_FORK_TARGETS[level];
-  const mul =
-    Math.max(0.5, Math.min(2, opts?.forkLiftMul ?? 1)) *
-    (opts?.district === 'fast' ? 1.2 : opts?.district === 'haz' ? 0.9 : 1);
-  const perfectWindow = 0.085 * mul;
-  const cleanWindow = 0.185 * mul;
+  const { targetFork, perfectWindow, cleanWindow } = rackLiftWindows(level, opts);
   const error = Math.abs(clampedFork - targetFork);
   let grade: RackLiftGrade;
   let bonusDelta: number;
@@ -4187,11 +4212,75 @@ export function stepHumanTick(
         latestInput.boost ||
         (typeof latestInput.moveAngle === 'number' && Number.isFinite(latestInput.moveAngle)),
     );
-    v.inputCarriedDt = hasActiveInput || v.speedNow !== 0 ? (v.inputCarriedDt ?? 0) + rem : 0;
+    v.inputCarriedDt = hasActiveInput ? Math.min(TICK_MIN, rem) : 0;
   } else {
     v.inputCarriedDt = 0;
   }
   v.input = latestInput;
+}
+
+/** A client-timed stream with no slice for this long (game-min) is stepped by the server tick. */
+export const STREAM_STALE_DT = 0.25;
+/** Cap on server-advanced time owed back by a resuming client-timed stream. */
+const STREAM_MAX_DEBT_DT = 0.5;
+
+/**
+ * Client-timed input stream: applies one client-measured slice (`input` held for `dt`
+ * game-minutes) to a manually driven human vehicle immediately, then makes `next` the held
+ * input. The client predicts with the exact same slices, so the authoritative pose acked
+ * after this call is reproducible on the client (no re-timing against server ticks, which
+ * was the source of per-tap heading disagreements and visible left-right correction wobble).
+ * Time the server already advanced on its own while the stream was stale is deducted.
+ * Returns the game-minutes actually simulated.
+ */
+export function applyClientInputSlice(
+  w: World,
+  v: Vehicle,
+  input: DriverInput,
+  dt: number,
+  next: DriverInput,
+): number {
+  v.clientTimed = true;
+  v.streamIdleDt = 0;
+  v.inputQueue = [];
+  v.inputCarriedDt = 0;
+  let apply = Number.isFinite(dt) ? Math.max(0, dt) : 0;
+  const debt = v.streamDebtDt ?? 0;
+  if (debt > 0) {
+    const paid = Math.min(debt, apply);
+    v.streamDebtDt = debt - paid;
+    apply -= paid;
+  }
+  const frozen =
+    w.phase === 'break' || w.phase === 'resuming' || v.runFinished || v.wheelPaused || !isManualHuman(v);
+  if (frozen) {
+    if (v.runFinished || v.wheelPaused) v.speedNow = 0;
+    apply = 0;
+  }
+  if (apply > 1e-6) stepHuman(w, v, input, apply);
+  v.input = { ...next, moveAngle: next.moveAngle ?? null };
+  return apply;
+}
+
+/**
+ * Tick-side handling for client-timed vehicles: idle while slices keep arriving; once the
+ * stream goes stale (lag spike, backgrounded tab) keep the vehicle moving with its last input
+ * and record the advanced time as debt so the resuming stream does not double-apply it.
+ */
+function stepClientTimedTick(w: World, v: Vehicle, dt: number, occ?: Map<string, Vehicle>): void {
+  const idle = (v.streamIdleDt ?? 0) + dt;
+  v.streamIdleDt = idle;
+  if (idle < STREAM_STALE_DT + 1e-9) return;
+  const active = v.speedNow !== 0 || anyInputHeld(v.input);
+  stepHumanTick(w, v, dt, occ);
+  if (active) v.streamDebtDt = Math.min(STREAM_MAX_DEBT_DT, (v.streamDebtDt ?? 0) + dt);
+}
+
+function anyInputHeld(i: DriverInput): boolean {
+  return Boolean(
+    i.up || i.down || i.left || i.right || i.boost ||
+      (typeof i.moveAngle === 'number' && Number.isFinite(i.moveAngle)),
+  );
 }
 
 function stepHumanSingle(
@@ -4273,7 +4362,9 @@ function stepHumanSingle(
     else if (inp.down && speedBefore > 0) v.brakeFrom = Math.max(v.brakeFrom ?? 0, speedBefore);
     v.braking = inp.down && v.speedNow > 0;
     if (steer) {
-      v.angle += steer * dt * (Math.abs(v.speedNow) > 0.05 ? 3.2 * Math.sign(v.speedNow) : 2.0);
+      const revSign = v.speedNow < -1e-4 || (inp.down && !inp.up && v.speedNow <= 0) ? -1 : 1;
+      const turnRate = Math.abs(v.speedNow) > 0.05 ? 3.2 : 2.0;
+      v.angle += steer * dt * turnRate * revSign;
     } else if (Math.abs(v.speedNow) > 0.1) {
       // Gentle cardinal lane-assist only when inside a narrow 1-tile walled rack corridor
       const inVerticalAisle =
@@ -6951,7 +7042,8 @@ export function tick(w: World, dt = TICK_MIN): void {
         continue;
       }
       if (isManualHuman(v)) {
-        stepHumanTick(w, v, dt, occ);
+        if (v.clientTimed) stepClientTimedTick(w, v, dt, occ);
+        else stepHumanTick(w, v, dt, occ);
       } else if (v.hold && !v.moveTo) {
         v.braking = true;
         v.speedNow = 0;

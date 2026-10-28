@@ -1,8 +1,10 @@
 /** 3D vehicle models (AGV / counterbalance / reach) ported from the mock's vehicleParts/drawVehicle. */
 import { BOOST_COLLISION_SPEED, getSiteTheme, type Vehicle } from '@warehouse/sim';
+import { isoDepth } from './iso.js';
 import type { Pose } from './motion.js';
 import type { Painter } from './painter.js';
 import { resolveCargoSpriteKey, teamColor } from './scenery.js';
+import { forkHeightM, isoZ } from './liftGeometry.js';
 
 export interface Part {
   cx: number;
@@ -29,6 +31,7 @@ export function vehicleParts(
   nowMs: number,
   siteId = 'den-1',
   includeCargo = true,
+  camRot = 0,
 ): Part[] {
   const ca = Math.cos(p.a);
   const sa = Math.sin(p.a);
@@ -39,7 +42,7 @@ export function vehicleParts(
   const add = (ox: number, oy: number, len: number, wid: number, z0: number, h: number, hex: string) =>
     parts.push({ cx: p.x + ca * ox - sa * oy, cy: p.y + sa * ox + ca * oy, len, wid, z0, h, hex });
   const fork = Number.isFinite(v.fork) ? v.fork : 0;
-  const forkZ = 2 + fork * (model === 'reach' ? 26 : 20);
+  const forkZ = isoZ(forkHeightM(fork)); // blade bottom, shared with rack beams (liftGeometry)
   const cargo = includeCargo ? (v.cargo ?? []) : [];
   const cargoAt = (ox: number, z: number) =>
     cargo.forEach((o, i) => {
@@ -102,7 +105,7 @@ export function vehicleParts(
     blink ? '#FBBF24' : '#92400E',
   ); // beacon
   if (v.braking) for (const sy of [-1, 1]) add(model === 'agv' ? -0.45 : -0.5, sy * 0.15, 0.04, 0.08, 6, 3, '#EF4444');
-  parts.sort((a, b) => a.cx + a.cy - (b.cx + b.cy) || a.z0 - b.z0);
+  parts.sort((a, b) => isoDepth(a.cx, a.cy, camRot) - isoDepth(b.cx, b.cy, camRot) || a.z0 - b.z0);
   return parts;
 }
 
@@ -219,21 +222,23 @@ export function drawVehicle(
 
   const cargo = v.cargo ?? [];
   const forkRaised = (v.fork ?? 0) > 0.35;
+  const camRot = pt.cam?.rot ?? 0;
   const useSpriteCargo =
     !forkRaised &&
+    Math.abs(camRot) <= 1e-4 &&
     cargo.length > 0 &&
     typeof (pt as Partial<Painter>).hasSprite === 'function' &&
     typeof (pt as Partial<Painter>).sprite === 'function' &&
     pt.hasSprite(resolveCargoSpriteKey(cargo[0], siteId));
 
-  for (const q of vehicleParts(v, p, s.nowMs, siteId, !useSpriteCargo)) {
+  for (const q of vehicleParts(v, p, s.nowMs, siteId, !useSpriteCargo, camRot)) {
     pt.oBox(q.cx, q.cy, q.len, q.wid, p.a, q.z0, q.h, q.hex, 'rgba(15,23,42,0.28)');
   }
 
   if (useSpriteCargo) {
     const model = modelOf(v.type);
     const fork = Number.isFinite(v.fork) ? v.fork : 0;
-    const forkZ = 2 + fork * (model === 'reach' ? 26 : 20);
+    const forkZ = isoZ(forkHeightM(fork)); // blade bottom, shared with rack beams (liftGeometry)
     const ox = model === 'agv' ? -0.02 : 0.62;
     const baseZ = model === 'agv' ? 9.2 : forkZ + 2;
     const gx = p.x + Math.cos(p.a) * ox;

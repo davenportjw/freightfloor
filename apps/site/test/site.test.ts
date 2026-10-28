@@ -1938,6 +1938,7 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     expect(v.runEndsAt).toBeCloseTo(server.world.t + 180, 1);
     expect(v.runGraceUntil).toBeNull();
 
+    const speedBeforeRelease = v.speedNow;
     client.send({
       type: 'input',
       seq: 2,
@@ -1947,9 +1948,14 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
       left: false,
       right: false,
     });
-    await client.waitForType('ack');
-    // The sub-tick forward press slice must still be queued on v.inputQueue
-    expect(v.inputQueue?.some((q) => q.input.up === true && q.dt > 0)).toBe(true);
+    const releaseAck = await client.waitForType('ack');
+    // Client-timed stream: the 0.03 sub-tick forward slice is applied on arrival (not lost or
+    // re-timed against server ticks), and the ack reports the resulting pose.
+    expect(speedBeforeRelease).toBe(0);
+    expect(v.speedNow).toBeGreaterThan(0);
+    expect(v.clientTimed).toBe(true);
+    expect(releaseAck.speedNow).toBeCloseTo(v.speedNow, 3);
+    expect(v.input.up).toBe(false);
 
     // Active manual Blitz run (with started runEndsAt) must NOT be evicted at 60s for idle_timeout
     await server.stepTick(t0 + 65_000);

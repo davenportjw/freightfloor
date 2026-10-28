@@ -1,18 +1,18 @@
 /**
  * Driving input: keyboard state, the 10 Hz send loop and client-side prediction.
  *
- * How the server steps (apps/site server.ts + sim tick):
- * - every 100 ms it runs `tick(world)` with `dt = TICK_MIN` (0.1 game-min), stepping each
- *   human vehicle with the LAST `input` it received (`v.input`);
- * - on each `input` message it stores the input and immediately replies with an `ack`
- *   carrying the vehicle pose at that moment.
- *
- * So when the ack for seq N arrives, the server has applied every input up to N-1 for the
- * time it was held, and input N for (almost) nothing yet. The client records, per send,
- * the input that was held during the interval that ENDED with that send (`frames`), plus
- * the open interval since the last send (`tail`). Reconciling = take the ack pose, drop
- * frames with seq <= N, replay the rest and then the tail, in TICK_MIN sub-steps exactly
- * like the server does.
+ * Client-timed input stream (apps/site server.ts + sim `applyClientInputSlice`):
+ * - the client predicts every frame with the input it last SENT, accumulating the predicted
+ *   time in the open `tail` slice;
+ * - each `input` message carries `dt` = the exact length of the slice it closes (how long the
+ *   previous input was held). The server applies that slice on arrival (bounded by a
+ *   wall-clock budget) and immediately replies with an `ack` carrying the resulting pose;
+ * - so ack N means "every frame with seq <= N applied". Reconciling = take the ack pose, drop
+ *   frames with seq <= N and replay the rest and then the tail, using the same slices and
+ *   sub-step partition as the server. Steady driving therefore reconciles to ~0 error, which
+ *   is what keeps the heading (and the heading-up / cab cameras) from wobbling.
+ * - while the vehicle is moving the client keeps streaming at 10 Hz; if the stream stalls the
+ *   server tick advances the vehicle itself and deducts that time from the next slices.
  */
 import type { AckMessage, InputMessage } from '@warehouse/protocol';
 import {
@@ -36,6 +36,10 @@ export const KEEPALIVE_INTERVAL_MS = 2_000;
 export const PREDICTION_GRACE_MS = 400;
 /** Safety cap on unacknowledged frames (10 s at 10 Hz). */
 export const MAX_PENDING_FRAMES = 100;
+/** Protocol cap on one client-timed slice (`InputMessage.dt`, game-min). */
+export const MAX_SLICE_DT = 2;
+/** Time constant (ms) for blending out visual reconciliation corrections. */
+export const ERROR_DECAY_MS = 120;
 
 export type DriveDir = 'up' | 'down' | 'left' | 'right' | 'boost';
 
@@ -133,11 +137,15 @@ const OCTANT_SIN = Math.sin(Math.PI / 8);
  *
  * Under the 2:1 isometric projection (`screenX ~ gx - gy`, `screenY ~ (gx + gy) / 2`),
  * a screen vector `(dx, dy)` unprojects to world direction `(wx, wy) ~ (dx + 2*dy, 2*dy - dx)`.
+ * When the board is rotated by `camRot`, subtracts `camRot` so screen-up (`dx=0, dy<0`)
+ * maps directly to the forklift's forward heading.
  */
-export function screenVectorToWorldAngle(dx: number, dy: number): number {
+export function screenVectorToWorldAngle(dx: number, dy: number, camRot = 0): number {
   const wx = dx + 2 * dy;
   const wy = 2 * dy - dx;
-  return Math.round(Math.atan2(wy, wx) * 1000) / 1000;
+  const raw = Math.atan2(wy, wx);
+  const angle = camRot ? wrapAngleDelta(raw - camRot) : raw;
+  return Math.round(angle * 1000) / 1000;
 }
 
 /**
@@ -150,6 +158,7 @@ export function thumbstickDirsFromVector(
   dy: number,
   deadzone = 10,
   maxRadius = 38,
+  camRot = 0,
 ): ThumbstickState {
   const dist = Math.hypot(dx, dy);
   if (!Number.isFinite(dist) || dist <= deadzone) {
@@ -175,7 +184,7 @@ export function thumbstickDirsFromVector(
     active: true,
     clampedX: nx * clampedDist,
     clampedY: ny * clampedDist,
-    moveAngle: screenVectorToWorldAngle(dx, dy),
+    moveAngle: screenVectorToWorldAngle(dx, dy, camRot),
   };
 }
 
@@ -304,9 +313,6 @@ export class InputController {
       }
       if (driving) this.sendNow(nowMs);
     }
-    if ('moveAngle' in dirs) {
-      this.tail.input.moveAngle = this.held.moveAngle ?? null;
-    }
   }
 
   /** Programmatically set a single directional touch input. */
@@ -342,11 +348,7 @@ export class InputController {
     this.held.boost = false;
     this.held.moveAngle = null;
     if (this.isDriving()) this.sendNow(nowMs);
-    this.tail.input.moveAngle = null;
   }
-
-  private tailRawDt = 0;
-  private unpredictedDt = 0;
 
   /** Drop all state (hand back, reconnect, vehicle change). */
   reset(): void {
@@ -362,8 +364,6 @@ export class InputController {
     this.lastSentMoveAngle = null;
     this.frames = [];
     this.tail = { seq: this.seq, input: emptyInput(), dt: 0 };
-    this.tailRawDt = 0;
-    this.unpredictedDt = 0;
     this.lastSendMs = null;
     this.lastAckT = null;
     this.errorX = 0;
@@ -371,11 +371,16 @@ export class InputController {
     this.errorAngle = 0;
   }
 
-  /** 10 Hz scheduler. Returns true if a message was sent. */
-  tick(nowMs: number, keepAlive = false): boolean {
+  /**
+   * 10 Hz scheduler. Returns true if a message was sent. While a key is held OR the vehicle
+   * is still moving (`moving`, e.g. coasting after release) it streams at 10 Hz, so the
+   * server's client-timed stream never goes stale mid-motion.
+   */
+  tick(nowMs: number, keepAlive = false, moving = false): boolean {
     if (!this.isDriving()) return false;
     const since = this.lastSendMs === null ? Infinity : nowMs - this.lastSendMs;
-    if (anyHeld(this.held)) {
+    const streaming = anyHeld(this.held) || (moving && !this.isAutopilot());
+    if (streaming) {
       if (since >= INPUT_SEND_INTERVAL_MS - 1) {
         this.sendNow(nowMs);
         return true;
@@ -399,11 +404,15 @@ export class InputController {
     return Math.hypot(this.errorX, this.errorY) > 1e-3 || Math.abs(this.errorAngle) > 1e-3;
   }
 
-  /** Advance local prediction by `elapsedMs` of real time and decay visual reconciliation offset. */
+  /**
+   * Advance local prediction by `elapsedMs` of real time and decay the visual reconciliation
+   * offset. The predicted time accumulates in the open `tail` slice, whose exact length is
+   * sent as `dt` on the next input so the server applies the identical slice.
+   */
   predict(w: World, v: Vehicle, elapsedMs: number): void {
     const clampedMs = Math.max(0, elapsedMs);
     if (clampedMs <= 0) return;
-    const decay = Math.exp(-clampedMs / 80);
+    const decay = Math.exp(-clampedMs / ERROR_DECAY_MS);
     this.errorX *= decay;
     this.errorY *= decay;
     this.errorAngle *= decay;
@@ -412,15 +421,7 @@ export class InputController {
     if (Math.abs(this.errorAngle) < 1e-4) this.errorAngle = 0;
 
     const dt = clampedMs * SIM_MIN_PER_MS;
-    const absorbed = Math.min(dt, this.unpredictedDt);
-    this.unpredictedDt -= absorbed;
-    const tailStepDt = Math.max(0, dt - absorbed);
-    this.tail.dt += tailStepDt;
-    if (v.speedNow !== 0 || anyHeld(this.tail.input)) {
-      this.tailRawDt += tailStepDt;
-    } else {
-      this.tailRawDt = 0;
-    }
+    this.tail.dt += dt;
     stepInChunks(w, v, this.tail.input, dt);
   }
 
@@ -434,101 +435,37 @@ export class InputController {
   }
 
   /** Server pose accepted (not predicting): nothing is in flight any more. */
-  settle(): void {
+  settle(worldT?: number, _nowMs?: number): void {
     this.frames = [];
     this.tail.dt = 0;
-    this.tailRawDt = 0;
-    this.unpredictedDt = 0;
-    this.lastAckT = null;
+    this.lastAckT = typeof worldT === 'number' ? Math.round(worldT * 100) / 100 : null;
     this.errorX = 0;
     this.errorY = 0;
     this.errorAngle = 0;
   }
 
+  /**
+   * Client-timed reconciliation. The server applies each input's slice (`frame.dt`, the
+   * time the previous input was held) on arrival and acks the resulting pose, so ack N is
+   * exactly "every frame with seq <= N applied". Rebase on it and replay the rest; the
+   * replay uses the same slices and sub-step partition as the server, so in steady driving
+   * the correction is ~0 and nothing wobbles. Any genuine correction (collisions with
+   * vehicles the client could not see) is blended out visually.
+   */
   applyAck(w: World, v: Vehicle, ack: AckMessage): void {
-    // If the server simulation clock has not advanced since the previous ack (e.g. a key
-    // press/release acked between 100 ms server ticks), do not discard sub-tick frames or
-    // snap back to the already-reconciled server tick pose.
-    if (
-      typeof ack.t === 'number' &&
-      this.lastAckT !== null &&
-      Math.abs(ack.t - this.lastAckT) < 1e-6 &&
-      (this.frames.length > 0 || this.tail.dt > 1e-6)
-    ) {
-      return;
-    }
-
-    const prevAckT = this.lastAckT;
-    if (typeof ack.t === 'number') {
-      this.lastAckT = ack.t;
-    }
+    if (ack.seq < this.ackedSeq) return; // stale / out-of-order
+    this.ackedSeq = ack.seq;
+    if (typeof ack.t === 'number') this.lastAckT = ack.t;
 
     const prevVisX = v.px + this.errorX;
     const prevVisY = v.py + this.errorY;
     const prevVisAngle = wrapAngleDelta((v.angle || 0) + this.errorAngle);
 
-    if (prevAckT !== null && typeof ack.t === 'number') {
-      // Consume exactly the simulation time that elapsed on the server (`ack.t - prevAckT`)
-      // rather than dropping all frames with `seq <= ack.seq`. This prevents losing 0.1 min
-      // of predicted movement when client and server 10 Hz timers interleave or when
-      // key-edge sends advance `seq` within a tick.
-      let consumeDt = Math.max(0, ack.t - prevAckT);
-      while (this.frames.length > 0 && consumeDt > 1e-6) {
-        const head = this.frames[0];
-        if (head.dt <= consumeDt + 1e-6) {
-          consumeDt -= head.dt;
-          this.frames.shift();
-        } else {
-          head.dt -= consumeDt;
-          consumeDt = 0;
-        }
-      }
-      if (consumeDt > 1e-6 && this.tail.dt > 0) {
-        const usedTail = Math.min(this.tail.dt, consumeDt);
-        this.tail.dt = Math.max(0, this.tail.dt - usedTail);
-        consumeDt -= usedTail;
-      }
-      if (consumeDt > 1e-6 && this.unpredictedDt > 0) {
-        this.unpredictedDt = Math.max(0, this.unpredictedDt - consumeDt);
-        consumeDt = 0;
-      }
-      while (this.frames.length > 0 && this.frames[0].dt <= 1e-6 && this.frames[0].seq <= ack.seq) {
-        this.frames.shift();
-      }
-      // Cap total unacknowledged queued dt to prevent unbounded drift over long RTT spikes
-      let totalQueuedDt = this.frames.reduce((sum, f) => sum + f.dt, 0);
-      while (this.frames.length > 1 && totalQueuedDt > 0.25) {
-        const dropped = this.frames.shift()!;
-        totalQueuedDt -= dropped.dt;
-      }
-
-      if (typeof ack.x === 'number') v.px = ack.x;
-      if (typeof ack.y === 'number') v.py = ack.y;
-      v.tile = { x: Math.floor(v.px), y: Math.floor(v.py) };
-      if (typeof ack.angle === 'number') v.angle = ack.angle;
-      if (typeof ack.speedNow === 'number') v.speedNow = ack.speedNow;
-
-      let unpredRemaining = this.unpredictedDt;
-      for (let i = 0; i < this.frames.length; i++) {
-        const frame = this.frames[i];
-        let stepDt = frame.dt;
-        if (i === this.frames.length - 1 && unpredRemaining > 0) {
-          const trim = Math.min(stepDt, unpredRemaining);
-          stepDt -= trim;
-          unpredRemaining -= trim;
-        }
-        if (stepDt > 1e-6) stepInChunks(w, v, frame.input, stepDt);
-      }
-      if (this.tail.dt > 0) stepInChunks(w, v, this.tail.input, this.tail.dt);
-    } else {
-      this.unpredictedDt = 0;
-      this.frames = reconcilePredictedVehicle(w, v, ack, this.frames, this.tail);
-    }
+    this.frames = reconcilePredictedVehicle(w, v, ack, this.frames, this.tail);
 
     const dx = prevVisX - v.px;
     const dy = prevVisY - v.py;
-    const dist = Math.hypot(dx, dy);
-    if (dist < 1.5) {
+    if (Math.hypot(dx, dy) < 1.5) {
       this.errorX = dx;
       this.errorY = dy;
       this.errorAngle = wrapAngleDelta(prevVisAngle - (v.angle || 0));
@@ -539,20 +476,13 @@ export class InputController {
     }
   }
 
+  private ackedSeq = 0;
+
   private sendNow(nowMs: number): void {
     const seq = ++this.seq;
-    const activeSlice = anyHeld(this.tail.input) || this.tailRawDt > 0;
-    const wallDt =
-      activeSlice && this.lastSendMs !== null
-        ? Math.min(0.25, Math.max(0, (nowMs - this.lastSendMs) * SIM_MIN_PER_MS))
-        : this.tailRawDt;
-    const effectiveRawDt = Math.max(this.tailRawDt, wallDt);
-    const aheadDt = Math.max(0, wallDt - this.tailRawDt);
-    const frameDt = this.tail.dt + aheadDt;
-    this.unpredictedDt += aheadDt;
-    const sliceDt = Math.min(0.5, Math.max(0, Math.round(effectiveRawDt * 10000) / 10000));
-    // Close the open interval: it ends with this send.
-    this.frames.push({ seq, input: { ...this.tail.input }, dt: frameDt });
+    // The open slice ends with this send: `dt` is exactly how long its input was predicted.
+    const dt = Math.min(MAX_SLICE_DT, Math.max(0, Math.round(this.tail.dt * 10000) / 10000));
+    this.frames.push({ seq, input: { ...this.tail.input }, dt });
     if (this.frames.length > MAX_PENDING_FRAMES) this.frames.shift();
     const hasAngle =
       typeof this.held.moveAngle === 'number' && Number.isFinite(this.held.moveAngle);
@@ -568,8 +498,7 @@ export class InputController {
     };
     this.lastSentMoveAngle = nextAngle;
     this.tail = { seq, input: { ...input }, dt: 0 };
-    this.tailRawDt = 0;
     this.lastSendMs = nowMs;
-    this.send({ type: 'input', ...input, seq, dt: sliceDt });
+    this.send({ type: 'input', ...input, seq, dt });
   }
 }

@@ -10,6 +10,8 @@ import {
   type StructInfo,
   type Vehicle,
 } from '@warehouse/sim';
+import { isoDepth } from './iso.js';
+import { beamTopM, isoZ, rackHeightM } from './liftGeometry.js';
 import type { Painter } from './painter.js';
 
 export const BG = '#CBD5E1';
@@ -271,12 +273,25 @@ export function drawRack(p: Painter, r: Rack, siteId = 'den-1'): void {
   }
 
   const lv = k === 'fast' ? 2 : 3;
-  const H = lv === 2 ? 25 : 36;
+  // Heights from the shared lift geometry, so shelf beams sit exactly where a Perfect lift lands.
+  const H = isoZ(rackHeightM(lv));
   const base = pal[r.tone ? 1 : 0];
   const post = (px: number, py: number) => p.aaBox(x + px, y + py, 0.07, 0.07, 0, H, base);
-  post(0.04, 0.04);
-  post(0.89, 0.04);
-  post(0.04, 0.89);
+  const camRot = p.cam?.rot ?? 0;
+  const postOffsets: Array<[number, number]> = [
+    [0.04, 0.04],
+    [0.89, 0.04],
+    [0.04, 0.89],
+    [0.89, 0.89],
+  ];
+  if (camRot) {
+    postOffsets.sort(
+      (a, b) => isoDepth(x + a[0], y + a[1], camRot) - isoDepth(x + b[0], y + b[1], camRot),
+    );
+  }
+  post(postOffsets[0][0], postOffsets[0][1]);
+  post(postOffsets[1][0], postOffsets[1][1]);
+  post(postOffsets[2][0], postOffsets[2][1]);
 
   const shelfColor =
     theme.cargoStyle === 'plants'
@@ -288,7 +303,7 @@ export function drawRack(p: Painter, r: Rack, siteId = 'den-1'): void {
           : '#64748B';
 
   for (let l = 0; l < lv; l++) {
-    const z = 3 + l * 11;
+    const z = isoZ(beamTopM(l as 0 | 1 | 2)) - 1.6; // beam top = liftGeometry beamTopM(l)
     p.aaBox(x + 0.03, y + 0.03, 0.94, 0.94, z, 1.6, shelfColor);
     const q = (hsh + l * 3) % 7;
     if (q === 0 || q === 3) continue;
@@ -324,7 +339,7 @@ export function drawRack(p: Painter, r: Rack, siteId = 'den-1'): void {
       p.aaBox(x + 0.16, y + 0.14, 0.68, 0.72, z + 1.6, 7 + (q % 3) * 1.5, pal[2][q % 3]);
     }
   }
-  post(0.89, 0.89);
+  post(postOffsets[3][0], postOffsets[3][1]);
   const capColor =
     k === 'cold'
       ? '#7DD3FC'

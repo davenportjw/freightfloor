@@ -7,6 +7,7 @@
  */
 import type { FareOffer, Vehicle } from '@warehouse/sim';
 import { thumbstickDirsFromVector } from '../input.js';
+import { headingUpRotation } from '../render/iso.js';
 import type { GuideInfo } from '../state.js';
 import type { UiCtx, UiModule } from './context.js';
 import type { ActiveOverlay, HudMode } from './mode.js';
@@ -162,7 +163,12 @@ export function mountTouchControls(
     }
     const dx = clientX - stickCenterX;
     const dy = clientY - stickCenterY;
-    const state = thumbstickDirsFromVector(dx, dy, 10, 34);
+    const camMode =
+      typeof ctx.store.driveCameraMode === 'function'
+        ? ctx.store.driveCameraMode()
+        : (ctx.store.ui?.driveCameraMode ?? 'fixed');
+    const camRot = camMode === 'headingUp' && me ? headingUpRotation(me.angle) : 0;
+    const state = thumbstickDirsFromVector(dx, dy, 10, 34, camRot);
     stickKnob.style.transform = `translate3d(${state.clampedX.toFixed(1)}px, ${state.clampedY.toFixed(1)}px, 0)`;
     stickZone.classList.toggle('active', state.active);
     dirUpEl.classList.toggle('on', state.up);

@@ -21,6 +21,8 @@ import { guardedFrame } from './frameLoop.js';
 import { NetworkPoller } from './networkPoller.js';
 import { blocksDriving } from './ui/modal.js';
 import { WarehouseRenderer, type RenderGhost, type RenderLayers } from './renderer.js';
+import type { CabRenderer } from './fpv/cabRenderer.js';
+import { cabTouchDirs } from './fpv/cabMath.js';
 import { calloutFor, rivalBubbleFor } from './render/fx.js';
 import { GhostPlanner, ghostPolyline, ghostTarget } from './render/ghost.js';
 import { cycleIndex } from './ui/fareChoice.js';
@@ -249,6 +251,7 @@ function boot(): void {
         break;
       case 'popup':
         renderer.pushCallout({ text, tone: kind === 'runSummary' ? 'good' : 'info' }, performance.now());
+        cab?.pushCallout({ text, tone: kind === 'runSummary' ? 'good' : 'info' }, performance.now());
         break;
       default:
         // 'banner' is derived from state (floor banner); 'drop' shows nothing.
@@ -328,6 +331,30 @@ function boot(): void {
 
   const rackLift = new RackLiftController();
 
+  // ---- Cab View (first-person) ----------------------------------------------
+  // three.js + the cab renderer are a separate chunk, fetched the first time the player drives in
+  // the cab. A missing WebGL context is a real error: we switch back to iso and say so.
+  let cab: CabRenderer | null = null;
+  let cabLoading = false;
+  let cabFailed = false;
+  function ensureCab(): void {
+    if (cab || cabLoading || cabFailed) return;
+    cabLoading = true;
+    import('./fpv/cabRenderer.js')
+      .then((m) => {
+        cab = new m.CabRenderer({ container: canvas.parentElement ?? document.body });
+      })
+      .catch((err: unknown) => {
+        cabFailed = true;
+        console.error('Cab View failed to start', err);
+        store.setCabView(false);
+        notify('error', 'Cab View unavailable on this device', err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        cabLoading = false;
+      });
+  }
+
   const actions: Actions = {
     select: (vid) => store.select(vid),
     takeWheel(vid) {
@@ -357,7 +384,7 @@ function boot(): void {
     interactDown() {
       if (!store.isDriving()) return;
       const me = store.myVehicle();
-      if (!me || !store.isRackLiftEnabled()) {
+      if (!me || !store.isRackLiftActive()) {
         actions.interact();
         return;
       }
@@ -371,8 +398,9 @@ function boot(): void {
     interactUp() {
       if (!store.isDriving()) return;
       const me = store.myVehicle();
-      if (!me || !store.isRackLiftEnabled()) return;
-      const res = rackLift.onKeyUp(performance.now(), me);
+      if (!me || !store.isRackLiftActive()) return;
+      // Pass the world so a hold-release commit detects an armed precision stop (Slide & Snatch).
+      const res = rackLift.onKeyUp(performance.now(), me, store.world);
       if (res.action === 'commit') {
         actions.interact(res.forkHeight);
       }
@@ -431,7 +459,8 @@ function boot(): void {
       input.setBoost(on, performance.now());
     },
     setTouchDirs(dirs) {
-      input.setTouchDirs(dirs, performance.now());
+      // Cab View: the camera turns with the truck, so the stick is throttle + steer (tank style).
+      input.setTouchDirs(store.isCabViewActive() ? cabTouchDirs(dirs) : dirs, performance.now());
     },
     releaseTouch() {
       input.releaseTouch(performance.now());
@@ -482,6 +511,18 @@ function boot(): void {
       store.ui.hudMinimal = !store.ui.hudMinimal;
       saveHudMinimal(store.ui.hudMinimal);
       store.changed();
+    },
+    toggleDriveCamera() {
+      store.toggleDriveCameraMode();
+    },
+    toggleCabView() {
+      const on = store.toggleCabView();
+      if (on && store.hudMode() !== 'driving') {
+        notify('hint', 'Cab View starts when you drive.');
+      }
+    },
+    setDriveCameraMode(mode) {
+      store.setDriveCameraMode(mode);
     },
     follow(vid) {
       store.ui.followVid = vid;
@@ -1130,7 +1171,7 @@ function boot(): void {
         const me = store.myVehicle();
         const predicting = store.isDriving() && input.predicting(now, me);
         const events = store.applyDelta(msg, { acceptMyPose: !predicting });
-        if (!predicting) input.settle();
+        if (!predicting) input.settle(store.world.t, now);
         // Routing (ui/notify.ts): my scoring/run events → world popup; my interact hints → the
         // alert line (Drive); floor-wide hints answering a Floor order → the order line (Floor).
         // The FLOOR feed reads store.events itself; everything else is dropped.
@@ -1142,9 +1183,15 @@ function boot(): void {
             store.ui.coachFare = { pts: ev.pts, at: Date.now() };
           }
           const c = calloutFor(ev, calloutVid, calloutKey);
-          if (c) renderer.pushCallout(c, now);
+          if (c) {
+            renderer.pushCallout(c, now);
+            cab?.pushCallout(c, now);
+          }
           const b = rivalBubbleFor(ev, calloutVid);
-          if (b) renderer.pushBubble(b, now);
+          if (b) {
+            renderer.pushBubble(b, now);
+            cab?.pushBubble(b, now);
+          }
           const route = routeSimEvent(ev, hudMode, calloutVid, calloutKey);
           if (route === 'alert') store.ui.alert = noticeAlert('hint', ev.text, Date.now());
           else if (route === 'orderLine') store.ui.orderNote = { text: ev.text, until: Date.now() + ORDER_NOTE_MS };
@@ -1324,11 +1371,17 @@ function boot(): void {
     }
     const predicting = Boolean(me && input.predicting(now, me));
     if (me && predicting) input.predict(store.world, me, elapsed);
-    input.tick(now, document.hasFocus());
-    const rackLiftEnabled = store.isRackLiftEnabled();
+    input.tick(now, document.hasFocus(), Boolean(me && Math.abs(me.speedNow) > 0.001));
+    const cabWanted = store.isCabViewActive();
+    if (cabWanted) ensureCab();
+    const useCab = Boolean(cabWanted && cab);
+    if (cab && cab.isVisible() !== useCab) cab.setVisible(useCab);
+    // Lift Mode: the player's toggle, or forced on in the cab. Ungraded sites → PRACTICE flashes.
+    const rackLiftEnabled = store.isRackLiftActive();
+    rackLift.practice = rackLiftEnabled && !store.isRackLiftGraded();
     rackLift.step(elapsed, store.world, me, rackLiftEnabled);
     const myPose = me && predicting ? input.visualPose(me) : null;
-    renderer.render(
+    (useCab && cab ? cab : renderer).render(
       store.world,
       {
         layers: store.layers,
@@ -1346,6 +1399,7 @@ function boot(): void {
           : null,
         rackLiftEnabled,
         rackLift,
+        driveCameraMode: store.driveCameraMode(),
       },
       now,
     );
@@ -1357,7 +1411,10 @@ function boot(): void {
   }).start();
 
   // 10 Hz input scheduler (+ 2 s keepalive while focused so the 5 s server lease holds).
-  setInterval(() => input.tick(performance.now(), document.hasFocus()), 100);
+  setInterval(() => {
+    const me = store.isDriving() ? store.myVehicle() : null;
+    input.tick(performance.now(), document.hasFocus(), Boolean(me && Math.abs(me.speedNow) > 0.001));
+  }, 100);
 
   // ---- keyboard / window --------------------------------------------------
   /** Floor-order hotkeys press the real button, so cooldown / disabled rules stay in one place. */
@@ -1453,6 +1510,12 @@ function boot(): void {
       }
       case 'hudMinimal':
         actions.toggleMinimal();
+        break;
+      case 'driveCamera':
+        actions.toggleDriveCamera?.();
+        break;
+      case 'cabView':
+        actions.toggleCabView?.();
         break;
       case 'drive':
         actions.driveFromFloor();

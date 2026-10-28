@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { quantiseCoord } from '@warehouse/protocol';
-import { createWorld, stepHuman } from '@warehouse/sim';
+import { applyClientInputSlice, createWorld, spawnPlayerVehicle, stepHuman } from '@warehouse/sim';
 import {
   applyQuantisedDelta,
   formatRunDisplayName,
@@ -238,7 +238,7 @@ describe('@warehouse/client (M4)', () => {
     expect(boostedDash.boosting).toBe(true);
   });
 
-  it('keeps predicting while vehicle is coasting past PREDICTION_GRACE_MS and smooths ack visual corrections', () => {
+  it('keeps predicting while coasting, streams at 10 Hz while moving, and keeps the visual pose continuous across acks', () => {
     const w = createWorld({ seed: 13, siteId: 'den-1' });
     const v = w.vehicles[0];
     v.human = true;
@@ -249,44 +249,29 @@ describe('@warehouse/client (M4)', () => {
     v.angle = 0;
     v.speedNow = 0;
 
-    const ctrl = new InputController(() => {}, () => true);
+    const sent: Array<{ seq: number; dt?: number; up: boolean }> = [];
+    const ctrl = new InputController((m) => sent.push(m), () => true);
     ctrl.keyDown({ code: 'KeyW' }, 0);
-    ctrl.predict(w, v, 50); // seq 1 advances 50ms
-    ctrl.keyUp({ code: 'KeyW' }, 50); // seq 2 (release)
-    ctrl.predict(w, v, 30); // seq 2 advances 30ms
+    ctrl.predict(w, v, 50);
+    ctrl.keyUp({ code: 'KeyW' }, 50); // seq 2 closes the 50 ms W slice
+    expect(sent.at(-1)).toMatchObject({ seq: 2, up: false, dt: 0.05 });
+    ctrl.predict(w, v, 30);
 
-    // Even after PREDICTION_GRACE_MS has elapsed since keyUp, predicting(now, v) stays true while coasting
+    // Still coasting: prediction stays on, and the stream keeps flowing at 10 Hz so the
+    // server never has to guess the coast on its own.
     expect(v.speedNow).toBeGreaterThan(0.1);
     expect(ctrl.predicting(50 + PREDICTION_GRACE_MS + 500, v)).toBe(true);
+    expect(ctrl.tick(150, false, true)).toBe(true);
+    expect(sent.at(-1)).toMatchObject({ seq: 3, dt: 0.03 });
+    expect(ctrl.tick(150, false, false)).toBe(false);
 
-    // First ack at server tick t=1.0 for seq=1
-    const visualBeforeAck = ctrl.visualPose(v);
-    ctrl.applyAck(w, v, {
-      type: 'ack',
-      seq: 1,
-      t: 1.0,
-      x: 10.02,
-      y: 2.5,
-      angle: 0,
-      speedNow: 0.2,
-    });
-    const visualImmediatelyAfterAck = ctrl.visualPose(v);
-    // Visual pose must be C0 continuous across ack (no instantaneous screen jump)
-    expect(visualImmediatelyAfterAck.x).toBeCloseTo(visualBeforeAck.x, 4);
-    expect(visualImmediatelyAfterAck.y).toBeCloseTo(visualBeforeAck.y, 4);
-
-    // Duplicate ack from the same server tick (t=1.0) for seq=2 must NOT erase seq=2's sub-tick dt
-    const pxBeforeSameTickAck = v.px;
-    ctrl.applyAck(w, v, {
-      type: 'ack',
-      seq: 2,
-      t: 1.0,
-      x: 10.02,
-      y: 2.5,
-      angle: 0,
-      speedNow: 0.2,
-    });
-    expect(v.px).toBeCloseTo(pxBeforeSameTickAck, 6);
+    // A genuine correction is blended: the visual pose is C0 continuous across the ack.
+    const before = ctrl.visualPose(v);
+    ctrl.applyAck(w, v, { type: 'ack', seq: 1, t: 1.0, x: 10.02, y: 2.5, angle: 0, speedNow: 0.2 });
+    const after = ctrl.visualPose(v);
+    expect(after.x).toBeCloseTo(before.x, 4);
+    expect(after.y).toBeCloseTo(before.y, 4);
+    expect(after.a).toBeCloseTo(before.a, 4);
   });
 
   it('accepts server pose on myVid when Co-Pilot autopilot is active and updates directive', () => {
@@ -492,125 +477,74 @@ describe('@warehouse/client (M4)', () => {
     expect(sent.at(-1)).toMatchObject({ up: false, boost: false });
   });
 
-  it('preserves sub-tick turn pulses across same-tick key-edge acks and post-tick server acks without reverting heading', () => {
-    const w = createWorld({ seed: 29, siteId: 'den-1', agents: 0 });
-    const v = w.vehicles[0] ?? {
-      id: 'V-H1',
-      name: 'V-H1',
-      driver: 'Tester',
-      type: 'reach' as const,
-      color: '#ff9500',
-      strategy: 'Steady' as const,
-      speed: 1,
-      cap: 1,
-      respect: 1,
-      chargeAt: 25,
-      tile: { x: 8, y: 13 },
-      px: 8.5,
-      py: 13.5,
-      angle: 0,
-      forkH: 0,
-      forkTarget: 0,
-      moveTo: null,
-      moveStart: { x: 8, y: 13 },
-      moveProgress: 1,
-      path: [],
-      orders: [],
-      cargo: [],
-      target: null,
-      battery: 100,
-      state: 'driven' as const,
-      wait: 0,
-      stuck: 0,
-      hold: null,
-      stunnedUntil: 0,
-      human: true,
-      speedNow: 3.5,
-      input: { up: true, down: false, left: false, right: false },
-      deliveries: 0,
-      onTime: 0,
-      late: 0,
-      distance: 0,
-      incidents: 0,
-      idleTicks: 0,
-      chargingTicks: 0,
-      sPts: 0,
-      sShipped: 0,
-      sIncid: 0,
-      trail: [],
-      barks: [],
-      lastContractAskAt: -999,
-      lastTacticsAskAt: -999,
-      brainError: null,
-      lastDecision: null,
-    };
-    if (!w.vehicles.includes(v)) w.vehicles.push(v);
-
-    const sent: Array<{
-      seq: number;
-      up: boolean;
-      down: boolean;
-      left: boolean;
-      right: boolean;
-      dt?: number;
-    }> = [];
-    const ctrl = new InputController((msg) => sent.push(msg), () => true);
-
-    // Hold W at t=0ms and establish baseline ack at server t=1.0
-    ctrl.keyDown({ code: 'KeyW' }, 0);
-    ctrl.predict(w, v, 100);
-    ctrl.applyAck(w, v, {
-      type: 'ack',
-      seq: 1,
-      t: 1.0,
-      x: v.px,
-      y: v.py,
-      angle: 0,
-      speedNow: v.speedNow,
-    });
-
-    // Advance 30ms straight, then tap D for 60ms (t=130ms -> t=190ms) within a single 100ms server tick
-    ctrl.predict(w, v, 30);
-    ctrl.keyDown({ code: 'KeyD' }, 130); // seq 2 (carries total KeyW hold dt = 0.13s from t=0..130ms)
-    expect(sent.at(-1)?.dt).toBeCloseTo(0.13, 2);
-
-    // Server immediately replies with pre-tick key-edge ack at t=1.0 (angle still 0!)
-    ctrl.applyAck(w, v, {
-      type: 'ack',
-      seq: 2,
-      t: 1.0,
-      x: v.px,
-      y: v.py,
-      angle: 0,
-      speedNow: v.speedNow,
-    });
-
-    ctrl.predict(w, v, 60);
-    const predictedTurnAngle = v.angle;
-    expect(predictedTurnAngle).toBeGreaterThan(0.18);
-
-    ctrl.keyUp({ code: 'KeyD' }, 190); // seq 3 (carries dt=0.06 for the D hold)
-    expect(sent.at(-1)?.dt).toBeCloseTo(0.06, 2);
-
-    // Server immediately replies with pre-tick key-edge ack for seq 3 at t=1.0 (angle STILL 0 before tick 1.1 runs!)
-    ctrl.applyAck(w, v, {
-      type: 'ack',
-      seq: 3,
-      t: 1.0,
-      x: 8.8,
-      y: 13.5,
-      angle: 0,
-      speedNow: v.speedNow,
-    });
-
-    // Critical assertion: the duplicate-timestamp pre-tick ack MUST NOT revert v.angle back to 0!
-    expect(v.angle).toBeCloseTo(predictedTurnAngle, 5);
-
-    // Calling settle() clears in-flight predicted frames as well as tail/error state
-    ctrl.keyUp({ code: 'KeyW' }, 200);
-    expect(ctrl.predicting(200 + PREDICTION_GRACE_MS + 100)).toBe(true);
-    ctrl.settle();
-    expect(ctrl.predicting(200 + PREDICTION_GRACE_MS + 100)).toBe(false);
+  it('client-timed stream: server slices reproduce client prediction so steering taps never wobble the heading', () => {
+    // Minimal client <-> server loop with jittered latency. The server applies each input's
+    // client-measured slice on arrival (as apps/site does) and acks the pose; the client
+    // reconciles. Corrections must be ~0, i.e. no left-right heading/position wobble.
+    const sw = createWorld({ seed: 29, agents: 0 });
+    const cw = createWorld({ seed: 29, agents: 0 });
+    const sv = spawnPlayerVehicle(sw, 'wob', 'Wobble')!;
+    const cv = cw.vehicles.find((x) => x.id === sv.id) ?? spawnPlayerVehicle(cw, 'wob', 'Wobble')!;
+    const hy = sw.map.hwyY[1]!;
+    for (const v of [sv, cv]) {
+      v.px = 4.5;
+      v.py = hy + 0.5;
+      v.tile = { x: 4, y: hy };
+      v.angle = 0;
+      v.speedNow = 0;
+    }
+    let seed = 7;
+    const rand = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+    const pending: Array<{ at: number; fn: () => void }> = [];
+    let up = 0;
+    let down = 0;
+    let now = 0;
+    const ctrl = new InputController(
+      (msg) => {
+        up = Math.max(up, now + 40 + (rand() - 0.5) * 30);
+        pending.push({
+          at: up,
+          fn: () => {
+            const next = { up: msg.up, down: msg.down, left: msg.left, right: msg.right, boost: Boolean(msg.boost) };
+            applyClientInputSlice(sw, sv, { ...sv.input }, msg.dt ?? 0, next);
+            const ack = { type: 'ack' as const, seq: msg.seq, t: sw.t, x: sv.px, y: sv.py, angle: sv.angle, speedNow: sv.speedNow };
+            down = Math.max(down, up + 40 + (rand() - 0.5) * 30);
+            pending.push({ at: down, fn: () => ctrl.applyAck(cw, cv, ack) });
+          },
+        });
+      },
+      () => true,
+    );
+    const held = { KeyW: false, KeyA: false, KeyD: false };
+    let maxAngleErr = 0;
+    let maxPosErr = 0;
+    let last = 0;
+    for (now = 0; now < 2400; now += 1000 / 60) {
+      const want = {
+        KeyW: now > 50,
+        KeyA: now % 700 > 400 && now % 700 < 520,
+        KeyD: now % 1100 > 800 && now % 1100 < 900,
+      };
+      for (const code of Object.keys(held) as Array<keyof typeof held>) {
+        if (want[code] !== held[code]) {
+          held[code] = want[code];
+          if (want[code]) ctrl.keyDown({ code }, now);
+          else ctrl.keyUp({ code }, now);
+        }
+      }
+      pending.sort((a, b) => a.at - b.at);
+      while (pending.length && pending[0]!.at <= now) {
+        pending.shift()!.fn();
+        maxAngleErr = Math.max(maxAngleErr, Math.abs(ctrl.errorAngle));
+        maxPosErr = Math.max(maxPosErr, Math.hypot(ctrl.errorX, ctrl.errorY));
+      }
+      if (ctrl.predicting(now, cv)) ctrl.predict(cw, cv, now - last);
+      last = now;
+      ctrl.tick(now, false, Math.abs(cv.speedNow) > 0.001);
+    }
+    expect(Math.abs(cv.angle)).toBeGreaterThan(0.1); // it really steered
+    expect(maxAngleErr).toBeLessThan(0.005);
+    expect(maxPosErr).toBeLessThan(0.01);
   });
 
   it('styles #dash .hint-key and .meter.boost buttons without native browser button chrome', () => {

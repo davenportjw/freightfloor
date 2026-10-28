@@ -11,6 +11,7 @@
  * Geometry follows the style guide: ribbed aluminium roof, side marker lamps, tandem axles,
  * rear roll-up doors, rubber dock bumpers and yellow wheel chocks while docked.
  */
+import { isoDepth } from './iso.js';
 import type { Painter, Pt } from './painter.js';
 import { interpAlpha } from './motion.js';
 
@@ -355,6 +356,14 @@ export function drawDockRig(pt: Painter, s: DrawRigState): void {
       chocked: frame.phase === 'docked',
       doorPallets: frame.phase === 'docked' ? s.doorPallets : null,
     });
+    const camRot = pt.cam?.rot ?? 0;
+    if (camRot) {
+      parts.sort(
+        (a, b) =>
+          isoDepth(a.x + a.w / 2, a.y + a.d / 2, camRot) -
+            isoDepth(b.x + b.w / 2, b.y + b.d / 2, camRot) || a.z0 - b.z0,
+      );
+    }
     for (const b of parts) pt.aaBox(b.x, b.y, b.w, b.d, b.z0, b.h, b.hex, b.stroke);
     if (frame.gear !== 0 && !s.reducedMotion) {
       const sx = x(frame.dx + TRAILER_LEN + CAB_GAP - 0.06, 0);

@@ -10,6 +10,7 @@ import {
   laneDir,
   RACK_LEVEL_FORK_TARGETS,
   RACK_LEVEL_LABELS,
+  rackLiftWindows,
   REACH,
   requiresRackLift,
   stratOf,
@@ -28,11 +29,25 @@ import {
   type RackLiftGaugeLayout,
 } from './ui/rackLiftMinigame.js';
 export { computeRackLiftGaugeLayout, type RackLiftGaugeLayout };
-import { centreOn, fitCamera, unproject, zoomAt, TH, TW, type Camera } from './render/iso.js';
-import { pickNearest, PoseTracker, type Pose } from './render/motion.js';
+import {
+  centreOn,
+  fitCamera,
+  headingUpRotation,
+  isoDepth,
+  project,
+  unproject,
+  zoomAt,
+  TH,
+  TW,
+  type Camera,
+  type DriveCameraMode,
+} from './render/iso.js';
+export { headingUpRotation, type DriveCameraMode };
+import { pickNearest, PoseTracker, wrapAngle, type Pose } from './render/motion.js';
 import { PointerSet, pinchStep, type Pt } from './render/gestures.js';
 import { watchDevicePixelRatio, watchElementSize } from './render/dpr.js';
 import { Painter } from './render/painter.js';
+import { beamTopM, isoZ } from './render/liftGeometry.js';
 import { coneTileError, dispatchRackZones } from './render/orders.js';
 import {
   arrowColor,
@@ -208,6 +223,12 @@ export interface RenderOptions {
   rackLiftEnabled?: boolean;
   /** Optional: active RackLiftController state for rendering the vertical mast height gauge & flash badge. */
   rackLift?: RackLiftController | null;
+  /**
+   * Optional: driving camera orientation mode:
+   * - `'fixed'` (default): floor stays locked in its standard isometric aspect while the forklift rotates.
+   * - `'headingUp'`: while driving, the forklift always drives straight up on screen and steering rotates the board.
+   */
+  driveCameraMode?: DriveCameraMode;
 }
 
 export interface WarehouseRendererInit {
@@ -355,8 +376,14 @@ export class WarehouseRenderer {
       this.needsFit = true;
       return;
     }
+    this.cam.rot = 0;
     Object.assign(this.cam, fitCamera(this.lastMap.w, this.lastMap.h, this.VW, this.VH));
     this.needsFit = false;
+  }
+
+  /** Current world-plane rotation angle (radians) of the isometric camera. */
+  getCameraRotation(): number {
+    return this.cam.rot ?? 0;
   }
 
   /** Zoom about the screen centre. */
@@ -613,20 +640,50 @@ export class WarehouseRenderer {
       me = world.vehicles.find((v) => v.id === this.manualFollow);
       if (!me) this.clearManualFollow();
     }
-    if (!me) this.followId = null;
-    else {
+    const headingUp = Boolean(
+      opts.myVid && me && me.id === opts.myVid && opts.driveCameraMode === 'headingUp',
+    );
+    if (!me) {
+      this.followId = null;
+      if (this.cam.rot) {
+        const curCenter = unproject(this.cam, this.VW / 2, this.VH / 2);
+        const rotDiff = wrapAngle(0 - this.cam.rot);
+        const rotAlpha = this.reducedMotion ? 1 : 1 - Math.exp(-dtMs / 65);
+        this.cam.rot = Math.abs(rotDiff) < 1e-4 ? 0 : this.cam.rot + rotDiff * rotAlpha;
+        const t = centreOn(this.cam, curCenter.x, curCenter.y, this.VW, this.VH);
+        this.cam.x = t.x;
+        this.cam.y = t.y;
+      }
+    } else {
       const p = poses.get(me.id)!;
+      const targetRot = headingUp ? headingUpRotation(p.a) : 0;
       if (this.followId !== me.id) {
         this.followId = me.id;
         if (this.cam.zoom < 0.9) this.cam.zoom = 1;
+        this.cam.rot = targetRot;
         const t = centreOn(this.cam, p.x, p.y, this.VW, this.VH);
         this.cam.x = t.x;
         this.cam.y = t.y;
       } else {
-        const t = centreOn(this.cam, p.x, p.y, this.VW, this.VH);
+        const curRot = this.cam.rot ?? 0;
+        const rotDiff = wrapAngle(targetRot - curRot);
+        if (Math.abs(rotDiff) >= 1e-4) {
+          const rotAlpha = this.reducedMotion ? 1 : 1 - Math.exp(-dtMs / 45);
+          const beforePivot = project(this.cam, p.x, p.y);
+          this.cam.rot = curRot + rotDiff * rotAlpha;
+          const afterPivot = project(this.cam, p.x, p.y);
+          this.cam.x += beforePivot[0] - afterPivot[0];
+          this.cam.y += beforePivot[1] - afterPivot[1];
+        } else {
+          this.cam.rot = targetRot;
+        }
         const alpha = this.reducedMotion ? 1 : 1 - Math.exp(-dtMs / 65);
-        this.cam.x += (t.x - this.cam.x) * alpha;
-        this.cam.y += (t.y - this.cam.y) * alpha;
+        const curCenter = unproject(this.cam, this.VW / 2, this.VH / 2);
+        const fx = curCenter.x + (p.x - curCenter.x) * alpha;
+        const fy = curCenter.y + (p.y - curCenter.y) * alpha;
+        const t = centreOn(this.cam, fx, fy, this.VW, this.VH);
+        this.cam.x = t.x;
+        this.cam.y = t.y;
       }
     }
 
@@ -653,30 +710,19 @@ export class WarehouseRenderer {
   /** Is grid point (gx, gy) on screen (with an iso-pixel margin for tall objects)? */
   private visible(gx: number, gy: number, margin = 80): boolean {
     const z = this.cam.zoom;
-    const sx = (gx - gy) * (TW / 2) * z + this.cam.x;
-    const sy = (gx + gy) * (TH / 2) * z + this.cam.y;
+    const [sx, sy] = this.painter.P(gx, gy);
     const m = margin * z + 8;
     return sx > -m && sx < this.VW + m && sy > -m && sy < this.VH + m * 1.5;
   }
 
   /** Fill an axis-aligned grid rectangle [x0, x1] x [y0, y1] on the floor plane (z=0). */
   private fillGridRect(x0: number, y0: number, x1: number, y1: number, fill: string): void {
-    const z = this.cam.zoom;
-    const hw = (TW / 2) * z;
-    const hh = (TH / 2) * z;
-    const cx = this.cam.x;
-    const cy = this.cam.y;
-    this.painter.quad(
-      (x0 - y0) * hw + cx,
-      (x0 + y0) * hh + cy,
-      (x1 - y0) * hw + cx,
-      (x1 + y0) * hh + cy,
-      (x1 - y1) * hw + cx,
-      (x1 + y1) * hh + cy,
-      (x0 - y1) * hw + cx,
-      (x0 + y1) * hh + cy,
-      fill,
-    );
+    const pt = this.painter;
+    const [sx0, sy0] = pt.P(x0, y0);
+    const [sx1, sy1] = pt.P(x1, y0);
+    const [sx2, sy2] = pt.P(x1, y1);
+    const [sx3, sy3] = pt.P(x0, y1);
+    pt.quad(sx0, sy0, sx1, sy1, sx2, sy2, sx3, sy3, fill);
   }
 
   /** Paint an isometric FREIGHT FLOOR stencil emblem flat onto the warehouse concrete apron. */
@@ -685,8 +731,6 @@ export class WarehouseRenderer {
     const ctx = this.ctx;
     const pt = this.painter;
     const z = this.cam.zoom;
-    const hw = (TW / 2) * z;
-    const hh = (TH / 2) * z;
     const rx = 1.18;
     const ry = 1.05;
     const x0 = cx - rx;
@@ -706,12 +750,13 @@ export class WarehouseRenderer {
 
     if (typeof ctx.transform !== 'function') return;
     const S = 32;
-    const sx = (cx - cy) * hw + this.cam.x;
-    const sy = (cx + cy) * hh + this.cam.y;
+    const [sx, sy] = pt.P(cx, cy);
+    const [ux, uy] = pt.P(cx + 1, cy);
+    const [vx, vy] = pt.P(cx, cy + 1);
 
     ctx.save();
     // Map local (u, v) in [-rx*S, rx*S] x [-ry*S, ry*S] directly onto the 2:1 isometric floor plane.
-    ctx.transform(hw / S, hh / S, -hw / S, hh / S, sx, sy);
+    ctx.transform((ux - sx) / S, (uy - sy) / S, (vx - sx) / S, (vy - sy) / S, sx, sy);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
@@ -744,10 +789,6 @@ export class WarehouseRenderer {
     const W = map.w;
     const H = map.h;
     const z = this.cam.zoom;
-    const hw = (TW / 2) * z;
-    const hh = (TH / 2) * z;
-    const camX = this.cam.x;
-    const camY = this.cam.y;
 
     // 1. Batch-fill warehouse regions instead of issuing W*H individual tile fill+stroke calls.
     this.fillGridRect(0, 0, W, H, vis.floorBorder);
@@ -781,12 +822,16 @@ export class WarehouseRenderer {
     // 2. Batch all floor grid lines into a single stroke call.
     ctx.beginPath();
     for (let x = 0; x <= W; x++) {
-      ctx.moveTo(x * hw + camX, x * hh + camY);
-      ctx.lineTo((x - H) * hw + camX, (x + H) * hh + camY);
+      const [sx0, sy0] = pt.P(x, 0);
+      const [sx1, sy1] = pt.P(x, H);
+      ctx.moveTo(sx0, sy0);
+      ctx.lineTo(sx1, sy1);
     }
     for (let y = 0; y <= H; y++) {
-      ctx.moveTo(-y * hw + camX, y * hh + camY);
-      ctx.lineTo((W - y) * hw + camX, (W + y) * hh + camY);
+      const [sx0, sy0] = pt.P(0, y);
+      const [sx1, sy1] = pt.P(W, y);
+      ctx.moveTo(sx0, sy0);
+      ctx.lineTo(sx1, sy1);
     }
     ctx.strokeStyle = vis.gridStroke;
     ctx.lineWidth = 0.7;
@@ -818,9 +863,12 @@ export class WarehouseRenderer {
         const ay = cy - d[1] * 0.1 + ppy * 0.15;
         const bx = cx - d[0] * 0.1 - ppx * 0.15;
         const by = cy - d[1] * 0.1 - ppy * 0.15;
-        ctx.moveTo((ax - ay) * hw + camX, (ax + ay) * hh + camY);
-        ctx.lineTo((tx - ty) * hw + camX, (tx + ty) * hh + camY);
-        ctx.lineTo((bx - by) * hw + camX, (bx + by) * hh + camY);
+        const [sax, say] = pt.P(ax, ay);
+        const [stx, sty] = pt.P(tx, ty);
+        const [sbx, sby] = pt.P(bx, by);
+        ctx.moveTo(sax, say);
+        ctx.lineTo(stx, sty);
+        ctx.lineTo(sbx, sby);
       }
     }
     ctx.stroke();
@@ -833,11 +881,15 @@ export class WarehouseRenderer {
     ctx.beginPath();
     for (const h of map.hwyY) {
       const y = h + 1;
-      ctx.moveTo((1 - y) * hw + camX, (1 + y) * hh + camY);
-      ctx.lineTo((W - 1 - y) * hw + camX, (W - 1 + y) * hh + camY);
+      const [sx0, sy0] = pt.P(1, y);
+      const [sx1, sy1] = pt.P(W - 1, y);
+      ctx.moveTo(sx0, sy0);
+      ctx.lineTo(sx1, sy1);
     }
-    ctx.moveTo((5 - 1) * hw + camX, (5 + 1) * hh + camY);
-    ctx.lineTo((5 - (H - 1)) * hw + camX, (5 + (H - 1)) * hh + camY);
+    const [hx0, hy0] = pt.P(5, 1);
+    const [hx1, hy1] = pt.P(5, H - 1);
+    ctx.moveTo(hx0, hy0);
+    ctx.lineTo(hx1, hy1);
     ctx.stroke();
     ctx.restore();
 
@@ -851,10 +903,14 @@ export class WarehouseRenderer {
       const y1 = r.y + 0.2;
       const y2 = r.y + 1.2;
       const y3 = r.y + 1;
-      ctx.moveTo((x0 - y0) * hw + camX, (x0 + y0) * hh + camY);
-      ctx.lineTo((x1 - y1) * hw + camX, (x1 + y1) * hh + camY);
-      ctx.lineTo((x1 - y2) * hw + camX, (x1 + y2) * hh + camY);
-      ctx.lineTo((x0 - y3) * hw + camX, (x0 + y3) * hh + camY);
+      const [sx0, sy0] = pt.P(x0, y0);
+      const [sx1, sy1] = pt.P(x1, y1);
+      const [sx2, sy2] = pt.P(x1, y2);
+      const [sx3, sy3] = pt.P(x0, y3);
+      ctx.moveTo(sx0, sy0);
+      ctx.lineTo(sx1, sy1);
+      ctx.lineTo(sx2, sy2);
+      ctx.lineTo(sx3, sy3);
       ctx.closePath();
     }
     ctx.fillStyle = 'rgba(15,23,42,0.09)';
@@ -951,19 +1007,25 @@ export class WarehouseRenderer {
     const ctx = this.ctx;
     const map = world.map;
     const vis = getSiteVisuals(world.siteId);
+    const rot = this.cam.rot ?? 0;
+    const depth = (gx: number, gy: number, bias = 0): number =>
+      rot ? isoDepth(gx + 0.5, gy + 0.5, rot) + bias - 1 : gx + gy + bias;
     const items: SceneItem[] = [];
     for (const r of map.racks) {
-      if (this.visible(r.x + 0.5, r.y + 0.5)) items.push({ d: r.x + r.y + 1, fn: () => drawRack(pt, r, world.siteId) });
+      if (this.visible(r.x + 0.5, r.y + 0.5)) items.push({ d: depth(r.x, r.y, 1), fn: () => drawRack(pt, r, world.siteId) });
     }
     for (const st of map.structs) {
       if (this.visible(st.x + st.w * 0.5, st.y + st.h * 0.5, 140)) {
-        items.push({ d: st.x + st.w + st.y + st.h - 1, fn: () => drawStruct(pt, st) });
+        const dStruct = rot
+          ? isoDepth(st.x + st.w * 0.5, st.y + st.h * 0.5, rot) + (st.w + st.h) * 0.5 - 1
+          : st.x + st.w + st.y + st.h - 1;
+        items.push({ d: dStruct, fn: () => drawStruct(pt, st) });
       }
     }
     for (const c of map.conveyors) {
       if (!this.visible(c.x + 0.5, c.y + 0.5)) continue;
       items.push({
-        d: c.x + c.y + 1,
+        d: depth(c.x, c.y, 1),
         fn: () => {
           pt.aaBox(c.x + 0.1, c.y, 0.8, 1, 0, 7, vis.conveyorBed, 'rgba(15,23,42,0.2)');
           pt.aaBox(c.x + 0.2, c.y, 0.6, 1, 7, 1.5, vis.conveyorRail);
@@ -980,7 +1042,7 @@ export class WarehouseRenderer {
         if (!c || !this.visible(c.x + 0.5, c.y + 0.5)) continue;
         const fy = p - Math.floor(p);
         items.push({
-          d: c.x + c.y + fy + 1,
+          d: depth(c.x, c.y + fy, 1),
           fn: () => drawConveyorItem(pt, c.x, c.y + fy * 0.6, 8.5, i, world.siteId),
         });
       }
@@ -993,7 +1055,7 @@ export class WarehouseRenderer {
         (o) => o.slot.rackId === dk.id && o.state !== 'picked' && o.state !== 'done',
       ).length;
       items.push({
-        d: 1 + dk.y + 1,
+        d: depth(1, dk.y, 1),
         fn: () =>
           drawDockRig(pt, {
             dockX: 0.95,
@@ -1019,7 +1081,7 @@ export class WarehouseRenderer {
       const cy = bay.y + 0.5;
       const dockX = map.w - 0.95;
       items.push({
-        d: map.w + bay.y + 2,
+        d: depth(map.w, bay.y, 2),
         fn: () => {
           drawDockRig(pt, {
             dockX,
@@ -1045,7 +1107,7 @@ export class WarehouseRenderer {
         (v) => isVehicleCharging(v) && Math.hypot(v.px - (c.x + 0.5), v.py - (c.y + 0.5)) < 0.9,
       );
       items.push({
-        d: c.x + c.y + 0.6,
+        d: depth(c.x, c.y, 0.6),
         fn: () => {
           if (!pt.sprite(busy ? 'charger_busy' : 'charger', c.x + 0.5, c.y + 0.85, 0)) {
             pt.aaBox(c.x + 0.3, c.y + 0.82, 0.4, 0.14, 0, 16, busy ? '#22C55E' : '#16A34A');
@@ -1059,14 +1121,14 @@ export class WarehouseRenderer {
       const s = o.slot;
       const elevated = Boolean(opts.rackLiftEnabled && isRackSlot(s));
       const level = ((s.level ?? 0) as 0 | 1 | 2);
-      const z0 = elevated ? 5 + level * 11 : 0;
+      const z0 = elevated ? isoZ(beamTopM(level)) : 0; // sits on the liftGeometry beam
       const px = elevated ? s.rx * 0.65 + s.ax * 0.35 : s.ax;
       const py = elevated ? s.ry * 0.65 + s.ay * 0.35 : s.ay;
       const isGuidedTarget =
         elevated &&
         (opts.guide?.order?.id === o.id || (opts.guide?.kind === 'pick' && opts.guide?.x === s.ax && opts.guide?.y === s.ay));
       items.push({
-        d: elevated ? Math.max(s.rx + s.ry, s.ax + s.ay) + 1.02 : s.ax + s.ay + 1,
+        d: elevated ? Math.max(depth(s.rx, s.ry, 1), depth(s.ax, s.ay, 1)) + 0.02 : depth(s.ax, s.ay, 1),
         fn: () => {
           if (isGuidedTarget) {
             pt.aaBox(px + 0.08, py + 0.08, 0.84, 0.84, Math.max(0, z0 - 1.5), 2, 'rgba(34,197,94,0.45)', '#22C55E');
@@ -1084,7 +1146,7 @@ export class WarehouseRenderer {
       const [x, y] = k.split(',').map(Number);
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       items.push({
-        d: x + y + 1,
+        d: depth(x, y, 1),
         fn: () => {
           if (!pt.sprite('cone', x + 0.5, y + 0.5, 0)) {
             pt.aaBox(x + 0.25, y + 0.25, 0.5, 0.5, 0, 2, '#334155');
@@ -1101,7 +1163,7 @@ export class WarehouseRenderer {
       const strat = stratOf(v);
       const ov = opts.overlays.get(v.id);
       items.push({
-        d: p.x + p.y + 0.5,
+        d: rot ? isoDepth(p.x, p.y, rot) - 0.5 : p.x + p.y + 0.5,
         fn: () =>
           drawVehicle(pt, v, p, {
             worldT: world.t,
@@ -1430,9 +1492,11 @@ export class WarehouseRenderer {
     const layout = computeRackLiftGaugeLayout(vw, vh, vx, vy, active);
     const { isCompact, cardX, cardY, cardW, cardH, trackX, trackY, trackW, trackH, cursorH, labelFontPx } = layout;
 
-    const targetFork = RACK_LEVEL_FORK_TARGETS[targetLevel] ?? 0.18;
+    // Bands = the server's exact grading windows (district + card multipliers when lifting).
+    const win = rackLift?.isActive() ? rackLift.windows(targetLevel) : rackLiftWindows(targetLevel);
+    const targetFork = win.targetFork;
     const fork = Math.max(0, Math.min(1, me.fork ?? 0));
-    const evalNow = evaluateRackLift(fork, targetLevel);
+    const evalNow = evaluateRackLift(fork, targetLevel, rackLift?.isActive() ? { forkLiftMul: rackLift.forkLiftMul, district: rackLift.district } : undefined);
 
     ctx.save();
     // Active outer glow ring when holding E
@@ -1475,9 +1539,9 @@ export class WarehouseRenderer {
     ctx.fill();
     ctx.stroke();
 
-    // Clean Zone band (±0.26) in high-contrast warm amber + top/bottom hairlines
-    const cleanTop = Math.max(0, 1 - Math.min(1, targetFork + 0.26)) * trackH;
-    const cleanBot = Math.min(1, 1 - Math.max(0, targetFork - 0.26)) * trackH;
+    // Clean Zone band (±cleanWindow) in high-contrast warm amber + top/bottom hairlines
+    const cleanTop = Math.max(0, 1 - Math.min(1, targetFork + win.cleanWindow)) * trackH;
+    const cleanBot = Math.min(1, 1 - Math.max(0, targetFork - win.cleanWindow)) * trackH;
     const cleanY = trackY + cleanTop;
     const cleanH = Math.max(4, cleanBot - cleanTop);
     ctx.fillStyle = 'rgba(245, 158, 11, 0.42)';
@@ -1491,9 +1555,9 @@ export class WarehouseRenderer {
     ctx.lineTo(trackX + trackW - 1.5, cleanY + cleanH);
     ctx.stroke();
 
-    // Sweet Spot bullseye band (±0.11) in vibrant emerald + #6ee7b7 1.5px stroke
-    const sweetTop = Math.max(0, 1 - Math.min(1, targetFork + 0.11)) * trackH;
-    const sweetBot = Math.min(1, 1 - Math.max(0, targetFork - 0.11)) * trackH;
+    // Sweet Spot bullseye band (±perfectWindow) in vibrant emerald + #6ee7b7 1.5px stroke
+    const sweetTop = Math.max(0, 1 - Math.min(1, targetFork + win.perfectWindow)) * trackH;
+    const sweetBot = Math.min(1, 1 - Math.max(0, targetFork - win.perfectWindow)) * trackH;
     const sweetY = trackY + sweetTop;
     const sweetH = Math.max(6, sweetBot - sweetTop);
     ctx.fillStyle = 'rgba(16, 185, 129, 0.88)';

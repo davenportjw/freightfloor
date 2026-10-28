@@ -569,6 +569,16 @@ export interface Vehicle {
   input: DriverInput;
   inputQueue?: Array<{ input: DriverInput; dt: number }>;
   inputCarriedDt?: number;
+  /**
+   * Client-timed input stream: the server applies the client's measured input slices on
+   * arrival (`applyClientInputSlice`) instead of re-timing them against its own ticks, so
+   * client prediction and the authoritative sim integrate identical input histories.
+   */
+  clientTimed?: boolean;
+  /** Game-minutes of ticks since the last client-timed input slice arrived. */
+  streamIdleDt?: number;
+  /** Game-minutes the server advanced on its own while the stream was stale (owed back). */
+  streamDebtDt?: number;
   sPts: number;
   sShipped: number;
   runMode: RunMode;

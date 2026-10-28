@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { buildMap } from '@warehouse/sim';
-import { fitCamera, project, unproject, zoomAt, ZOOM_MAX, ZOOM_MIN, type Camera } from '../src/render/iso.js';
+import {
+  centreOn,
+  fitCamera,
+  headingUpRotation,
+  project,
+  unproject,
+  zoomAt,
+  ZOOM_MAX,
+  ZOOM_MIN,
+  type Camera,
+} from '../src/render/iso.js';
 import { interpAlpha, lerpPose, pickNearest, PoseTracker, wrapAngle } from '../src/render/motion.js';
 import {
   CHARGE_CUE_PERIOD_MS,
@@ -328,6 +338,62 @@ describe('render/scenery & multi-site visual themes', () => {
     expect(drawnImages[0]!.dw).toBeCloseTo(96 * 1.25, 5);
     expect(drawnImages[1]!.sx).toBe(192);
     expect(drawnImages[1]!.sy).toBe(288);
+  });
+
+  it('headingUpRotation keeps the forklift driving straight up on screen while rotating the board', async () => {
+    const { screenVectorToWorldAngle } = await import('../src/input.js');
+    const { ClientStore } = await import('../src/state.js');
+
+    for (const heading of [0, Math.PI / 2, Math.PI, -Math.PI / 2, 0.73, -2.15]) {
+      const rot = headingUpRotation(heading);
+      const cam: Camera = { x: 0, y: 0, zoom: 1.2, rot };
+      const px = 14.5;
+      const py = 22.25;
+      const c = centreOn(cam, px, py, 1280, 720);
+      cam.x = c.x;
+      cam.y = c.y;
+
+      const [cx, cy] = project(cam, px, py);
+      expect(cx).toBeCloseTo(640, 6);
+      expect(cy).toBeCloseTo(360, 6);
+
+      // A point 1 tile ahead of the forklift projects straight UP on screen (same X, smaller Y)
+      const [fx, fy] = project(cam, px + Math.cos(heading), py + Math.sin(heading));
+      expect(fx).toBeCloseTo(cx, 6);
+      expect(fy).toBeLessThan(cy - 15);
+
+      // A point 1 tile to the right of the forklift (heading + pi/2) projects straight RIGHT on screen (larger X, same Y)
+      const [rx, ry] = project(
+        cam,
+        px + Math.cos(heading + Math.PI / 2),
+        py + Math.sin(heading + Math.PI / 2),
+      );
+      expect(rx).toBeGreaterThan(cx + 30);
+      expect(ry).toBeCloseTo(cy, 6);
+
+      // project / unproject round-trips under arbitrary board rotation
+      for (const [gx, gy] of [
+        [0, 0],
+        [px, py],
+        [31.4, 18.9],
+      ]) {
+        const [sx, sy] = project(cam, gx, gy);
+        const u = unproject(cam, sx, sy);
+        expect(u.x).toBeCloseTo(gx, 6);
+        expect(u.y).toBeCloseTo(gy, 6);
+      }
+
+      // Pushing the thumbstick straight up (dx=0, dy=-30) in headingUp mode maps to the vehicle's forward heading
+      const stickUpAngle = screenVectorToWorldAngle(0, -30, rot);
+      expect(Math.abs(wrapAngle(stickUpAngle - heading))).toBeLessThan(0.005);
+    }
+
+    const store = new ClientStore();
+    expect(store.driveCameraMode()).toBe('fixed');
+    expect(store.toggleDriveCameraMode()).toBe('headingUp');
+    expect(store.driveCameraMode()).toBe('headingUp');
+    store.setDriveCameraMode('fixed');
+    expect(store.driveCameraMode()).toBe('fixed');
   });
 });
 

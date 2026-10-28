@@ -38,6 +38,11 @@ ol { margin: 4px 0 0 20px; padding: 0; }
 /* ---- stage ---- */
 #stage { position: fixed; inset: 0; }
 canvas#world { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+/* Cab View (first-person): WebGL scene + 2D overlay stacked over the iso canvas. */
+canvas.cab-canvas,
+canvas.cab-overlay { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+canvas.cab-canvas { cursor: default; }
+canvas.cab-overlay { pointer-events: none; }
 
 /* ---- glass ---- */
 .hud {
@@ -486,11 +491,21 @@ canvas#world { width: 100%; height: 100%; display: block; cursor: grab; touch-ac
 }
 .intro-lift-toggle {
   flex-shrink: 0;
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 700;
-  padding: 6px 12px;
+  padding: 4px 10px;
+  min-height: 0;
+  line-height: 1.3;
   border-radius: 999px;
 }
+.intro-camera__btns {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.intro-camera .intro-lift-mode__info { flex: 1 1 260px; }
+.help-card.intro-modal .intro-lift-mode { padding: 8px 12px; gap: 8px; }
+.help-card.intro-modal .intro-start-btn { padding: 9px 22px; font-size: 15px; }
 .intro-lift-toggle.active,
 .intro-lift-toggle[aria-pressed='true'] {
   background: var(--blue);

@@ -3,7 +3,7 @@
  * Modules read the store and call actions; they never touch the socket directly.
  */
 import type { AgentDirective, DifficultyLevel, DispatchParams, ManagerOp, RunMode, SiteId } from '@warehouse/protocol';
-import type { ClientStore, DrawerTab, FlyoutId, LeaderboardModalTab, UiOverlay } from '../state.js';
+import type { ClientStore, DrawerTab, DriveCameraMode, FlyoutId, LeaderboardModalTab, UiOverlay } from '../state.js';
 import type { RenderLayers } from '../renderer.js';
 import type { NoticeKind } from './notify.js';
 
@@ -64,6 +64,12 @@ export interface Actions {
   setChatTarget(target: 'copilot' | 'floor'): void;
   /** HUD Full / Minimal (V). */
   toggleMinimal(): void;
+  /** Toggle driving camera orientation between Fixed Floor ('fixed') and Forklift Up / Rotate Floor ('headingUp') (R). */
+  toggleDriveCamera?(): void;
+  /** Cab View (first-person) on / off. */
+  toggleCabView?(): void;
+  /** Set driving camera orientation mode ('fixed' | 'headingUp'). */
+  setDriveCameraMode?(mode: DriveCameraMode): void;
   /** Floor camera: follow `vid` (null = free camera). */
   follow(vid: string | null): void;
   /** Floor camera: pan to a tile. */
