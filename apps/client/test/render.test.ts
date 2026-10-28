@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { buildMap } from '@warehouse/sim';
 import {
+  anchorOn,
   centreOn,
   fitCamera,
+  HEADING_UP_ANCHOR_Y,
   headingUpRotation,
   project,
   unproject,
@@ -424,6 +426,18 @@ describe('render/scenery & multi-site visual themes', () => {
     expect(store.driveCameraMode()).toBe('headingUp');
     store.setDriveCameraMode('fixed');
     expect(store.driveCameraMode()).toBe('fixed');
+  });
+
+  it('anchorOn places the heading-up forklift in the lower quarter of the screen', () => {
+    expect(HEADING_UP_ANCHOR_Y).toBeGreaterThan(0.75);
+    expect(HEADING_UP_ANCHOR_Y).toBeLessThan(1);
+    const cam: Camera = { x: 0, y: 0, zoom: 1.4, rot: headingUpRotation(0.9) };
+    const t = anchorOn(cam, 12.5, 7.25, 640, 720 * HEADING_UP_ANCHOR_Y);
+    const [sx, sy] = project({ ...cam, ...t }, 12.5, 7.25);
+    expect(sx).toBeCloseTo(640, 6);
+    expect(sy).toBeCloseTo(720 * HEADING_UP_ANCHOR_Y, 6);
+    // centreOn is anchorOn at the viewport centre.
+    expect(centreOn(cam, 12.5, 7.25, 1280, 720)).toEqual(anchorOn(cam, 12.5, 7.25, 640, 360));
   });
 });
 

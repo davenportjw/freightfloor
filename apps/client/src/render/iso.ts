@@ -119,9 +119,27 @@ export function centreOn(
   viewW: number,
   viewH: number,
 ): { x: number; y: number } {
+  return anchorOn(cam, gx, gy, viewW / 2, viewH / 2);
+}
+
+/**
+ * Vertical screen anchor (fraction of viewport height) for the driven forklift in
+ * `'headingUp'` camera mode. The forklift sits in the lower quarter of the screen so the
+ * view shows mostly what is ahead of it rather than behind it.
+ */
+export const HEADING_UP_ANCHOR_Y = 0.78;
+
+/** Camera position that places grid point (gx, gy) at screen point (sx, sy) at the current zoom. */
+export function anchorOn(
+  cam: Camera,
+  gx: number,
+  gy: number,
+  sx: number,
+  sy: number,
+): { x: number; y: number } {
   const [rx, ry] = rotateGrid(gx, gy, cam.rot ?? 0);
   return {
-    x: viewW / 2 - (((rx - ry) * TW) / 2) * cam.zoom,
-    y: viewH / 2 - (((rx + ry) * TH) / 2) * cam.zoom,
+    x: sx - (((rx - ry) * TW) / 2) * cam.zoom,
+    y: sy - (((rx + ry) * TH) / 2) * cam.zoom,
   };
 }

@@ -30,8 +30,10 @@ import {
 } from './ui/rackLiftMinigame.js';
 export { computeRackLiftGaugeLayout, type RackLiftGaugeLayout };
 import {
+  anchorOn,
   centreOn,
   fitCamera,
+  HEADING_UP_ANCHOR_Y,
   headingUpRotation,
   isoDepth,
   project,
@@ -389,6 +391,12 @@ export class WarehouseRenderer {
     this.needsFit = false;
   }
 
+  /**
+   * Smoothed vertical screen anchor (fraction of viewport height) for the follow target:
+   * 0.5 (centred) normally, eased toward `HEADING_UP_ANCHOR_Y` in heading-up drive mode.
+   */
+  private followAnchorY = 0.5;
+
   /** Current world-plane rotation angle (radians) of the isometric camera. */
   getCameraRotation(): number {
     return this.cam.rot ?? 0;
@@ -653,6 +661,7 @@ export class WarehouseRenderer {
     );
     if (!me) {
       this.followId = null;
+      this.followAnchorY = 0.5;
       if (this.cam.rot) {
         const curCenter = unproject(this.cam, this.VW / 2, this.VH / 2);
         const rotDiff = wrapAngle(0 - this.cam.rot);
@@ -665,11 +674,14 @@ export class WarehouseRenderer {
     } else {
       const p = poses.get(me.id)!;
       const targetRot = headingUp ? headingUpRotation(p.a) : 0;
+      // Heading-up mode looks ahead: the forklift sits in the lower quarter of the screen.
+      const targetAnchorY = headingUp ? HEADING_UP_ANCHOR_Y : 0.5;
       if (this.followId !== me.id) {
         this.followId = me.id;
         if (this.cam.zoom < 0.9) this.cam.zoom = 1;
         this.cam.rot = targetRot;
-        const t = centreOn(this.cam, p.x, p.y, this.VW, this.VH);
+        this.followAnchorY = targetAnchorY;
+        const t = anchorOn(this.cam, p.x, p.y, this.VW / 2, this.VH * targetAnchorY);
         this.cam.x = t.x;
         this.cam.y = t.y;
       } else {
@@ -686,10 +698,15 @@ export class WarehouseRenderer {
           this.cam.rot = targetRot;
         }
         const alpha = this.reducedMotion ? 1 : 1 - Math.exp(-dtMs / 65);
-        const curCenter = unproject(this.cam, this.VW / 2, this.VH / 2);
+        const anchorSy = this.VH * this.followAnchorY;
+        const curCenter = unproject(this.cam, this.VW / 2, anchorSy);
         const fx = curCenter.x + (p.x - curCenter.x) * alpha;
         const fy = curCenter.y + (p.y - curCenter.y) * alpha;
-        const t = centreOn(this.cam, fx, fy, this.VW, this.VH);
+        // Ease the screen anchor itself so toggling camera modes slides rather than snaps.
+        const anchorAlpha = this.reducedMotion ? 1 : 1 - Math.exp(-dtMs / 180);
+        this.followAnchorY += (targetAnchorY - this.followAnchorY) * anchorAlpha;
+        if (Math.abs(targetAnchorY - this.followAnchorY) < 1e-4) this.followAnchorY = targetAnchorY;
+        const t = anchorOn(this.cam, fx, fy, this.VW / 2, this.VH * this.followAnchorY);
         this.cam.x = t.x;
         this.cam.y = t.y;
       }
