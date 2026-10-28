@@ -264,6 +264,10 @@ export class WarehouseRenderer {
   /** Smoothed world time for the east-dock truck cycle (avoids 10 Hz stepping). */
   private readonly dockClock = new SimClock();
   private poses = new Map<string, Pose>();
+  /** Poses drawn last frame (motion diagnostics via `?motionlog=1`). */
+  renderedPoses(): ReadonlyMap<string, Pose> {
+    return this.poses;
+  }
 
   private VW = 0;
   private VH = 0;

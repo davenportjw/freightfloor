@@ -11,7 +11,7 @@ import {
   ZOOM_MIN,
   type Camera,
 } from '../src/render/iso.js';
-import { interpAlpha, lerpPose, pickNearest, PoseTracker, wrapAngle } from '../src/render/motion.js';
+import { INTERP_DELAY_MS, interpAlpha, lerpPose, pickNearest, PoseTracker, wrapAngle } from '../src/render/motion.js';
 import {
   CHARGE_CUE_PERIOD_MS,
   CHARGE_RATE_PER_MIN,
@@ -108,37 +108,50 @@ describe('render/motion', () => {
     expect(interpAlpha(1000, 1000, 0)).toBe(1);
   });
 
-  it('PoseTracker slides between the last two world.t values and drops removed vehicles', () => {
+  it('PoseTracker holds the newest pose when data stops and drops removed vehicles', () => {
     const tr = new PoseTracker();
     const v = { id: 'FL-01', px: 0, py: 0, angle: 0 };
     tr.update(1, 0, [v]);
     expect(tr.pose('FL-01', 0)).toEqual({ x: 0, y: 0, a: 0 });
     v.px = 1;
-    tr.update(1.1, 100, [v]); // new server tick at t=100ms
-    const halfway = tr.pose('FL-01', 150)!;
-    expect(halfway.x).toBeGreaterThan(0);
-    expect(halfway.x).toBeLessThan(1);
-    expect(tr.pose('FL-01', 10_000)!.x).toBe(1);
+    tr.update(1.1, 100, [v]);
+    const later = tr.pose('FL-01', 100 + INTERP_DELAY_MS)!;
+    expect(later.x).toBeGreaterThan(0);
+    expect(later.x).toBeLessThanOrEqual(1);
+    expect(tr.pose('FL-01', 10_000)!.x).toBe(1); // no extrapolation past the newest sample
     tr.update(1.2, 200, []);
     expect(tr.pose('FL-01', 200)).toBeNull();
   });
 
-  it('PoseTracker midpoint spline smooths 2-tick AI step cadence and continues seamlessly past 100ms', () => {
+  it('PoseTracker renders on the server-time timeline: packet arrival jitter never makes a vehicle surge or stall', () => {
     const tr = new PoseTracker();
     const v = { id: 'FL-02', px: 10, py: 5, angle: 0 };
-    tr.update(1.0, 0, [v]);
-    // Simulate stepAI's 2-tick tile-center cadence: 0.75 step then 0.25 step (average 0.5 tiles/tick)
-    v.px = 10.75;
-    tr.update(1.1, 100, [v]);
-    v.px = 11.0;
-    tr.update(1.2, 200, [v]);
-    // At t=200ms (u=0), pose starts at mid of [10, 10.75] = 10.375
-    // At t=300ms (u=1), pose reaches mid of [10.75, 11.0] = 10.875 (exact 0.50 tile advance!)
-    expect(tr.pose('FL-02', 200)!.x).toBeCloseTo(10.375, 5);
-    expect(tr.pose('FL-02', 250)!.x).toBeCloseTo(10.625, 5);
-    expect(tr.pose('FL-02', 300)!.x).toBeCloseTo(10.875, 5);
-    // If next WebSocket delta arrives at 316ms (7th 60 Hz frame), pose keeps advancing past u=1 instead of freezing
-    expect(tr.pose('FL-02', 316)!.x).toBeGreaterThan(10.875);
+    // Live-like arrival jitter (ms) per 100 ms server tick, and stepAI's alternating
+    // 0.75 / 0.25 tile-centre cadence (0.5 tiles per tick on average).
+    const jitter = [0, 60, 5, 95, 10, 0, 80, 20, 45, 0, 70, 15, 90, 5, 30, 0, 85, 10, 50, 0];
+    const arrivals: Array<{ at: number; t: number; x: number }> = [];
+    let x = 10;
+    for (let k = 0; k < 60; k++) {
+      arrivals.push({ at: k * 100 + jitter[k % jitter.length]!, t: 1 + k * 0.1, x });
+      x += k % 2 === 0 ? 0.75 : 0.25;
+    }
+    arrivals.sort((p, q) => p.at - q.at);
+    const steps: number[] = [];
+    let i = 0;
+    let prev: number | null = null;
+    for (let now = 0; now < 5800; now += 1000 / 60) {
+      while (i < arrivals.length && arrivals[i]!.at <= now) {
+        v.px = arrivals[i]!.x;
+        tr.update(arrivals[i]!.t, arrivals[i]!.at, [v]);
+        i++;
+      }
+      tr.update(arrivals[Math.max(0, i - 1)]!.t, now, [v]);
+      const p = tr.pose('FL-02', now)!;
+      if (prev !== null && now > 1000) steps.push(p.x - prev);
+      prev = p.x;
+    }
+    const perFrame = 0.5 / 6; // 0.5 tiles per 100 ms at 60 Hz
+    for (const s of steps) expect(Math.abs(s - perFrame)).toBeLessThan(perFrame * 0.15);
   });
 
   it('pickNearest returns the closest pose within the radius, else null', () => {

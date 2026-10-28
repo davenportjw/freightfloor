@@ -1347,7 +1347,7 @@ function boot(): void {
   // No per-welcome refit: the renderer refits itself when the map (site or size) changes.
   const ghostPlanner = new GhostPlanner();
   /** Opt-in per-frame motion diagnostics (`?motionlog=1`): rendered pose, ack error, camera. */
-  const motionLog: Array<Record<string, number | boolean>> | null = new URLSearchParams(location.search).has('motionlog')
+  const motionLog: Array<Record<string, unknown>> | null = new URLSearchParams(location.search).has('motionlog')
     ? []
     : null;
   if (motionLog) (window as unknown as { __motion: typeof motionLog }).__motion = motionLog;
@@ -1425,6 +1425,11 @@ function boot(): void {
         cy: cam.y,
         cr: cam.rot ?? 0,
         s: me.speedNow,
+        rivals: useCab
+          ? 0
+          : [...renderer.renderedPoses()]
+              .filter(([id]) => id !== me.id)
+              .map(([id, rp]) => [id, Math.round(rp.x * 1e4) / 1e4, Math.round(rp.y * 1e4) / 1e4]),
       });
       if (motionLog.length > 20_000) motionLog.splice(0, 10_000);
     }
