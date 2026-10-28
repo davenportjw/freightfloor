@@ -1346,6 +1346,11 @@ function boot(): void {
   let lastFrame = performance.now();
   // No per-welcome refit: the renderer refits itself when the map (site or size) changes.
   const ghostPlanner = new GhostPlanner();
+  /** Opt-in per-frame motion diagnostics (`?motionlog=1`): rendered pose, ack error, camera. */
+  const motionLog: Array<Record<string, number | boolean>> | null = new URLSearchParams(location.search).has('motionlog')
+    ? []
+    : null;
+  if (motionLog) (window as unknown as { __motion: typeof motionLog }).__motion = motionLog;
   /** Ghost planner path (sim findPath on our local World) to the highlighted option / guide target. */
   function ghostFor(me: Vehicle, pose: { x: number; y: number } | null): RenderGhost | null {
     const p = pose ?? { x: me.px, y: me.py };
@@ -1403,6 +1408,26 @@ function boot(): void {
       },
       now,
     );
+    if (motionLog && me) {
+      const cam = renderer.cameraSnapshot();
+      const p = myPose ?? { x: me.px, y: me.py, a: me.angle };
+      motionLog.push({
+        t: now,
+        el: elapsed,
+        pred: predicting,
+        x: p.x,
+        y: p.y,
+        a: p.a,
+        ex: input.errorX,
+        ey: input.errorY,
+        ea: input.errorAngle,
+        cx: cam.x,
+        cy: cam.y,
+        cr: cam.rot ?? 0,
+        s: me.speedNow,
+      });
+      if (motionLog.length > 20_000) motionLog.splice(0, 10_000);
+    }
   }
   // try/finally around every frame: one bad frame logs (throttled) instead of killing the loop.
   guardedFrame(frame, {

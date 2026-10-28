@@ -255,6 +255,10 @@ export class WarehouseRenderer {
   private readonly onSelectVehicle: (vid: string | null) => void;
   private readonly onClickTile: (x: number, y: number) => void;
   private readonly cam: Camera = { x: 0, y: 0, zoom: 1 };
+  /** Read-only camera snapshot (motion diagnostics via `?motionlog=1`). */
+  cameraSnapshot(): Readonly<Camera> {
+    return { ...this.cam };
+  }
   private readonly painter: Painter;
   private readonly tracker = new PoseTracker();
   /** Smoothed world time for the east-dock truck cycle (avoids 10 Hz stepping). */
