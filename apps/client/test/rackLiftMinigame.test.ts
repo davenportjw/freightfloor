@@ -352,6 +352,33 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
       expect(liftChip.hidden).toBe(true);
       expect(liftChip.style.display).toBe('none');
       expect(eRow.children[1]?.textContent).toBe('Pick up pallet, drop at bay, or start charging');
+
+      // Camera card buttons follow the Lift Mode pattern: one click flips the store and the label.
+      const camBtn = overlay.queryAll((e) => e.getAttribute('data-role') === 'drive-camera-mode-toggle')[0]!;
+      const cabBtn = overlay.queryAll((e) => e.getAttribute('data-role') === 'intro-cab-view-toggle')[0]!;
+      const camBox = overlay.queryAll((e) => e.getAttribute('data-role') === 'intro-camera')[0]!;
+      store.setDriveCameraMode('fixed');
+      store.setCabView(false);
+      helpMod.update();
+      expect(camBtn.textContent).toBe('Fixed Floor');
+      expect(cabBtn.textContent).toBe('Cab View: OFF');
+      expect(camBox.dataset.enabled).toBe('false');
+      camBtn.click();
+      expect(store.driveCameraMode()).toBe('headingUp');
+      expect(camBtn.textContent).toBe('Forklift Up');
+      expect(camBtn.getAttribute('aria-pressed')).toBe('true');
+      expect(camBox.dataset.enabled).toBe('true');
+      cabBtn.click();
+      expect(store.isCabViewPref()).toBe(true);
+      expect(cabBtn.textContent).toBe('Cab View: ON');
+      expect(cabBtn.getAttribute('aria-pressed')).toBe('true');
+      camBtn.click();
+      cabBtn.click();
+      expect(store.driveCameraMode()).toBe('fixed');
+      expect(store.isCabViewPref()).toBe(false);
+      expect(camBtn.textContent).toBe('Fixed Floor');
+      expect(cabBtn.textContent).toBe('Cab View: OFF');
+      expect(camBox.dataset.enabled).toBe('false');
     } finally {
       (globalThis as Record<string, unknown>).document = prevDoc;
     }

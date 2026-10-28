@@ -328,9 +328,10 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       'data-role': 'drive-camera-mode-toggle',
       'aria-pressed': getDriveCameraMode() === 'headingUp' ? 'true' : 'false',
     },
+    // Same pattern as the Lift Mode button: flip the store directly, then resync this card.
     onClick: () => {
-      if (typeof ctx.actions.toggleDriveCamera === 'function') ctx.actions.toggleDriveCamera();
-      else if (typeof ctx.store.toggleDriveCameraMode === 'function') ctx.store.toggleDriveCameraMode();
+      const next = getDriveCameraMode() === 'headingUp' ? 'fixed' : 'headingUp';
+      ctx.store.setDriveCameraMode(next);
       syncDriveCameraHelp();
     },
   });
@@ -342,6 +343,14 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     driveCameraBtn.textContent = headingUp ? 'Forklift Up' : 'Fixed Floor';
     driveCameraBtn.setAttribute('aria-pressed', headingUp ? 'true' : 'false');
     driveCameraBtn.classList.toggle('active', headingUp);
+    syncCameraBox();
+  };
+
+  // Highlight the Camera card like the Lift Mode card whenever either camera option is on.
+  const syncCameraBox = (): void => {
+    const on = getDriveCameraMode() === 'headingUp' || ctx.store.isCabViewPref();
+    cameraBox.dataset.enabled = on ? 'true' : 'false';
+    cameraBox.classList.toggle('active', on);
   };
 
   // Cab View: first-person from the forklift seat (auto-enables Lift Mode while in the cab).
@@ -355,9 +364,10 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       'data-role': 'intro-cab-view-toggle',
       'aria-pressed': ctx.store.isCabViewPref() ? 'true' : 'false',
     },
+    // Same pattern as the Lift Mode button: flip the store directly, then resync this card.
     onClick: () => {
-      if (typeof ctx.actions.toggleCabView === 'function') ctx.actions.toggleCabView();
-      else ctx.store.toggleCabView();
+      const next = !ctx.store.isCabViewPref();
+      ctx.store.setCabView(next);
       syncCabViewHelp();
     },
   });
@@ -393,8 +403,10 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     cabViewBtn.textContent = `Cab View: ${on ? 'ON' : 'OFF'}`;
     cabViewBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
     cabViewBtn.classList.toggle('active', on);
+    syncCameraBox();
   };
   syncDriveCameraHelp();
+  syncCabViewHelp();
 
   let lastRackLift: boolean | null = null;
   let lastMobile: boolean | null = null;
