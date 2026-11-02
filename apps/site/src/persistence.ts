@@ -1,11 +1,12 @@
 import { FieldValue, Firestore, Timestamp } from '@google-cloud/firestore';
-import { PubSub } from '@google-cloud/pubsub';
+import { PubSub, type Message, type Subscription } from '@google-cloud/pubsub';
 import type { ArmorReasonCode } from '@warehouse/armor';
-import type {
-  DecisionKind,
-  Phase,
-  SiteId,
-  Transfer,
+import {
+  GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS,
+  type DecisionKind,
+  type Phase,
+  type SiteId,
+  type Transfer,
 } from '@warehouse/protocol';
 import type { WorldSnapshotV5 } from '@warehouse/sim';
 import type { BrainHealth } from './brain.js';
@@ -125,12 +126,32 @@ export function formatUtcDateKey(nowMs: number = Date.now()): string {
   return new Date(nowMs).toISOString().slice(0, 10);
 }
 
+function positiveEnvNumber(name: string, fallback: number): number {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+}
+
+/** USD per 1M input tokens (`GEMINI_PRICE_INPUT_PER_M`, default Vertex list price $0.30). */
+export const GEMINI_PRICE_INPUT_PER_M = positiveEnvNumber(
+  'GEMINI_PRICE_INPUT_PER_M',
+  GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS.input,
+);
+/** USD per 1M output tokens (`GEMINI_PRICE_OUTPUT_PER_M`, default Vertex list price $2.50). */
+export const GEMINI_PRICE_OUTPUT_PER_M = positiveEnvNumber(
+  'GEMINI_PRICE_OUTPUT_PER_M',
+  GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS.output,
+);
+
 /**
- * Estimates Gemini 3.5 Flash-Lite cost in USD from input/output token counts.
- * Uses $0.075 / 1M input tokens and $0.30 / 1M output tokens with a minimum floor of $0.000005 per call.
+ * Estimates Gemini 3.5 Flash-Lite cost in USD from input/output token counts at
+ * `GEMINI_PRICE_INPUT_PER_M` / `GEMINI_PRICE_OUTPUT_PER_M` (default $0.30 / $2.50 per 1M),
+ * with a minimum floor of $0.000005 per call.
  */
 export function estimateGeminiFlashCostUsd(tokensIn: number, tokensOut: number): number {
-  const raw = (Math.max(0, tokensIn) * 0.075 + Math.max(0, tokensOut) * 0.3) / 1_000_000;
+  const raw =
+    (Math.max(0, tokensIn) * GEMINI_PRICE_INPUT_PER_M +
+      Math.max(0, tokensOut) * GEMINI_PRICE_OUTPUT_PER_M) /
+    1_000_000;
   return Math.max(0.000005, raw);
 }
 
@@ -163,6 +184,14 @@ export interface PersistenceStore {
   getBudget(nowMs?: number): Promise<BudgetDayDoc>;
   setBudgetForTesting(overrides: Partial<BudgetDayDoc>, nowMs?: number): Promise<void>;
   publishTransfer(transfer: Transfer): Promise<string>;
+  /**
+   * Starts a streaming pull on this site's filtered transfer subscription. `onTransfer`
+   * receives each decoded JSON payload and returns `true` to ack (applied, duplicate or
+   * permanently invalid) or `false` to nack for redelivery. Returns a stop function.
+   * Pull (instead of push) means queued transfers never wake a scaled-to-zero shard; they
+   * wait in the subscription until the shard next boots for a human.
+   */
+  subscribeTransfers?(siteId: SiteId, onTransfer: (payload: unknown) => boolean): () => Promise<void>;
   /** Flush any locally buffered budget usage to durable storage (no-op for in-memory stores). */
   flushUsage?(): Promise<void>;
 }
@@ -792,7 +821,82 @@ export class CloudPersistenceStore implements PersistenceStore {
       },
     });
   }
+
+  /**
+   * Streaming pull on `TRANSFERS_SUBSCRIPTION` (default `site-transfers-<siteId><suffix>`).
+   * A non-retryable stream error (missing subscription, IAM) closes the stream; it is logged
+   * once per failure streak and reopened with capped exponential backoff (5 s .. 5 min).
+   */
+  subscribeTransfers(
+    siteId: SiteId,
+    onTransfer: (payload: unknown) => boolean,
+  ): () => Promise<void> {
+    const name = process.env.TRANSFERS_SUBSCRIPTION || `site-transfers-${siteId}${this.suffix}`;
+    let stopped = false;
+    let current: Subscription | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let backoffMs = TRANSFER_PULL_MIN_BACKOFF_MS;
+    let failureStreak = 0;
+
+    const open = (): void => {
+      if (stopped) return;
+      const sub = this.pubsub.subscription(name, {
+        flowControl: { maxMessages: 16, allowExcessMessages: false },
+      });
+      current = sub;
+      sub.on('message', (message: Message) => {
+        failureStreak = 0;
+        backoffMs = TRANSFER_PULL_MIN_BACKOFF_MS;
+        let payload: unknown;
+        try {
+          payload = JSON.parse(message.data.toString('utf8'));
+        } catch {
+          console.error(`[persistence] transfer ${message.id} on ${name} is not JSON; acked and dropped`);
+          message.ack();
+          return;
+        }
+        let ack = false;
+        try {
+          ack = onTransfer(payload);
+        } catch (err) {
+          console.error(
+            `[persistence] transfer ${message.id} handler threw; nacked: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        if (ack) message.ack();
+        else message.nack();
+      });
+      sub.on('error', (err: Error) => {
+        failureStreak += 1;
+        if (failureStreak === 1) {
+          console.error(`[persistence] transfer pull on ${name} failed (retrying with backoff): ${err.message}`);
+        }
+        sub.removeAllListeners();
+        void sub.close().catch(() => undefined);
+        if (current === sub) current = null;
+        if (stopped) return;
+        retryTimer = setTimeout(open, backoffMs);
+        retryTimer.unref?.();
+        backoffMs = Math.min(TRANSFER_PULL_MAX_BACKOFF_MS, backoffMs * 2);
+      });
+    };
+
+    open();
+    return async () => {
+      stopped = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      const sub = current;
+      current = null;
+      if (sub) {
+        sub.removeAllListeners('message');
+        await sub.close();
+      }
+    };
+  }
 }
+
+const TRANSFER_PULL_MIN_BACKOFF_MS = 5_000;
+const TRANSFER_PULL_MAX_BACKOFF_MS = 5 * 60_000;
 
 function sumDelta(a: UsageDelta, b: UsageDelta): UsageDelta {
   return {

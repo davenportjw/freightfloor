@@ -117,3 +117,27 @@ variable "model_armor_rpm_quota" {
   type        = number
   default     = 120
 }
+
+variable "site_cpu" {
+  description = "vCPU limit per site shard (week-1 p95 was <5% of 2 vCPU; validated at 32 drivers + 20 agents)"
+  type        = string
+  default     = "1"
+}
+
+variable "site_memory" {
+  description = "Memory limit per site shard (week-1 p95 was <=330 MiB)"
+  type        = string
+  default     = "1Gi"
+}
+
+variable "billing_account_id" {
+  description = "Cloud Billing account that owns the project (for the budget alert)"
+  type        = string
+  default     = "XXXXXX-XXXXXX-XXXXXX"
+}
+
+variable "monthly_budget_usd" {
+  description = "Monthly project budget; alerts billing admins at 50/90/100% actual and 100% forecast"
+  type        = number
+  default     = 400
+}

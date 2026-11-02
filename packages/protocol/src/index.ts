@@ -5,6 +5,18 @@ export const PROTOCOL_VERSION = 1;
 export const MAX_WS_FRAME_BYTES = 4096;
 export const TILE_QUANT_SCALE = 32;
 
+/**
+ * `permessage-deflate` settings (RFC 7692, `ws` server option shape) for both WebSocket hops
+ * (site → lobby proxy, lobby → browser). Browsers negotiate it automatically. Level 1 keeps
+ * CPU low on the 10 Hz delta stream while context takeover still exploits frame-to-frame
+ * redundancy; frames under `threshold` bytes are sent uncompressed.
+ */
+export const WS_PER_MESSAGE_DEFLATE = {
+  zlibDeflateOptions: { level: 1, memLevel: 8 },
+  threshold: 256,
+  concurrencyLimit: 10,
+} as const;
+
 // ============================================================================
 // 1. Site IDs, Phases, Difficulty & Constants
 // ============================================================================
@@ -1604,61 +1616,52 @@ export interface JsonSchemaObject {
   description?: string;
 }
 
+/**
+ * Vertex AI list price for `gemini-3.5-flash-lite` (USD per 1M tokens), used by the site's
+ * daily budget ledger and the loadtest pilot budget. Sites can override via
+ * `GEMINI_PRICE_INPUT_PER_M` / `GEMINI_PRICE_OUTPUT_PER_M` when Google changes pricing.
+ */
+export const GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS = { input: 0.3, output: 2.5 } as const;
+
+/**
+ * Structured-output schemas for agent decisions. Property descriptions are deliberately
+ * minimal: the schema is billed as prompt tokens on every call (~130 tokens with verbose
+ * descriptions vs ~60 lean), and the prompt already states each field's bounds.
+ */
 export const GEMINI_RESPONSE_SCHEMAS: Record<DecisionKind, JsonSchemaObject> = {
   contract: {
     type: 'OBJECT',
     properties: {
-      orderIds: {
-        type: 'ARRAY',
-        items: { type: 'STRING' },
-        description: 'IDs of 1 or 2 open orders selected by this vehicle.',
-      },
-      reason: {
-        type: 'STRING',
-        description: 'Concise explanation (<= 120 chars) of why these orders fit the persona.',
-      },
+      orderIds: { type: 'ARRAY', items: { type: 'STRING' } },
+      reason: { type: 'STRING', description: 'Max 40 chars.' },
     },
     required: ['orderIds', 'reason'],
   },
   hazard: {
     type: 'OBJECT',
     properties: {
-      choice: {
-        type: 'STRING',
-        enum: HAZARD_CHOICES,
-        description: 'Whether to reroute around the spill, wait for it to clear, or push through.',
-      },
-      reason: {
-        type: 'STRING',
-        description: 'Concise explanation (<= 120 chars) for the hazard decision.',
-      },
+      choice: { type: 'STRING', enum: HAZARD_CHOICES },
+      reason: { type: 'STRING', description: 'Max 40 chars.' },
     },
     required: ['choice', 'reason'],
   },
   tactics: {
     type: 'OBJECT',
     properties: {
-      speed: { type: 'NUMBER', description: 'Speed multiplier between 0.8 and 1.35.' },
-      buffer: { type: 'INTEGER', description: 'Reservation lookahead buffer tiles (1..3).' },
-      respect: { type: 'NUMBER', description: 'Lane reservation yield probability (0.3..1.0).' },
-      chargeAt: { type: 'NUMBER', description: 'Battery threshold percentage to seek a charger (10..35).' },
-      batch: { type: 'INTEGER', description: 'Pallets per trip (1 or 2).' },
-      note: { type: 'STRING', description: 'Concise explanation (<= 120 chars) of the retuned tactics.' },
+      speed: { type: 'NUMBER' },
+      buffer: { type: 'INTEGER' },
+      respect: { type: 'NUMBER' },
+      chargeAt: { type: 'NUMBER' },
+      batch: { type: 'INTEGER' },
+      note: { type: 'STRING', description: 'Max 40 chars.' },
     },
     required: ['speed', 'buffer', 'respect', 'chargeAt', 'batch', 'note'],
   },
   cards: {
     type: 'OBJECT',
     properties: {
-      keep: {
-        type: 'ARRAY',
-        items: { type: 'STRING' },
-        description: '1 to 3 dealt card IDs to keep for this shift.',
-      },
-      reason: {
-        type: 'STRING',
-        description: 'Optional brief reason for keeping these cards.',
-      },
+      keep: { type: 'ARRAY', items: { type: 'STRING' } },
+      reason: { type: 'STRING', description: 'Max 40 chars.' },
     },
     required: ['keep'],
   },

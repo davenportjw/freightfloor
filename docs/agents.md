@@ -25,11 +25,11 @@ const res = await ai.models.generateContent({
   model: env.GEMINI_MODEL, // 'gemini-3.5-flash-lite'
   contents: [{ role: 'user', parts: [{ text: renderRequest(req) }] }],
   config: {
-    cachedContent: personaCache[req.persona],
     responseMimeType: 'application/json',
-    responseSchema: schemaFor(req.kind),
-    temperature: 0.4,
-    maxOutputTokens: 200,
+    responseSchema: GEMINI_RESPONSE_SCHEMAS[req.kind], // lean: descriptions are billed as prompt tokens
+    temperature: 0.2,
+    maxOutputTokens: 80, // decisions are ~20-35 tokens; reason/note <= 40 chars
+    thinkingConfig: { thinkingBudget: 0 },
   },
 });
 ```
@@ -63,7 +63,7 @@ Each AI agent is assigned one of the 5 warehouse `ARCHETYPES` (`packages/sim/src
 | **Opportunist** | `1.1` | `2` tiles | `0.7` | `20%` | `1` | `poach: true`, Preempts P0 | Grabs the highest-value contract even if another agent already holds a soft claim on it. |
 | **Strategist** | `1.0` | `2` tiles | `0.9` | `22%` | `1` | `tunable: true` | Retunes its own tactical parameters (`speed`, `buffer`, `respect`, `chargeAt`, `batch`) via Gemini at shift boundaries and every game-hour. |
 
-Because the system instructions, warehouse rules, and persona definitions are static across calls for a given archetype, `apps/site` caches the persona prompt prefix per archetype (`personaCache[req.persona]`) and uses compact top-6 pre-scored JSON candidates (`thinkingBudget: 0`, `maxOutputTokens: 120`) to keep calls small and fast.
+Because the system instructions, warehouse rules, and persona definitions are static across calls for a given archetype, `apps/site` caches the persona prompt prefix per archetype (`personaCache[req.persona]`) and uses compact top-6 pre-scored JSON candidates (`thinkingBudget: 0`, `maxOutputTokens: 80`, `reason`/`note` ≤ 40 chars, description-free response schemas) to keep calls small and fast. Measured on a real contract prompt: ~546 → ~501 input and ~36 → ~30 output tokens per call (~11% cheaper).
 
 ---
 
@@ -110,9 +110,9 @@ Each site server (`AgentBrainScheduler`) manages an asynchronous brain request q
 To enforce a strict cost ceiling across all running shards:
 - **Shared Daily Cap**: All sites share a single global agent brain budget of **$12.50/day** (`AGENT_DAILY_BUDGET_USD = 12.5`) tracked in Firestore at `budget/{yyyy-mm-dd}`.
 - **Dedicated Typed-Order Slice**: Natural-language player commands (`nlCommand`) draw from an isolated **$1.50/day** cap (`NL_COMMAND_DAILY_BUDGET_USD = 1.5`) on the global ledger so that an attacker spamming `nlCommand` can never starve the warehouse AI agents' operational brain budget.
-- **1-Minute Transactional Reservations**: Each active site reserves spend in 1-minute blocks via a Firestore transaction on `budget/{yyyy-mm-dd}`, reconciling actual spend from measured `usageMetadata` token counts × Gemini 3.5 Flash-Lite token pricing (`$0.075 / 1M` input tokens, `$0.30 / 1M` output tokens).
+- **Buffered Ledger Increments**: Each site accumulates spend in memory and flushes it every 10 s to `budget/{yyyy-mm-dd}` with `FieldValue.increment`, pricing measured `usageMetadata` token counts at the Vertex list price for Gemini 3.5 Flash-Lite (`$0.30 / 1M` input, `$2.50 / 1M` output; `GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS`, overridable via `GEMINI_PRICE_INPUT_PER_M` / `GEMINI_PRICE_OUTPUT_PER_M`). The pre-2026-11-02 rates (`$0.075` / `$0.30`) under-counted real spend about 5x.
 - **Overflow Site Scaling**:
-  - `den-1` runs 20 agents (`IDLE_POLICY=run`).
+  - `den-1` runs 20 agents (`IDLE_POLICY=break`).
   - Overflow sites (`slc-2`, `phx-3`, `abq-4`) run 12 agents and enter `break` when empty, dropping their Gemini token burn to zero.
 
 ---

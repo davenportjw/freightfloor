@@ -312,7 +312,7 @@ describe('site hardening regressions', () => {
       }
     }
     const store = new FlakyStore();
-    const { server } = await boot({ persistence: store });
+    const { server } = await boot({ persistence: store, transferPublishRetryMs: 0 });
     server.world.outboundTransfers.push({
       id: 'xfer-flaky-1',
       fromSite: 'den-1',
@@ -328,6 +328,87 @@ describe('site hardening regressions', () => {
     await server.stepTick();
     expect(server.world.outboundTransfers.some((t) => t.id === 'xfer-flaky-1')).toBe(false);
     expect(store.publishedTransfers.some((p) => p.transfer.id === 'xfer-flaky-1')).toBe(true);
+  });
+
+  it('backs off failed transfer publishes and logs one line per failure streak, not per tick', async () => {
+    let attempts = 0;
+    class DownStore extends InMemoryPersistenceStore {
+      override async publishTransfer(): Promise<string> {
+        attempts++;
+        throw new Error('5 NOT_FOUND: Resource not found (resource=site-transfers-cab).');
+      }
+    }
+    const { server } = await boot({ persistence: new DownStore() });
+    server.world.outboundTransfers.push({
+      id: 'xfer-down-1',
+      fromSite: 'den-1',
+      toSite: 'slc-2',
+      orderRef: '1',
+      sku: 'SKU-A-1',
+      value: 10,
+      shippedAt: 1,
+      carrier: 'FL-01',
+    });
+    const errors: string[] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(' '));
+    };
+    try {
+      for (let i = 0; i < 20; i++) await server.stepTick();
+    } finally {
+      console.error = origError;
+    }
+    expect(attempts).toBe(1); // default 5 s backoff: no retry within 20 immediate ticks
+    const publishLogs = errors.filter((e) => e.includes('transfer'));
+    expect(publishLogs).toHaveLength(1);
+    expect(publishLogs[0]).not.toContain('\n    at '); // message only, no stack trace
+    expect(server.world.outboundTransfers.map((t) => t.id)).toEqual(['xfer-down-1']);
+  });
+
+  it('applies transfers pulled from the subscription and acks duplicates idempotently', async () => {
+    let handler: ((payload: unknown) => boolean) | null = null;
+    let stopped = false;
+    class PullStore extends InMemoryPersistenceStore {
+      subscribeTransfers(siteId: string, onTransfer: (payload: unknown) => boolean) {
+        expect(siteId).toBe('den-1');
+        handler = onTransfer;
+        return async () => {
+          stopped = true;
+        };
+      }
+    }
+    const { server } = await boot({ persistence: new PullStore(), subscribeTransfers: true });
+    expect(handler).not.toBeNull();
+    const xfer: Transfer = {
+      id: 'xfer-pull-1',
+      fromSite: 'slc-2',
+      toSite: 'den-1',
+      orderRef: '7',
+      sku: 'SKU-P-7',
+      value: 12,
+      shippedAt: 1,
+      carrier: 'FL-02',
+    };
+    const before = server.world.totals.transfersIn;
+    expect(handler!(xfer)).toBe(true);
+    expect(handler!(xfer)).toBe(true); // redelivery is a no-op
+    expect(handler!({ id: 'garbage' })).toBe(true); // poison message is acked, not retried forever
+    expect(server.world.totals.transfersIn).toBe(before + 1);
+    await server.gracefulShutdown();
+    expect(stopped).toBe(true);
+  });
+
+  it('does not subscribe annexes or test servers unless subscribeTransfers is set', async () => {
+    let subscribed = 0;
+    class PullStore extends InMemoryPersistenceStore {
+      subscribeTransfers() {
+        subscribed++;
+        return async () => undefined;
+      }
+    }
+    await boot({ persistence: new PullStore() });
+    expect(subscribed).toBe(0);
   });
 
   it('drops the vehicle when ws rejects a frame above the protocol maxPayload', async () => {
@@ -785,6 +866,61 @@ describe('site hardening regressions', () => {
     expect(sets[0].opts).toEqual({ merge: true });
     expect(sets[0].data.nlCommandSpentUsd).not.toBe(0.5); // a FieldValue.increment sentinel
     await store.close();
+  });
+
+  it('CloudPersistenceStore pulls the per-site transfer subscription with ack/nack and reopens after errors', async () => {
+    const { EventEmitter } = await import('node:events');
+    const opened: Array<{ name: string; sub: InstanceType<typeof EventEmitter> & { closed: boolean } }> = [];
+    const fakePubSub = {
+      subscription: (name: string) => {
+        const sub = Object.assign(new EventEmitter(), {
+          closed: false,
+          close: async () => {
+            sub.closed = true;
+          },
+        });
+        opened.push({ name, sub });
+        return sub;
+      },
+    };
+    const store = new CloudPersistenceStore({
+      firestore: {} as Firestore,
+      pubsub: fakePubSub as unknown as PubSub,
+      suffix: '',
+      budgetFlushIntervalMs: 0,
+    });
+    const seen: unknown[] = [];
+    const stop = store.subscribeTransfers('slc-2', (p) => {
+      seen.push(p);
+      return (p as { ok?: boolean }).ok !== false;
+    });
+    expect(opened.map((o) => o.name)).toEqual(['site-transfers-slc-2']);
+    const mkMsg = (data: string) => {
+      const m = { id: 'm1', data: Buffer.from(data), acked: 0, nacked: 0, ack() { m.acked++; }, nack() { m.nacked++; } };
+      return m;
+    };
+    const good = mkMsg('{"id":"x1"}');
+    const rejected = mkMsg('{"ok":false}');
+    const notJson = mkMsg('not-json');
+    opened[0].sub.emit('message', good);
+    opened[0].sub.emit('message', rejected);
+    opened[0].sub.emit('message', notJson);
+    expect(good.acked).toBe(1);
+    expect(rejected.nacked).toBe(1);
+    expect(notJson.acked).toBe(1); // poison is dropped, not redelivered
+    expect(seen).toHaveLength(2);
+
+    const origError = console.error;
+    console.error = () => undefined;
+    try {
+      opened[0].sub.emit('error', new Error('5 NOT_FOUND'));
+    } finally {
+      console.error = origError;
+    }
+    expect(opened[0].sub.closed).toBe(true);
+    await stop(); // stopping during backoff cancels the reopen
+    await new Promise((r) => setTimeout(r, 10));
+    expect(opened).toHaveLength(1);
   });
 
   // Bug 12 — GEMINI_MODEL validation.

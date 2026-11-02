@@ -29,7 +29,8 @@ RUN_LIVE=1 npm run test:redteam -w @warehouse/site
 **Site secrets & config** (`@warehouse/site`):
 - The site also has no literal HMAC fallback. Outside Cloud Run, a missing `TICKET_SECRET` / `TICKET_HMAC_KEY` / `TICKET_HMAC_SECRET` gives a random per-process dev secret (with a warning). On Cloud Run it is fatal.
 - `GEMINI_MODEL` must be one of `ALLOWED_GEMINI_MODELS` (`gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-4-argon`). Any other value aborts startup. Unset means `gemini-3.5-flash-lite`.
-- `PUBSUB_PUSH_SERVICE_ACCOUNT` (set by Terraform to `warehouse-pubsub-push@`) is the only identity whose OIDC token `/internal/transfer` accepts. `TRANSFER_PUSH_AUDIENCE` optionally adds accepted audiences (comma-separated) (default `https://<host>/internal/transfer`, which matches the Pub/Sub default of the push endpoint URL).
+- Inbound transfers arrive by **streaming pull** on `site-transfers-<siteId>` (override with `TRANSFERS_SUBSCRIPTION`); see `docs/architecture.md`. The legacy push route remains: `PUBSUB_PUSH_SERVICE_ACCOUNT` (set by Terraform to `warehouse-pubsub-push@`) is the only identity whose OIDC token `/internal/transfer` accepts. `TRANSFER_PUSH_AUDIENCE` optionally adds accepted audiences (comma-separated) (default `https://<host>/internal/transfer`, which matches the Pub/Sub default of the push endpoint URL).
+- `GEMINI_PRICE_INPUT_PER_M` / `GEMINI_PRICE_OUTPUT_PER_M` (USD per 1M tokens, default Vertex list price `0.30` / `2.50` from `GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS`) price every call on the `budget/{yyyy-mm-dd}` ledger. Before 2026-11-02 the ledger used `0.075` / `0.30` and under-counted real spend about 5x, so the daily cap never engaged.
 - Shard failures in message handlers, timers and async paths are logged as `[<siteId>] <what> failed: …` and the shard keeps serving. Watch for these lines and for `unhandledRejection` / `uncaughtException` in Cloud Logging.
 
 **`TRUSTED_PROXY_HOPS`** (`warehouse-lobby`, default `1`, range `0..4`): number of right-most `X-Forwarded-For` hops the lobby trusts when resolving client IPs for rate limiting. `1` matches the Cloud Run `*.run.app` front end; use `2` if an external HTTPS load balancer sits in front of Cloud Run.
@@ -57,11 +58,12 @@ terraform -chdir=infra apply -var="project_id=davenporter-freightfloor" -var="su
 ```
 
 This provisions:
-- **4 Private Site Shards (Pattern A — Scale-to-Zero Shards)**: `site-den-1` (`min=0`, `IDLE_POLICY=break`, 20 agents) and `site-slc-2`, `site-phx-3`, `site-abq-4` (`min=0`, `IDLE_POLICY=break`, 12 agents). All shards sleep at \$0 when empty and wake on demand when a player joins via the lobby. Restricted via Cloud Run IAM (`roles/run.invoker`) exclusively to `warehouse-lobby` and `warehouse-pubsub-push` with `REQUIRE_PROXY_AUTH=1`.
+- **4 Private Site Shards (Pattern A — Scale-to-Zero Shards)**: `site-den-1` (`min=0`, `IDLE_POLICY=break`, 20 agents) and `site-slc-2`, `site-phx-3`, `site-abq-4` (`min=0`, `IDLE_POLICY=break`, 12 agents), each **1 vCPU / 1 GiB** (`site_cpu` / `site_memory`, `cpu_idle=false`, `startup_cpu_boost=true`). All shards sleep at \$0 when empty and wake on demand when a player joins via the lobby; inbound Pub/Sub transfers no longer wake them (pull delivery). Restricted via Cloud Run IAM (`roles/run.invoker`) exclusively to `warehouse-lobby` with `REQUIRE_PROXY_AUTH=1`.
 - **Opt-In Rack Height Fork-Lift Minigame Feature Flag**: Controlled via Terraform `enable_rack_lift_minigame = false` (default disabled), which sets `ENABLE_RACK_LIFT_MINIGAME="0"` (`FEATURE_RACK_LIFT_MINIGAME`) on `@warehouse/site` and advertises `welcome.limits.rackLiftMinigame` to clients. Clients can also toggle or override the minigame per-browser via `?rackLift=1|0` URL query params, `localStorage['warehouse.feature.rackLift']`, or the **☰ → Settings (`⚙`)** flyout toggle.
 - **Dispatcher's Call Feature Flag (default on)**: Terraform `enable_dispatchers_call = true` sets `ENABLE_DISPATCHERS_CALL="1"` on `@warehouse/site` (`0|false|off|no` disables it cleanly; unset = on) and advertises `welcome.limits.dispatchersCall`. When on, each Blitz run may get one Gemini question (`gemini-3.5-flash-lite` or the `GEMINI_MODEL` override, Vertex AI `global` via ADC, 4 s timeout, strict response schema, numeric telemetry only). Usage is charged to the daily `agent` budget category; an exhausted budget, model error or invalid output skips the call for that run with a logged error (no fallback question). Players can opt out with the **☰ → Settings** toggle, `?dispatch=1|0` or `localStorage['warehouse.feature.dispatchersCall']`; the client then sends `dispatchersCallPref { enabled: false }`.
 - **Public Lobby & WebSocket Gateway Service**: `warehouse-lobby` (`min=1` in prod / `0` for `-stg`, `max=2`, `cpu_idle=true` request-based CPU billing), the only service with `allUsers` invoker access, serving static assets instantly and proxying `/ws?site=<siteId>` to the private site shards.
-- **Pub/Sub**: `site-transfers` topic, `site-transfers-dlq`, and 4 filtered OIDC push subscriptions (`attributes.toSite = "<siteId>"`).
+- **Pub/Sub**: `site-transfers` topic, `site-transfers-dlq`, and 4 filtered **pull** subscriptions (`attributes.toSite = "<siteId>"`, 7-day retention, no expiry) with `roles/pubsub.subscriber` for `warehouse-site@` on each.
+- **Cost visibility (prod only)**: BigQuery dataset `billing_export` (US) as the Cloud Billing export destination, and the `google_billing_budget` "freightfloor monthly" budget (`monthly_budget_usd`, default \$400; emails billing admins at 50/90/100% actual and 100% forecast).
 - **Secret Manager**: `ticket-hmac-key` with a generated 64-character secret version used for both join tickets and `x-warehouse-proxy` headers.
 - **Firestore**: 7-day TTL policy on `journal.expireAt`.
 
@@ -179,7 +181,8 @@ In accordance with the resource lifecycle policy, every staging load test or smo
 | **Loadtest Gemini Pilots** | **$1.50 / job run** (`PILOT_BUDGET_USD=1.5`) | In-process token counter inside `tools/loadtest`; pilots hold when cap is reached. |
 | **Overflow Shards (`slc-2`, `phx-3`, `abq-4`)** | `min_instance_count = 0`, `IDLE_POLICY = break`, 12 agents | Automatically enter factory break after 2 minutes with 0 players, freezing the clock and stopping all Gemini calls so Cloud Run scales to zero. |
 | **Lobby (`warehouse-lobby`)** | `min_instance_count = 1` (prod; `0` for `-stg`), max 2 | One warm instance avoids the ~10 s cold start on a first visit (pick-up-and-play). Together with `den-1` (`min = 1`), it is the only always-on cost. |
-| **Artifact Registry (`warehouse`)** | Keep last **5 image versions** | Enforced via Terraform `cleanup_policies` (`keep-recent-5`). |
+| **Artifact Registry (`warehouse`)** | Keep last **5 image versions**, delete anything older than **7 days** | Terraform `cleanup_policies` `keep-recent-5` (KEEP, wins) + `delete-older-than-7d` (DELETE). A KEEP rule alone deletes nothing. |
+| **Project spend** | **\$400 / month** budget alert | `google_billing_budget.monthly` (50/90/100% actual, 100% forecast). Detailed cost data lands in BigQuery `billing_export` (see §6). |
 | **Firestore `journal` Collection** | **7-day TTL** | Enforced via Terraform `google_firestore_field.journal_ttl` on `expireAt`. |
 
 ---
@@ -229,3 +232,36 @@ curl -fsS "http://127.0.0.1:4319/blast-radius?target=SimEngine.step&hops=3"
 # Run the AST sidecar unit & integration test suite
 npm run test:ast
 ```
+
+---
+
+## 6. Cloud Billing Export & Cost Review
+
+Terraform creates the destination dataset `davenporter-freightfloor:billing_export` (US multi-region), but Google only lets you switch the export on in the console:
+
+1. Console → **Billing** → account `XXXXXX-XXXXXX-XXXXXX` → **Billing export** → **BigQuery export**.
+2. **Detailed usage cost** → *Edit settings* → project `davenporter-freightfloor`, dataset `billing_export` → *Save*. Optionally enable **Standard usage cost** and **Pricing** to the same dataset.
+3. Data starts flowing within a few hours (detailed export has no historical backfill; standard export backfills the current and previous month). Tables: `gcp_billing_export_resource_v1_XXXXXX_XXXXXX_XXXXXX` (detailed) and `gcp_billing_export_v1_…` (standard).
+
+Weekly spend by service:
+
+```sql
+SELECT service.description AS service, ROUND(SUM(cost) + SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)), 2) AS net_usd
+FROM `davenporter-freightfloor.billing_export.gcp_billing_export_resource_v1_XXXXXX_XXXXXX_XXXXXX`
+WHERE usage_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+GROUP BY service ORDER BY net_usd DESC;
+```
+
+Cost levers already applied (2026-11-02 review of week 1, Oct 24–31, est. ~\$130/week):
+
+| Lever | Change |
+|---|---|
+| Gemini ledger pricing | `estimateGeminiFlashCostUsd` uses \$0.30 / \$2.50 per 1M (was \$0.075 / \$0.30, ~5x under-count). |
+| Gemini tokens per call | Lean `GEMINI_RESPONSE_SCHEMAS` (descriptions are billed as prompt tokens, ~-45 input tokens), `reason`/`note` ≤ 40 chars, `maxOutputTokens: 80`. |
+| Site compute | 1 vCPU / 1 GiB shards (was 2 vCPU / 4 GiB at <5% p95 CPU), startup CPU boost. |
+| Idle shard wakeups | Pull transfer subscriptions instead of push, so idle shards can scale to zero. |
+| Egress | `permessage-deflate` on site→lobby and lobby→browser WebSockets (~-92% bytes). |
+| Lobby min instance | Removed the `cab` traffic tags. A tagged revision keeps its own `min_instance_count`, which had kept a second lobby instance warm 24/7. Avoid leaving tags on `min=1` services. |
+| Firestore | Ranked leaderboard query + 30 s cache; callsign point lookups instead of a 500-doc scan per new player. |
+| Log volume | Transfer publish retries back off 5 s and log once per failure streak (a stale `site-transfers-cab` revision logged 1.26M stack-trace lines in one day). |
+

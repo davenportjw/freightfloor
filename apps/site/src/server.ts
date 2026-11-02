@@ -5,6 +5,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import {
   ClientMessageSchema,
   MAX_WS_FRAME_BYTES,
+  WS_PER_MESSAGE_DEFLATE,
   PROXY_HEADER_NAME,
   SITE_IDS,
   TransferSchema,
@@ -128,6 +129,8 @@ export const MAX_SOCKETS = 300;
 const STREAM_BUDGET_START_MIN = 0.3;
 const STREAM_BUDGET_MAX_MIN = 0.6;
 export const MAX_DRIVERS = 32;
+/** Backoff before retrying a failed outbound transfer publish (queued transfers are kept). */
+export const TRANSFER_PUBLISH_RETRY_MS = 5_000;
 export const FREE_RANGE_SOFT_CAP = 26;
 export const RELOCATION_BONUS_PTS = 75;
 export const RELOCATION_COOLDOWN_MS = 90_000;
@@ -678,6 +681,16 @@ export interface SiteServerOptions {
    * Default: `createPubSubPushVerifier()` (google-auth-library `verifyIdToken`).
    */
   verifyTransferPushToken?: TransferPushTokenVerifier;
+  /**
+   * Pull inbound transfers from this shard's Pub/Sub subscription via
+   * `persistence.subscribeTransfers` (production main server only; default false).
+   */
+  subscribeTransfers?: boolean;
+  /**
+   * Delay before retrying a failed outbound transfer publish
+   * (default `TRANSFER_PUBLISH_RETRY_MS`; `0` retries on the next tick).
+   */
+  transferPublishRetryMs?: number;
 }
 
 export interface SiteServerInstance {
@@ -793,7 +806,13 @@ export async function createSiteServer(
   // `maxPayload` is a hard memory guard against huge frames (ws closes those at the protocol
   // level). The 4 KB application limit stays in `checkFrameSize`, which replies with a
   // readable error and a clean 1009 close.
-  const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES });
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: WS_MAX_PAYLOAD_BYTES,
+    // The lobby's upstream `ws` client offers permessage-deflate, so the site→lobby hop
+    // (the largest egress line item) is compressed too.
+    perMessageDeflate: WS_PER_MESSAGE_DEFLATE,
+  });
   const clients = new Set<ConnectedClient>();
   const pendingEvents: SimEvent[] = [];
   const relocationCooldownUntil = new Map<string, number>();
@@ -2001,12 +2020,25 @@ export async function createSiteServer(
     );
   }
 
+  let transferPublishRetryAtMs = 0;
+  let transferPublishFailures = 0;
+  let transferPublishLastLogMs = 0;
+  const transferPublishRetryMs = Math.max(
+    0,
+    options.transferPublishRetryMs ?? TRANSFER_PUBLISH_RETRY_MS,
+  );
+
   /**
    * Publishes queued outbound transfers in order. Each one leaves `world.outboundTransfers`
-   * only after Pub/Sub accepts it; on failure it (and everything behind it) stays queued for
-   * the next tick, so a failed publish never loses a pallet.
+   * only after Pub/Sub accepts it; on failure it (and everything behind it) stays queued, so
+   * a failed publish never loses a pallet. After a failure, retries wait
+   * `TRANSFER_PUBLISH_RETRY_MS` instead of hammering Pub/Sub on every 10 Hz tick, and the
+   * error is logged once per failure streak plus a one-line summary at most once a minute
+   * (a persistent NOT_FOUND once produced >1M multi-line stack-trace log entries per day).
    */
   async function publishOutboundTransfers(): Promise<void> {
+    const now = Date.now();
+    if (now < transferPublishRetryAtMs) return;
     while (world.outboundTransfers.length > 0) {
       const xfer = world.outboundTransfers[0];
       const wireTransfer: Transfer = {
@@ -2022,8 +2054,24 @@ export async function createSiteServer(
       try {
         await persistence.publishTransfer(wireTransfer);
       } catch (err) {
-        logAsyncError(`transfer ${xfer.id} publish (re-queued)`, err);
+        transferPublishFailures += 1;
+        const failNow = Date.now();
+        transferPublishRetryAtMs = failNow + transferPublishRetryMs;
+        const msg = err instanceof Error ? err.message : String(err);
+        if (transferPublishFailures === 1) {
+          console.error(`[${siteId}] transfer ${xfer.id} publish failed (re-queued): ${msg}`);
+          transferPublishLastLogMs = failNow;
+        } else if (failNow - transferPublishLastLogMs >= 60_000) {
+          console.error(
+            `[${siteId}] transfer publish still failing (${transferPublishFailures} attempts, ${world.outboundTransfers.length} queued): ${msg}`,
+          );
+          transferPublishLastLogMs = failNow;
+        }
         return;
+      }
+      if (transferPublishFailures > 0) {
+        console.log(`[${siteId}] transfer publish recovered after ${transferPublishFailures} failed attempts`);
+        transferPublishFailures = 0;
       }
       const idx = world.outboundTransfers.indexOf(xfer);
       if (idx >= 0) world.outboundTransfers.splice(idx, 1);
@@ -3606,6 +3654,18 @@ export async function createSiteServer(
       }
     }
 
+    const result = ingestTransferPayload(rawTransfer);
+    return reply.code(result.code).send(result.body);
+  });
+
+  /**
+   * Validates and applies one decoded transfer payload (shared by the legacy push route and
+   * the streaming-pull subscriber). Duplicates are idempotent via `receivedTransferIds`.
+   */
+  function ingestTransferPayload(rawTransfer: unknown): {
+    code: number;
+    body: Record<string, unknown>;
+  } {
     if (rawTransfer && typeof rawTransfer === 'object') {
       const candidate = rawTransfer as Record<string, unknown>;
       if (typeof candidate.orderRef === 'number') {
@@ -3615,31 +3675,51 @@ export async function createSiteServer(
 
     const parsed = TransferSchema.safeParse(rawTransfer);
     if (!parsed.success) {
-      return reply.code(400).send({
-        ok: false,
-        error: 'Invalid Transfer payload',
-        issues: parsed.error.issues,
-      });
+      return {
+        code: 400,
+        body: { ok: false, error: 'Invalid Transfer payload', issues: parsed.error.issues },
+      };
     }
 
     const transfer = parsed.data;
     if (transfer.toSite !== siteId) {
-      return reply.code(202).send({
-        ok: true,
-        ignored: true,
-        reason: `Transfer is addressed to ${transfer.toSite}, not ${siteId}`,
-      });
+      return {
+        code: 202,
+        body: {
+          ok: true,
+          ignored: true,
+          reason: `Transfer is addressed to ${transfer.toSite}, not ${siteId}`,
+        },
+      };
     }
 
     const createdOrder = receiveTransfer(world, transfer);
     pruneReceivedTransferIds(world);
-    return reply.code(200).send({
-      ok: true,
-      duplicate: createdOrder === null,
-      orderId: createdOrder?.id ?? null,
-      transfersIn: world.totals.transfersIn,
-    });
-  });
+    return {
+      code: 200,
+      body: {
+        ok: true,
+        duplicate: createdOrder === null,
+        orderId: createdOrder?.id ?? null,
+        transfersIn: world.totals.transfersIn,
+      },
+    };
+  }
+
+  // Streaming pull of this shard's transfer subscription (main server only, never annexes).
+  // Every outcome is acked except a handler exception: invalid payloads are poison, and
+  // duplicates / mis-addressed messages are already handled.
+  const transferStore: PersistenceStore = persistence;
+  const stopTransferSubscription =
+    options.subscribeTransfers && transferStore.subscribeTransfers
+      ? transferStore.subscribeTransfers(siteId, (payload: unknown) => {
+          const result = ingestTransferPayload(payload);
+          if (result.code === 400) {
+            console.error(`[${siteId}] dropped invalid transfer payload from subscription`);
+          }
+          return true;
+        })
+      : null;
 
   app.post('/internal/wake', async (req, reply) => {
     const query = (req.query || {}) as { site?: string };
@@ -3782,6 +3862,15 @@ export async function createSiteServer(
       await annex.close();
     }
     annexServers.clear();
+
+    // Stop pulling transfers before the final snapshot so every acked transfer is in it.
+    if (stopTransferSubscription) {
+      try {
+        await stopTransferSubscription();
+      } catch (err) {
+        logAsyncError('transfer subscription close', err);
+      }
+    }
 
     if (tickTimer) clearInterval(tickTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);

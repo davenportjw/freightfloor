@@ -67,6 +67,8 @@ Returns aggregated live status for all warehouse shards (from Firestore heartbea
 
 ## 2. Client-to-Site WebSocket Messages (`ClientMessageSchema`)
 
+> **Transport compression**: both WebSocket hops (browser ↔ lobby, lobby ↔ site) negotiate `permessage-deflate` (RFC 7692) with `WS_PER_MESSAGE_DEFLATE` (zlib level 1, context takeover, frames under 256 bytes uncompressed). Message schemas are unchanged; clients that do not offer the extension get uncompressed frames.
+
 All WebSocket frames sent from client to site must be UTF-8 JSON strings `<= 4096` bytes (`4 KB`) matching the discriminated union on `type`:
 
 ```ts
@@ -321,7 +323,7 @@ See `docs/gameplay.md` §3c for the rules (window, situations, 8 s pick, scoring
 
 ## 4. Site-to-Site Pub/Sub Transfer Message (`TransferSchema`)
 
-Published to the `site-transfers` Pub/Sub topic when an outbound network order is dropped at an east transfer bay (`→ network`), and delivered via push subscription to `POST /internal/transfer` on the destination shard.
+Published to the `site-transfers` Pub/Sub topic when an outbound network order is dropped at an east transfer bay (`→ network`), and delivered via the destination shard's filtered **pull** subscription (`site-transfers-<siteId>`, streaming pull while the shard runs; messages wait up to 7 days while it is scaled to zero). `POST /internal/transfer` accepts the same payload (raw or in a Pub/Sub push envelope) for manual or legacy push delivery.
 
 ```ts
 interface Transfer {

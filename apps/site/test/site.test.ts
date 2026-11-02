@@ -1114,7 +1114,9 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     expect(AGENT_DAILY_BUDGET_USD).toBe(12.5);
     expect(NL_COMMAND_DAILY_BUDGET_USD).toBe(1.5);
     expect(BRAIN_MAX_CALLS_PER_MIN).toBe(120);
-    expect(estimateGeminiFlashCostUsd(1_000_000, 1_000_000)).toBeCloseTo(0.375, 5);
+    // Vertex list price for gemini-3.5-flash-lite: $0.30 / 1M input + $2.50 / 1M output.
+    expect(estimateGeminiFlashCostUsd(1_000_000, 1_000_000)).toBeCloseTo(2.8, 5);
+    expect(estimateGeminiFlashCostUsd(400, 35)).toBeCloseTo(0.0002075, 9);
 
     const world = createWorld({ siteId: 'den-1', seed: 101, agents: 4 });
     const fl01 = world.vehicles.find((v) => v.id === 'FL-01')!;

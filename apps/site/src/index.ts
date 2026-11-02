@@ -58,6 +58,7 @@ export async function startMainServer(): Promise<void> {
     wsPublicUrl: process.env.WS_PUBLIC_URL,
     enableIntervals: true,
     restoreFromPersistence: useCloud,
+    subscribeTransfers: useCloud,
     requireProxyAuth:
       isCloudRun ||
       process.env.REQUIRE_PROXY_AUTH === '1' ||
