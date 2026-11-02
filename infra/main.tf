@@ -21,6 +21,9 @@ locals {
     "cloudresourcemanager.googleapis.com",
     "iam.googleapis.com",
     "storage.googleapis.com",
+    "bigquery.googleapis.com",
+    "billingbudgets.googleapis.com",
+    "cloudbilling.googleapis.com",
   ]
 
   sites = {
@@ -53,6 +56,16 @@ resource "google_artifact_registry_repository" "warehouse" {
     action = "KEEP"
     most_recent_versions {
       keep_count = 5
+    }
+  }
+
+  # A KEEP rule alone deletes nothing: this DELETE rule removes versions older than 7 days,
+  # and the KEEP rule above (which takes precedence) protects the 5 most recent per image.
+  cleanup_policies {
+    id     = "delete-older-than-7d"
+    action = "DELETE"
+    condition {
+      older_than = "604800s"
     }
   }
 
@@ -403,9 +416,13 @@ resource "google_cloud_run_v2_service" "site" {
 
       resources {
         cpu_idle = false
+        # Right-sized from week-1 metrics (p95 CPU 1-4% of 2 vCPU, p95 memory <=330 MiB of
+        # 4 GiB) and a 32-driver + 20-agent load test; 1 vCPU / 1 GiB halves instance cost.
+        # Startup boost shortens snapshot-restore cold starts at no steady-state cost.
+        startup_cpu_boost = true
         limits = {
-          cpu    = "2"
-          memory = "4Gi"
+          cpu    = var.site_cpu
+          memory = var.site_memory
         }
       }
 
@@ -521,17 +538,13 @@ resource "google_cloud_run_v2_service_iam_member" "site_lobby_invoker" {
   member   = "serviceAccount:${google_service_account.lobby.email}"
 }
 
-# Pub/Sub Push Invoker IAM for Site Services
-resource "google_cloud_run_v2_service_iam_member" "site_pubsub_invoker" {
-  for_each = google_cloud_run_v2_service.site
-  project  = var.project_id
-  location = var.region
-  name     = each.value.name
-  role     = "roles/run.invoker"
-  member   = "serviceAccount:${google_service_account.pubsub_push.email}"
-}
+# Pub/Sub push invoker binding removed: transfers are delivered by streaming pull (below), so
+# nothing needs run.invoker as warehouse-pubsub-push. The /internal/transfer route still
+# verifies push OIDC tokens if a push subscription is ever re-attached manually.
 
-# Filtered Push Subscriptions per Site
+# Filtered PULL subscriptions per site. Push delivery woke every idle shard on each inbound
+# transfer and kept its always-on-CPU instance billed; with streaming pull, a scaled-to-zero
+# shard leaves transfers queued (7-day retention) and drains them when it next boots.
 resource "google_pubsub_subscription" "site_transfer_push" {
   for_each = local.sites
   project  = var.project_id
@@ -539,13 +552,12 @@ resource "google_pubsub_subscription" "site_transfer_push" {
   topic    = google_pubsub_topic.site_transfers.name
   filter   = "attributes.toSite = \"${each.key}\""
 
-  ack_deadline_seconds = 30
+  ack_deadline_seconds       = 30
+  message_retention_duration = "604800s"
 
-  push_config {
-    push_endpoint = "${google_cloud_run_v2_service.site[each.key].uri}/internal/transfer"
-    oidc_token {
-      service_account_email = google_service_account.pubsub_push.email
-    }
+  # A sleeping shard may not pull for weeks; never let the subscription auto-expire.
+  expiration_policy {
+    ttl = ""
   }
 
   dead_letter_policy {
@@ -571,6 +583,15 @@ resource "google_pubsub_subscription_iam_member" "pubsub_dlq_subscriber" {
   subscription = each.value.name
   role         = "roles/pubsub.subscriber"
   member       = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+
+# Site runtime identity streams-pulls (and acks) its own transfer subscription only.
+resource "google_pubsub_subscription_iam_member" "site_transfer_subscriber" {
+  for_each     = google_pubsub_subscription.site_transfer_push
+  project      = var.project_id
+  subscription = each.value.name
+  role         = "roles/pubsub.subscriber"
+  member       = "serviceAccount:${google_service_account.site.email}"
 }
 
 # 8. Cloud Run v2 Service: Warehouse Lobby (Only Publicly Exposed Service)
@@ -764,6 +785,59 @@ resource "google_cloud_run_v2_job" "loadtest_128" {
         }
       }
     }
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+# ============================================================================
+# Cost visibility: BigQuery billing export dataset + monthly budget alert (prod only)
+# ============================================================================
+
+# Destination for the Cloud Billing "Detailed usage cost" export. The export itself can only
+# be switched on in the console (Billing → Billing export → BigQuery export); see
+# docs/operations.md. US multi-region is required for the export's backfill.
+resource "google_bigquery_dataset" "billing_export" {
+  count                      = var.suffix == "" ? 1 : 0
+  project                    = var.project_id
+  dataset_id                 = "billing_export"
+  friendly_name              = "Cloud Billing export"
+  description                = "Detailed usage cost export for billing account ${var.billing_account_id}"
+  location                   = "US"
+  delete_contents_on_destroy = false
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_billing_budget" "monthly" {
+  count           = var.suffix == "" ? 1 : 0
+  billing_account = var.billing_account_id
+  display_name    = "freightfloor monthly (${var.project_id})"
+
+  budget_filter {
+    projects               = ["projects/${data.google_project.current.number}"]
+    credit_types_treatment = "INCLUDE_ALL_CREDITS"
+  }
+
+  amount {
+    specified_amount {
+      currency_code = "USD"
+      units         = tostring(var.monthly_budget_usd)
+    }
+  }
+
+  threshold_rules {
+    threshold_percent = 0.5
+  }
+  threshold_rules {
+    threshold_percent = 0.9
+  }
+  threshold_rules {
+    threshold_percent = 1.0
+  }
+  threshold_rules {
+    threshold_percent = 1.0
+    spend_basis       = "FORECASTED_SPEND"
   }
 
   depends_on = [google_project_service.apis]

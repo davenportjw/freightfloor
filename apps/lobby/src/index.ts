@@ -27,6 +27,7 @@ import {
   signTicket,
   verifyProxyHeader,
   verifyTicket,
+  WS_PER_MESSAGE_DEFLATE,
   type LeaderboardEntry,
   type Phase,
   type QueueStatus,
@@ -48,6 +49,12 @@ export const FREE_RANGE_SOFT_CAP = 26;
 export const FREE_RANGE_HARD_CAP = 30;
 export const MAX_DRIVERS_PER_SITE = 32;
 export const TICKET_TTL_MS = 60_000;
+/** `/api/network` leaderboard cache TTL; the board only changes when a run ends. */
+export const TOP_PLAYERS_CACHE_TTL_MS = 30_000;
+/** Extra ranked docs fetched so bot / reserved-prefix filtering still fills the board. */
+const TOP_PLAYERS_OVERFETCH = 10;
+/** Candidate callsigns probed with point lookups before falling back to a bounded scan. */
+const CALLSIGN_LOOKUP_ATTEMPTS = 8;
 
 export const DEFAULT_MAX_WAREHOUSES = 4;
 export const DEFAULT_QUEUE_SCALE_THRESHOLD = 8;
@@ -599,7 +606,15 @@ export class FirestoreLobbyStore implements LobbyStore {
   }
 
   async getTopPlayers(limit: number): Promise<StoredPlayerDoc[]> {
-    const snap = await this.db.collection(this.colName('players')).limit(100).get();
+    // Ranked server-side on `totalScore` (written by the site's `upsertPlayerStats`); reading
+    // an arbitrary 100 docs and sorting client-side both cost 100 reads per call and dropped
+    // real leaders once the collection outgrew 100 players. Over-fetch a little so filtering
+    // out bots / reserved prefixes still fills `limit`.
+    const snap = await this.db
+      .collection(this.colName('players'))
+      .orderBy('totalScore', 'desc')
+      .limit(Math.max(1, limit) + TOP_PLAYERS_OVERFETCH)
+      .get();
     const players: StoredPlayerDoc[] = [];
     snap.forEach((doc) => {
       const data = doc.data();
@@ -706,13 +721,31 @@ export class FirestoreLobbyStore implements LobbyStore {
       return { ok: true, clientId: own.clientId, name: own.name };
     }
 
-    const snap = await col.limit(500).get();
-    const existingNames: string[] = [];
-    snap.forEach((doc) => {
-      const d = toIdentity(doc.id, doc.data());
-      if (d.clientId !== params.clientId && d.name) existingNames.push(d.name);
-    });
-    const assignedName = generateDriverCallsign(params.clientId, existingNames);
+    // Point lookups for the deterministic candidate (1 read each) instead of scanning up to
+    // 500 player docs per new join. Generated callsigns are lowercase, matching stored names.
+    const taken = new Set<string>();
+    let assignedName: string | null = null;
+    for (let attempt = 0; attempt < CALLSIGN_LOOKUP_ATTEMPTS; attempt++) {
+      const candidate = generateDriverCallsign(params.clientId, taken);
+      const clash = await col.where('name', '==', candidate).limit(2).get();
+      let ownedByOther = false;
+      clash.forEach((doc) => {
+        if (toIdentity(doc.id, doc.data()).clientId !== params.clientId) ownedByOther = true;
+      });
+      if (!ownedByOther) {
+        assignedName = candidate;
+        break;
+      }
+      taken.add(candidate);
+    }
+    if (!assignedName) {
+      const snap = await col.limit(500).get();
+      snap.forEach((doc) => {
+        const d = toIdentity(doc.id, doc.data());
+        if (d.clientId !== params.clientId && d.name) taken.add(d.name);
+      });
+      assignedName = generateDriverCallsign(params.clientId, taken);
+    }
     await touch(params.clientId, assignedName, { isBot: false });
     return { ok: true, clientId: params.clientId, name: assignedName };
   }
@@ -2602,6 +2635,22 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
     return reply.code(200).send({ callsigns });
   });
 
+  // Leaderboard for `/api/network` (polled by every open lobby page): one ranked Firestore
+  // query per TTL window per instance, shared by concurrent callers.
+  let topPlayersCache: { atMs: number; value: Promise<StoredPlayerDoc[]> } | null = null;
+  function getCachedTopPlayers(nowMs: number): Promise<StoredPlayerDoc[]> {
+    if (topPlayersCache && nowMs - topPlayersCache.atMs < TOP_PLAYERS_CACHE_TTL_MS) {
+      return topPlayersCache.value;
+    }
+    const value = store.getTopPlayers(10);
+    const entry = { atMs: nowMs, value };
+    topPlayersCache = entry;
+    value.catch(() => {
+      if (topPlayersCache === entry) topPlayersCache = null; // never cache a failure
+    });
+    return value;
+  }
+
   app.get('/api/network', async (req, reply) => {
     const nowMs = nowFn();
     await withJoinLock(async () => {
@@ -2609,7 +2658,7 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
     });
     const [storedSites, topPlayers, queueEntries] = await Promise.all([
       store.getSites(),
-      store.getTopPlayers(10),
+      getCachedTopPlayers(nowMs),
       getQueueEntries(),
     ]);
     recordInternalSiteUrls(storedSites);
@@ -2829,7 +2878,11 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
   // Authenticated WebSocket reverse proxy to isolated backend site engines
   // Client → lobby frames are capped at the site's MAX_WS_FRAME_BYTES (the site closes with 1009
   // on anything larger), so oversized frames are rejected here before being buffered or relayed.
-  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_FRAME_BYTES });
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: MAX_WS_FRAME_BYTES,
+    perMessageDeflate: WS_PER_MESSAGE_DEFLATE,
+  });
   const activeProxyPairs = new Set<{ client: WebSocket; upstream: WebSocket }>();
 
   app.server.on('upgrade', (req, socket, head) => {

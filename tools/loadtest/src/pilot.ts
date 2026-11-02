@@ -3,6 +3,7 @@ import { GoogleGenAI } from '@google/genai';
 import { z } from 'zod';
 import {
   dequantiseCoord,
+  GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS,
   ServerMessageSchema,
   type ServerMessage,
   type SiteId,
@@ -13,9 +14,9 @@ import { extractOrdersFromWire } from './bot.js';
 export const PILOT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
 export const DEFAULT_PILOT_BUDGET_USD = 1.5;
 
-// Gemini 3.5 Flash-Lite approximate token pricing for budget tracking ($0.075 / 1M in, $0.30 / 1M out)
-const COST_PER_INPUT_TOKEN_USD = 0.075 / 1_000_000;
-const COST_PER_OUTPUT_TOKEN_USD = 0.3 / 1_000_000;
+// Gemini 3.5 Flash-Lite Vertex list pricing for budget tracking ($0.30 / 1M in, $2.50 / 1M out)
+const COST_PER_INPUT_TOKEN_USD = GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS.input / 1_000_000;
+const COST_PER_OUTPUT_TOKEN_USD = GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS.output / 1_000_000;
 
 export const PilotPlanSchema = z.discriminatedUnion('action', [
   z.object({

@@ -165,7 +165,9 @@ export class VertexGeminiBrainClient implements BrainModelClient {
       config: {
         systemInstruction: params.systemInstruction,
         temperature: 0.2,
-        maxOutputTokens: 120,
+        // Decisions are ~20-35 output tokens (ids/enums + a <=40-char reason); 80 leaves
+        // headroom for the tactics object without letting a runaway reply bill 120 tokens.
+        maxOutputTokens: 80,
         thinkingConfig: { thinkingBudget: 0 },
         responseMimeType: 'application/json',
         // Structured output keeps the decision JSON parseable (same as the NL parser).
@@ -210,7 +212,7 @@ export function renderDecisionPrompt(
     `You are the onboard Gemini 3.5 Flash-Lite brain for autonomous warehouse vehicle ${ctx.agentId}.`,
     `Persona archetype: ${ctx.persona}. Vehicle type: ${ctx.vehicleType}.`,
     `Choose strictly from the provided options and return compact JSON matching the requested format.`,
-    `Keep reason/note under 90 characters, plain ASCII, no URLs or markdown.`,
+    `Keep reason/note under 40 characters, plain ASCII, no URLs or markdown.`,
   ].join(' ');
 
   let body = '';
