@@ -261,7 +261,7 @@ Cost levers already applied (2026-11-02 review of week 1, Oct 24–31, est. ~\$1
 | Site compute | 1 vCPU / 1 GiB shards (was 2 vCPU / 4 GiB at <5% p95 CPU), startup CPU boost. |
 | Idle shard wakeups | Pull transfer subscriptions instead of push, so idle shards can scale to zero. |
 | Egress | `permessage-deflate` on site→lobby and lobby→browser WebSockets (~-92% bytes). |
-| Lobby min instance | Removed the `cab` traffic tags. A tagged revision keeps its own `min_instance_count`, which had kept a second lobby instance warm 24/7. Avoid leaving tags on `min=1` services. |
+| Lobby min instance | Removed the `cab` traffic tags. A tagged revision keeps its own `min_instance_count`, which had kept a second lobby instance warm 24/7. Avoid leaving tags on `min=1` services. Both services now declare `traffic { type = LATEST, percent = 100 }` in Terraform, because removing tags with `gcloud run services update-traffic` pins the named revision, and later applies then roll out revisions that get no traffic. |
 | Firestore | Ranked leaderboard query + 30 s cache; callsign point lookups instead of a 500-doc scan per new player. |
 | Log volume | Transfer publish retries back off 5 s and log once per failure streak (a stale `site-transfers-cab` revision logged 1.26M stack-trace lines in one day). |
 

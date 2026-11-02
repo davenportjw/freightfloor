@@ -401,6 +401,15 @@ resource "google_cloud_run_v2_service" "site" {
   ingress             = "INGRESS_TRAFFIC_ALL"
   deletion_protection = false
 
+
+  # Always serve the latest revision. Without this, an out-of-band `gcloud run services
+  # update-traffic` (e.g. removing a tag) pins a named revision and later applies create
+  # new revisions that silently receive no traffic.
+  traffic {
+    type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
+    percent = 100
+  }
+
   template {
     service_account                  = google_service_account.site.email
     timeout                          = "3600s"
@@ -601,6 +610,15 @@ resource "google_cloud_run_v2_service" "lobby" {
   location            = var.region
   ingress             = "INGRESS_TRAFFIC_ALL"
   deletion_protection = false
+
+
+  # Always serve the latest revision. Without this, an out-of-band `gcloud run services
+  # update-traffic` (e.g. removing a tag) pins a named revision and later applies create
+  # new revisions that silently receive no traffic.
+  traffic {
+    type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
+    percent = 100
+  }
 
   template {
     service_account                  = google_service_account.lobby.email
