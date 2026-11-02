@@ -958,7 +958,7 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     scheduler.recoverErroredAgents(world, t0 + 3_500);
     expect(fl01.brainError).toBeNull();
 
-    // Daily $12.50 budget cap test: exhaust agent budget and verify no Gemini call is made
+    // Daily $10 budget cap test: exhaust agent budget and verify no Gemini call is made
     await persistence.recordUsage('agent', 100_000_000, 50_000_000, 15.0, t0 + 4_000);
     const fl02 = world.vehicles.find((v) => v.id === 'FL-02')!;
     emitTacticsRequest(world, fl02);
@@ -1111,7 +1111,7 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
       'gemini-3.5-flash-lite',
       'gemini-4-argon',
     ]);
-    expect(AGENT_DAILY_BUDGET_USD).toBe(12.5);
+    expect(AGENT_DAILY_BUDGET_USD).toBe(10);
     expect(NL_COMMAND_DAILY_BUDGET_USD).toBe(1.5);
     expect(BRAIN_MAX_CALLS_PER_MIN).toBe(120);
     // Vertex list price for gemini-3.5-flash-lite: $0.30 / 1M input + $2.50 / 1M output.

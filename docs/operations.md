@@ -140,7 +140,7 @@ The Cloud Run Job `loadtest-128-stg` runs as service account `warehouse-loadtest
 | **Protocol Bots** | **112** | `loadtest-001` .. `loadtest-112` | Reads the guide ring target from its own `delta` stream, steers toward it at 10 Hz (`input`), and sends `interact` when `inRange` is true. Exercises WebSocket fan-out, bandwidth quantization, and 10 Hz tick stability across all 4 shards. |
 | **Gemini Pilot Agents** | **16** | `pilot-01` .. `pilot-16` | Powered by **Gemini 3.5 Flash-Lite** (`gemini-3.5-flash-lite`). Observes only its own player HUD state, nearby vehicles, open contracts, dealt cards, and event log from `welcome`/`delta`. Every 3–5 s, selects a high-level action (`driveTo(x,y)`, `pickUp`, `drop`, `keepCards`, `typeOrder(text)`, `vote(level)`), carried out by a local 10 Hz steering loop. |
 
-- **Isolated Pilot Budget**: Pilots track spend against `PILOT_BUDGET_USD` (default **$1.50 per run**), separate from the sites' $12.50/day Firestore brain ledger. If a pilot's Gemini call fails, the pilot holds position and logs the error—it never falls back to scripted play.
+- **Isolated Pilot Budget**: Pilots track spend against `PILOT_BUDGET_USD` (default **$1.50 per run**), separate from the sites' $10/day Firestore brain ledger. If a pilot's Gemini call fails, the pilot holds position and logs the error—it never falls back to scripted play.
 - **Executing the Load Test**:
   ```bash
   gcloud run jobs execute loadtest-128-stg --region=us-central1 --project=davenporter-freightfloor --wait
@@ -175,7 +175,7 @@ In accordance with the resource lifecycle policy, every staging load test or smo
 
 | Resource | Guardrail / Cap | Enforcement Mechanism |
 |---|---|---|
-| **Site AI Brains (`gemini-3.5-flash-lite`)** | **$12.50 / UTC day** global cap across all sites + **120 RPM** / **8 concurrent** per shard | Firestore ledger (`budget/{yyyy-mm-dd}`) + `BRAIN_MAX_RPM` sliding-window rate cap in `AgentBrainScheduler`. Each instance buffers spend and writes `FieldValue.increment` every 10 s and on shutdown, and checks a cached doc plus its unflushed delta. When exhausted, agents hold with `"daily brain budget reached"`. Brain calls time out after 4 s. |
+| **Site AI Brains (`gemini-3.5-flash-lite`)** | **$10 / UTC day** global cap across all sites + **120 RPM** / **8 concurrent** per shard | Firestore ledger (`budget/{yyyy-mm-dd}`) + `BRAIN_MAX_RPM` sliding-window rate cap in `AgentBrainScheduler`. Each instance buffers spend and writes `FieldValue.increment` every 10 s and on shutdown, and checks a cached doc plus its unflushed delta. When exhausted, agents hold with `"daily brain budget reached"`. Brain calls time out after 4 s. |
 | **GCP Cloud Quotas (`aiplatform.googleapis.com` & `modelarmor.googleapis.com`)** | **50M input tokens/day**, **1M input tokens/min**, **120 Model Armor RPM**, **Quota Adjuster DISABLED** | Enforced via Terraform `google_cloud_quotas_quota_preference` (`GlobalGenerateContentInputTokensPerDayPerBaseModel`, `GlobalGenerateContentInputTokensPerMinutePerBaseModel`, `RequestsPerMinute`) and `google_cloud_quotas_quota_adjuster_settings` (`DISABLED`). |
 | **Typed Orders (`nlCommand`)** | **$1.50 / UTC day** cap on the daily ledger | Dedicated counter on `budget/{yyyy-mm-dd}` + 6/min per player rate limit + 3-strike 15-min mute. |
 | **Loadtest Gemini Pilots** | **$1.50 / job run** (`PILOT_BUDGET_USD=1.5`) | In-process token counter inside `tools/loadtest`; pilots hold when cap is reached. |

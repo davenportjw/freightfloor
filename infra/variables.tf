@@ -79,7 +79,7 @@ variable "enable_dispatchers_call" {
 variable "agent_daily_budget_usd" {
   description = "Daily USD cap across all site shards for autonomous Gemini shift brains and Dispatcher's Call"
   type        = number
-  default     = 12.5
+  default     = 10
 }
 
 variable "nl_command_daily_budget_usd" {

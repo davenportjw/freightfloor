@@ -17,7 +17,7 @@ export type WorldSnapshot = WorldSnapshotV5;
 export const AGENT_DAILY_BUDGET_USD =
   Number(process.env.AGENT_DAILY_BUDGET_USD) > 0
     ? Number(process.env.AGENT_DAILY_BUDGET_USD)
-    : 12.5;
+    : 10;
 export const NL_COMMAND_DAILY_BUDGET_USD =
   Number(process.env.NL_COMMAND_DAILY_BUDGET_USD) > 0
     ? Number(process.env.NL_COMMAND_DAILY_BUDGET_USD)
