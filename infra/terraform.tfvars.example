@@ -31,7 +31,7 @@ enable_dispatchers_call   = true
 enable_rack_lift_minigame = false
 
 # AI Usage Caps & Cloud Quotas
-agent_daily_budget_usd              = 12.5
+agent_daily_budget_usd              = 10
 nl_command_daily_budget_usd         = 1.5
 brain_max_rpm_per_site              = 120
 max_concurrent_brain_calls          = 8

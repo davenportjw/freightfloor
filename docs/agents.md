@@ -105,10 +105,10 @@ Each site server (`AgentBrainScheduler`) manages an asynchronous brain request q
 
 ---
 
-## 6. Global $12.50/Day Firestore Budget Ledger
+## 6. Global $10/Day Firestore Budget Ledger
 
 To enforce a strict cost ceiling across all running shards:
-- **Shared Daily Cap**: All sites share a single global agent brain budget of **$12.50/day** (`AGENT_DAILY_BUDGET_USD = 12.5`) tracked in Firestore at `budget/{yyyy-mm-dd}`.
+- **Shared Daily Cap**: All sites share a single global agent brain budget of **$10/day** (`AGENT_DAILY_BUDGET_USD = 10`) tracked in Firestore at `budget/{yyyy-mm-dd}`.
 - **Dedicated Typed-Order Slice**: Natural-language player commands (`nlCommand`) draw from an isolated **$1.50/day** cap (`NL_COMMAND_DAILY_BUDGET_USD = 1.5`) on the global ledger so that an attacker spamming `nlCommand` can never starve the warehouse AI agents' operational brain budget.
 - **Buffered Ledger Increments**: Each site accumulates spend in memory and flushes it every 10 s to `budget/{yyyy-mm-dd}` with `FieldValue.increment`, pricing measured `usageMetadata` token counts at the Vertex list price for Gemini 3.5 Flash-Lite (`$0.30 / 1M` input, `$2.50 / 1M` output; `GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS`, overridable via `GEMINI_PRICE_INPUT_PER_M` / `GEMINI_PRICE_OUTPUT_PER_M`). The pre-2026-11-02 rates (`$0.075` / `$0.30`) under-counted real spend about 5x.
 - **Overflow Site Scaling**:
