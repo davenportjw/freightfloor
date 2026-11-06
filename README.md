@@ -18,6 +18,14 @@
     <a href="docs/protocol.md">Wire Protocol</a>
   </p>
 
+  <p>
+    <a href="https://davenporter.com/writings/freightfloor-demos-should-be-fun"><strong>Read the write-up: Demos should be fun, why I built FreightFloor →</strong></a>
+    &nbsp;·&nbsp;
+    <a href="https://davenporter.com/builds/freight-floor">Builds page</a>
+    &nbsp;·&nbsp;
+    <a href="https://davenporter.com">Powered by Davenporter ↗</a>
+  </p>
+
   <img src="docs/assets/freightfloor-gameplay.gif" alt="Freight Floor Live Gameplay — Isometric Forklift Driving, AI Fleet & HUD v3" width="900" />
 </div>
 
@@ -63,6 +71,8 @@
    - **Hybrid Neuro-Symbolic Control**: High-level tactical reasoning (`gemini-3.5-flash-lite` choosing strategy weights, shift cards, Dispatcher's Call proposals, and natural-language command routing with strict JSON schemas) paired with deterministic 10 Hz physics, occupancy reservations, and A\* pathfinding (`packages/sim`).
    - **7-Layer Adversarial Prompt Defense (`@warehouse/armor`)**: Untrusted natural-language manager orders and player callsigns pass through Unicode hygiene, **Google Cloud Model Armor** (`sanitizeUserPrompt` + `sanitizeModelResponse`), cryptographic nonce-fenced least-privilege parsing, Zod schema validation, and per-player strike/governance clamps.
    - **Real-Time AI Observability & Hard Cost Guardrails**: Every Gemini decision and armor verdict is streamed to the in-game **Brain Log** and persisted to a TTL-indexed Firestore journal, governed by a transactional daily spend ledger (`$12.50/day` global AI brain cap + `$1.50/day` isolated `nlCommand` slice) and an automatic **Factory Break** state machine that scales idle shards to zero.
+
+The full story (why demos should be fun, and how the AI drivers work) is in the original post on The Davenporter: [WIBTM: Demos should be fun, why I built FreightFloor (and how the AI works)](https://davenporter.com/writings/freightfloor-demos-should-be-fun).
 
 ---
 
@@ -287,3 +297,13 @@ node tools/smoke/armor.mjs "${LOBBY_URL}"
 - [**Wire Protocol (`docs/protocol.md`)**](docs/protocol.md) — Client/server WebSocket messages, quantized 10 Hz light/full delta fan-out, and HMAC join tickets.
 - [**Simulation & AI Brains (`docs/simulation.md`)**](docs/simulation.md) — 10 Hz physics, occupancy reservations, battery/charging curves, strategy cohorts, and Vertex AI Gemini 3.5 Flash-Lite structured prompts.
 - [**Operations, Load Testing & Budgets (`docs/operations.md`)**](docs/operations.md) — Cloud Build workflow, 128-client staging load test (`tools/loadtest`), automated teardown, and daily Vertex AI spend caps.
+
+
+---
+
+## Related
+
+- **Write-up:** [WIBTM: Demos should be fun, why I built FreightFloor (and how the AI works)](https://davenporter.com/writings/freightfloor-demos-should-be-fun) on The Davenporter.
+- **Builds page:** [davenporter.com/builds/freight-floor](https://davenporter.com/builds/freight-floor).
+- **`ast-graph`:** the code graph plugin I built while working on this repo, so coding agents read less code. On FreightFloor, one shared Zod schema change took 3.7 KB of `ast_blast_radius` output instead of 32.6 MB of `grep`. See [`davenportjw/agent-skills/plugins/ast-graph`](https://github.com/davenportjw/agent-skills/tree/main/plugins/ast-graph) and the post [Your coding agent is reading too much code](https://davenporter.com/writings/ast-graph-stop-reading-every-file).
+- **More builds and essays:** [davenporter.com](https://davenporter.com).
