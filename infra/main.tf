@@ -814,24 +814,11 @@ resource "google_cloud_run_v2_job" "loadtest_128" {
 }
 
 # ============================================================================
-# Cost visibility: BigQuery billing export dataset + monthly budget alert (prod only)
+# Cost visibility: monthly budget alert (prod only)
 # ============================================================================
 
-# Destination for the Cloud Billing "Detailed usage cost" export. The export itself can only
-# be switched on in the console (Billing → Billing export → BigQuery export); see
-# docs/operations.md. US multi-region is required for the export's backfill.
-resource "google_bigquery_dataset" "billing_export" {
-  count                      = var.suffix == "" ? 1 : 0
-  project                    = var.project_id
-  dataset_id                 = "billing_export"
-  friendly_name              = "Cloud Billing export"
-  description                = "Detailed usage cost export for billing account ${var.billing_account_id}"
-  location                   = "US"
-  delete_contents_on_destroy = false
-
-  depends_on = [google_project_service.apis]
-}
-
+# The Cloud Billing export for the whole billing account (every project) lands in
+# davenporter-admin:billing_export, managed by the davenporter-admin repo; see docs/operations.md §6.
 resource "google_billing_budget" "monthly" {
   count           = var.suffix == "" ? 1 : 0
   billing_account = var.billing_account_id

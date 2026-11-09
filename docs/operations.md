@@ -69,7 +69,7 @@ This provisions:
 - **Dispatcher's Call Feature Flag (default on)**: Terraform `enable_dispatchers_call = true` sets `ENABLE_DISPATCHERS_CALL="1"` on `@warehouse/site` (`0|false|off|no` disables it cleanly; unset = on) and advertises `welcome.limits.dispatchersCall`. When on, each Blitz run may get one Gemini question (`gemini-3.5-flash-lite` or the `GEMINI_MODEL` override, Vertex AI `global` via ADC, 4 s timeout, strict response schema, numeric telemetry only). Usage is charged to the daily `agent` budget category; an exhausted budget, model error or invalid output skips the call for that run with a logged error (no fallback question). Players can opt out with the **☰ → Settings** toggle, `?dispatch=1|0` or `localStorage['warehouse.feature.dispatchersCall']`; the client then sends `dispatchersCallPref { enabled: false }`.
 - **Public Lobby & WebSocket Gateway Service**: `warehouse-lobby` (`min=1` in prod / `0` for `-stg`, `max=2`, `cpu_idle=true` request-based CPU billing), the only service with `allUsers` invoker access, serving static assets instantly and proxying `/ws?site=<siteId>` to the private site shards.
 - **Pub/Sub**: `site-transfers` topic, `site-transfers-dlq`, and 4 filtered **pull** subscriptions (`attributes.toSite = "<siteId>"`, 7-day retention, no expiry) with `roles/pubsub.subscriber` for `warehouse-site@` on each.
-- **Cost visibility (prod only)**: BigQuery dataset `billing_export` (US) as the Cloud Billing export destination, and the `google_billing_budget` "freightfloor monthly" budget (`monthly_budget_usd`, default \$400; emails billing admins at 50/90/100% actual and 100% forecast).
+- **Cost visibility (prod only)**: the `google_billing_budget` "freightfloor monthly" budget (`monthly_budget_usd`, default \$400; emails billing admins at 50/90/100% actual and 100% forecast).
 - **Secret Manager**: `ticket-hmac-key` with a generated 64-character secret version used for both join tickets and `x-warehouse-proxy` headers.
 - **Firestore**: 7-day TTL policy on `journal.expireAt`.
 
@@ -189,7 +189,7 @@ In accordance with the resource lifecycle policy, every staging load test or smo
 | **Crawler join gate (`warehouse-lobby`)** | `POST /api/join` → `403 crawler_not_allowed` for self-identified crawlers | `isCrawlerUserAgent` matches AdsBot/Googlebot/GoogleOther/Chrome-Lighthouse, SEO/AI scrapers, and generic `FooBot/1.0` / `(+https://…)` agents, so they never wake a shard or spend Gemini calls. `node` and `HeadlessChrome` (smoke/load harnesses) are allowed. |
 | **Lobby (`warehouse-lobby`)** | `min_instance_count = 1` (prod; `0` for `-stg`), max 2 | One warm instance avoids the ~10 s cold start on a first visit (pick-up-and-play). Together with `den-1` (`min = 1`), it is the only always-on cost. |
 | **Artifact Registry (`warehouse`)** | Keep last **5 image versions**, delete anything older than **7 days** | Terraform `cleanup_policies` `keep-recent-5` (KEEP, wins) + `delete-older-than-7d` (DELETE). A KEEP rule alone deletes nothing. |
-| **Project spend** | **\$400 / month** budget alert | `google_billing_budget.monthly` (50/90/100% actual, 100% forecast). Detailed cost data lands in BigQuery `billing_export` (see §6). |
+| **Project spend** | **\$400 / month** budget alert | `google_billing_budget.monthly` (50/90/100% actual, 100% forecast). Detailed cost data lands in BigQuery `davenporter-admin:billing_export` (see §6). |
 | **Firestore `journal` Collection** | **7-day TTL** | Enforced via Terraform `google_firestore_field.journal_ttl` on `expireAt`. |
 
 ---
@@ -244,18 +244,17 @@ npm run test:ast
 
 ## 6. Cloud Billing Export & Cost Review
 
-Terraform creates the destination dataset `davenporter-freightfloor:billing_export` (US multi-region), but Google only lets you switch the export on in the console:
+The Cloud Billing export covers the whole billing account (`XXXXXX-XXXXXX-XXXXXX`, every project), so it lives in the shared admin project rather than here: dataset `davenporter-admin:billing_export`, managed by the [`davenporter-admin`](https://github.com/davenportjw/davenporter-admin) repo. That repo's README covers switching the export on in the console. Cloudflare costs and usage for `freightfloor.com` land in `davenporter-admin:cloudflare`.
 
-1. Console → **Billing** → account `XXXXXX-XXXXXX-XXXXXX` → **Billing export** → **BigQuery export**.
-2. **Detailed usage cost** → *Edit settings* → project `davenporter-freightfloor`, dataset `billing_export` → *Save*. Optionally enable **Standard usage cost** and **Pricing** to the same dataset.
-3. Data starts flowing within a few hours (detailed export has no historical backfill; standard export backfills the current and previous month). Tables: `gcp_billing_export_resource_v1_XXXXXX_XXXXXX_XXXXXX` (detailed) and `gcp_billing_export_v1_…` (standard).
+This project keeps only its own budget (`google_billing_budget.monthly`). The account-wide budget lives in `davenporter-admin`.
 
-Weekly spend by service:
+Weekly freightfloor spend by service:
 
 ```sql
 SELECT service.description AS service, ROUND(SUM(cost) + SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)), 2) AS net_usd
-FROM `davenporter-freightfloor.billing_export.gcp_billing_export_resource_v1_XXXXXX_XXXXXX_XXXXXX`
+FROM `davenporter-admin.billing_export.gcp_billing_export_resource_v1_XXXXXX_XXXXXX_XXXXXX`
 WHERE usage_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+  AND project.id = 'davenporter-freightfloor'
 GROUP BY service ORDER BY net_usd DESC;
 ```
 
