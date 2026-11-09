@@ -20,11 +20,21 @@ describe('@warehouse/lobby: GA4 client config', () => {
   it('keeps the strict CSP when GA is off and adds only Google tag hosts when on', () => {
     expect(buildCspHeader(null)).toBe(CSP_HEADER);
     const csp = buildCspHeader('G-ABC123XYZ9');
-    expect(csp).toContain("script-src 'self' https://*.googletagmanager.com;");
+    expect(csp).toContain(
+      "script-src 'self' https://static.cloudflareinsights.com https://*.googletagmanager.com;",
+    );
     expect(csp).toContain('https://*.google-analytics.com');
-    expect(csp).toContain("connect-src 'self' ws: wss:");
+    expect(csp).toContain("connect-src 'self' ws: wss: https://cloudflareinsights.com");
     expect(csp).not.toContain("'unsafe-eval'");
     expect(csp).not.toMatch(/script-src[^;]*'unsafe-inline'/);
+  });
+
+  it('always allows the edge-injected Cloudflare Web Analytics beacon', () => {
+    for (const csp of [CSP_HEADER, buildCspHeader('G-ABC123XYZ9')]) {
+      expect(csp).toMatch(/script-src [^;]*https:\/\/static\.cloudflareinsights\.com/);
+      expect(csp).toMatch(/connect-src [^;]*https:\/\/cloudflareinsights\.com/);
+    }
+    expect(CSP_HEADER).not.toContain('google');
   });
 
   it('serves the measurement ID at /api/config and sends the matching CSP', async () => {

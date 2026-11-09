@@ -80,8 +80,16 @@ export const ALL_POOL_SITE_IDS: readonly SiteId[] = [
   ...OVERFLOW_POOL_SITE_IDS,
 ];
 
+/**
+ * Cloudflare Web Analytics: the freightfloor.com zone auto-injects its RUM beacon at the edge,
+ * which loads from static.cloudflareinsights.com and reports to cloudflareinsights.com.
+ */
+const CF_BEACON_SCRIPT = 'https://static.cloudflareinsights.com';
+const CF_BEACON_CONNECT = 'https://cloudflareinsights.com';
+
 export const CSP_HEADER =
-  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:;";
+  `default-src 'self'; script-src 'self' ${CF_BEACON_SCRIPT}; style-src 'self' 'unsafe-inline'; ` +
+  `img-src 'self' data: blob:; connect-src 'self' ws: wss: ${CF_BEACON_CONNECT};`;
 
 const GA_MEASUREMENT_ID_PATTERN = /^G-[A-Z0-9]{4,16}$/;
 
@@ -100,9 +108,9 @@ export function buildCspHeader(gaMeasurementId: string | null): string {
   const gaBeacons =
     'https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com';
   return (
-    `default-src 'self'; script-src 'self' ${gaScript}; style-src 'self' 'unsafe-inline'; ` +
+    `default-src 'self'; script-src 'self' ${CF_BEACON_SCRIPT} ${gaScript}; style-src 'self' 'unsafe-inline'; ` +
     `img-src 'self' data: blob: https://*.google-analytics.com https://*.googletagmanager.com; ` +
-    `connect-src 'self' ws: wss: ${gaBeacons};`
+    `connect-src 'self' ws: wss: ${CF_BEACON_CONNECT} ${gaBeacons};`
   );
 }
 
