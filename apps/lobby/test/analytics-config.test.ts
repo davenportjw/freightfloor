@@ -62,3 +62,33 @@ describe('@warehouse/lobby: GA4 client config', () => {
     await app.close();
   });
 });
+
+describe('@warehouse/lobby: crawler files', () => {
+  it('serves robots.txt and a one-page sitemap for the forwarded public host', async () => {
+    const app = await buildLobbyServer({
+      store: new InMemoryLobbyStore([]),
+      ticketSecret: TEST_SECRET,
+      gaMeasurementId: null,
+    });
+    const headers = { 'x-forwarded-host': 'freightfloor.com' };
+    const robots = await app.inject({ method: 'GET', url: '/robots.txt', headers });
+    expect(robots.statusCode).toBe(200);
+    expect(robots.headers['content-type']).toContain('text/plain');
+    expect(robots.body).toContain('Disallow: /api/');
+    expect(robots.body).toContain('Sitemap: https://freightfloor.com/sitemap.xml');
+
+    const sitemap = await app.inject({ method: 'GET', url: '/sitemap.xml', headers });
+    expect(sitemap.statusCode).toBe(200);
+    expect(sitemap.headers['content-type']).toContain('application/xml');
+    expect(sitemap.body).toContain('<loc>https://freightfloor.com/</loc>');
+
+    const evil = await app.inject({
+      method: 'GET',
+      url: '/sitemap.xml',
+      headers: { 'x-forwarded-host': 'x"><script>' },
+    });
+    expect(evil.body).not.toContain('<script>');
+    expect(evil.body).toContain('<loc>https://freightfloor.com/</loc>');
+    await app.close();
+  });
+});

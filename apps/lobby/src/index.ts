@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { Firestore } from '@google-cloud/firestore';
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
@@ -2078,6 +2078,38 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
   app.get('/api/config', async (_req, reply) => {
     reply.header('Cache-Control', 'public, max-age=300');
     return { gaMeasurementId };
+  });
+
+  // Crawlers: a real robots.txt and a one-page sitemap (the game is a single-page app at `/`),
+  // instead of falling through to index.html. The host comes from the edge proxy's
+  // X-Forwarded-Host (freightfloor.com) or the request Host.
+  const publicOrigin = (req: FastifyRequest): string => {
+    const fwd = req.headers['x-forwarded-host'];
+    const host = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(',')[0]?.trim() || req.hostname;
+    // Only plain hostnames (optionally :port) reach the XML/text body; anything else is dropped.
+    return /^[a-z0-9.-]+(:\d{1,5})?$/i.test(host) ? `https://${host.toLowerCase()}` : 'https://freightfloor.com';
+  };
+  app.get('/robots.txt', async (req, reply) => {
+    reply.type('text/plain; charset=utf-8').header('Cache-Control', 'public, max-age=3600');
+    return [
+      'User-agent: *',
+      'Allow: /',
+      'Disallow: /api/',
+      'Disallow: /ws',
+      'Disallow: /sites/',
+      '',
+      `Sitemap: ${publicOrigin(req)}/sitemap.xml`,
+      '',
+    ].join('\n');
+  });
+  app.get('/sitemap.xml', async (req, reply) => {
+    reply.type('application/xml; charset=utf-8').header('Cache-Control', 'public, max-age=3600');
+    return (
+      '<?xml version="1.0" encoding="UTF-8"?>\n' +
+      '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
+      `  <url><loc>${publicOrigin(req)}/</loc></url>\n` +
+      '</urlset>\n'
+    );
   });
 
   app.post('/api/join', async (req, reply) => {
