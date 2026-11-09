@@ -270,7 +270,8 @@ named `gcp_billing_export_resource_v1_<ACCOUNT_ID_WITH_UNDERSCORES>` (detailed) 
 `gcp_billing_export_v1_…` (standard).
 
 **4. Add the budget alert.** Set `billing_account_id` (and optionally `monthly_budget_usd`) in
-`infra/terraform.tfvars` and `terraform apply`. Leaving it empty skips the budget.
+`infra/terraform.tfvars` and `terraform apply`. Leaving it empty skips the budget, which is what
+you want if your budgets are managed centrally (e.g. in the same admin project as the export).
 
 **5. Query spend.** Weekly net spend for this project by service:
 
