@@ -666,6 +666,11 @@ resource "google_cloud_run_v2_service" "lobby" {
         value = tostring(var.queue_scale_threshold)
       }
       env {
+        name = "GA_MEASUREMENT_ID"
+        # Staging (-stg) stacks stay out of the prod GA4 property.
+        value = var.suffix == "" ? var.ga_measurement_id : ""
+      }
+      env {
         name = "SITE_URLS_JSON"
         value = jsonencode({
           for k, svc in google_cloud_run_v2_service.site : k => svc.uri

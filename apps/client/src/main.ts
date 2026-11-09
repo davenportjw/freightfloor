@@ -91,6 +91,15 @@ import {
 } from './ui/notify.js';
 import { isResumeCode, loadResumeCode, resumeInputError, saveResumeCode } from './resumeCode.js';
 import { adoptRawClientId, isPublicId } from './identity.js';
+import {
+  Analytics,
+  eventForClientMessage,
+  eventForServerMessage,
+  fetchAnalyticsConfig,
+  joinEvent,
+  runEndEvents,
+  runStartEvent,
+} from './analytics.js';
 
 // Re-exported for the existing test suite (test/client.test.ts).
 export { applyQuantisedDelta, formatRunDisplayName, nextRunDisplayName, parseRunDisplayName } from './state.js';
@@ -182,6 +191,12 @@ function boot(): void {
   let lastOrderAt: number | null = null;
   const canvas = byId<HTMLCanvasElement>('world');
 
+  // ---- analytics (GA4 key events; off unless the lobby sets GA_MEASUREMENT_ID) ----
+  const analytics = new Analytics();
+  void fetchAnalyticsConfig().then((id) => analytics.start(id));
+  /** Last run (`vid:runStartedAt`) whose GA4 run-end events were sent. */
+  let trackedRunEndKey = '';
+
   // ---- network ------------------------------------------------------------
   const net = new NetClient(
     () => ({
@@ -199,8 +214,10 @@ function boot(): void {
         store.ui.runEnd = null;
         store.setQueue(null);
         notify('status', `Seat claimed on ${join.siteId.toUpperCase()}`, 'Taking the wheel of your assigned forklift.');
+        analytics.track(joinEvent(join, 'queue'));
       },
       onJoined: (join) => {
+        analytics.track(joinEvent(join, 'join'));
         if (join.name) {
           displayName = join.name;
           storageSet(DISPLAY_NAME_KEY, join.name);
@@ -233,6 +250,7 @@ function boot(): void {
   const send = (msg: ClientMessage, quiet = false): boolean => {
     const ok = net.send(msg);
     if (!ok && !quiet) notify('error', 'Not connected to the site.', store.conn.text || undefined);
+    if (ok) analytics.track(eventForClientMessage(msg));
     return ok;
   };
 
@@ -989,6 +1007,7 @@ function boot(): void {
     const ppm = Math.round((deliveries / Math.max(0.25, realMinutes)) * 10) / 10;
     const finalScore = Math.round(me.runPts ?? me.sPts);
     const lastRunPts = lastRunPtsFor(`${me.id}:${me.runStartedAt ?? ''}`, finalScore);
+    const runEndKey = `${me.id}:${me.runStartedAt ?? ''}`;
     const recap = buildAiRecap(runAiLog(), (vid) => store.vehicle(vid)?.strategy);
 
     const activeVehicleIds = new Set(store.world.vehicles.map((v) => v.id));
@@ -1089,6 +1108,19 @@ function boot(): void {
       lastRunPts,
       recap,
     };
+    if (runEndKey !== trackedRunEndKey) {
+      trackedRunEndKey = runEndKey;
+      const runSummary = {
+        runMode: me.runMode ?? store.ui.runMode,
+        runNumber,
+        score: finalScore,
+        deliveries,
+        onTimePct,
+        humanRank,
+        totalHumanRuns: Math.max(1, humanRows.length),
+      };
+      for (const ev of runEndEvents(runSummary, store.siteId)) analytics.track(ev);
+    }
     // Drive: a world popup over the forklift (the results sheet has the details); Floor: the banner.
     notify('runSummary', `RUN OVER · ${finalScore} PTS`);
     store.changed();
@@ -1102,12 +1134,14 @@ function boot(): void {
     const key = `${me.id}:${me.runStartedAt ?? ''}`;
     if (key === runStartKey) return;
     runStartKey = key;
+    analytics.track(runStartEvent(me.runMode ?? store.ui.runMode, store.siteId));
     const idx = blitzLeaderboard(store.world).findIndex((r) => r.id === me.id);
     store.ui.runStartRank = idx >= 0 ? { vid: me.id, rank: idx + 1 } : null;
   }
 
   function onMessage(msg: ServerMessage): void {
     const now = performance.now();
+    analytics.track(eventForServerMessage(msg));
     switch (msg.type) {
       case 'welcome': {
         // A welcome for a different site (switch / relocation) or vehicle (new run) starts a new

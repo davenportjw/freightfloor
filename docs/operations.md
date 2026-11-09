@@ -54,8 +54,14 @@ Terraform state is stored remotely in GCS (`gs://davenporter-freightfloor-tfstat
 terraform -chdir=infra fmt
 terraform -chdir=infra init
 terraform -chdir=infra validate
-terraform -chdir=infra apply -var="project_id=davenporter-freightfloor" -var="suffix="
+terraform -chdir=infra apply -var="project_id=davenporter-freightfloor" -var="suffix=" \
+  -var="ga_measurement_id=G-XXXXXXXXXX"
 ```
+
+`ga_measurement_id` is the freightfloor.com GA4 web stream. The lobby serves it at `GET /api/config`
+and only then adds Google's tag hosts to its CSP; leaving it out turns GA4 off (strict CSP, no tag).
+Staging (`-stg`) stacks never get it. Key events: `site_join`, `level_start`, `level_end`,
+`manager_command`, `agent_command` (mapping in `apps/client/src/analytics.ts`).
 
 This provisions:
 - **4 Private Site Shards (Pattern A — Scale-to-Zero Shards)**: `site-den-1` (`min=0`, `IDLE_POLICY=break`, 20 agents) and `site-slc-2`, `site-phx-3`, `site-abq-4` (`min=0`, `IDLE_POLICY=break`, 12 agents), each **1 vCPU / 1 GiB** (`site_cpu` / `site_memory`, `cpu_idle=false`, `startup_cpu_boost=true`). All shards sleep at \$0 when empty and wake on demand when a player joins via the lobby; inbound Pub/Sub transfers no longer wake them (pull delivery). Restricted via Cloud Run IAM (`roles/run.invoker`) exclusively to `warehouse-lobby` with `REQUIRE_PROXY_AUTH=1`.

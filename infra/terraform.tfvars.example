@@ -42,3 +42,6 @@ model_armor_rpm_quota               = 120
 # Optional infrastructure toggles
 enable_loadtest_job = true
 enable_edge_lb      = false
+
+# GA4 web stream for your own domain (empty = analytics off). Applied only when suffix = "".
+ga_measurement_id = ""

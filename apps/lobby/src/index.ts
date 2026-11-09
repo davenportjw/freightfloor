@@ -83,6 +83,29 @@ export const ALL_POOL_SITE_IDS: readonly SiteId[] = [
 export const CSP_HEADER =
   "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:;";
 
+const GA_MEASUREMENT_ID_PATTERN = /^G-[A-Z0-9]{4,16}$/;
+
+/** `GA_MEASUREMENT_ID` (GA4 web stream) when well-formed; otherwise null (analytics off). */
+export function resolveGaMeasurementId(
+  raw: string | null | undefined = process.env.GA_MEASUREMENT_ID,
+): string | null {
+  const id = (raw ?? '').trim();
+  return GA_MEASUREMENT_ID_PATTERN.test(id) ? id : null;
+}
+
+/** CSP for the lobby; adds only Google's documented GA4 hosts when a measurement ID is set. */
+export function buildCspHeader(gaMeasurementId: string | null): string {
+  if (!gaMeasurementId) return CSP_HEADER;
+  const gaScript = 'https://*.googletagmanager.com';
+  const gaBeacons =
+    'https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com';
+  return (
+    `default-src 'self'; script-src 'self' ${gaScript}; style-src 'self' 'unsafe-inline'; ` +
+    `img-src 'self' data: blob: https://*.google-analytics.com https://*.googletagmanager.com; ` +
+    `connect-src 'self' ws: wss: ${gaBeacons};`
+  );
+}
+
 export type SitePhaseInput = Phase | 'on_break' | 'day';
 
 export interface StoredSiteDoc {
@@ -1501,6 +1524,8 @@ export interface LobbyServerOptions {
   overflowIdleCooldownMs?: number;
   /** Trusted reverse-proxy hops in front of the lobby (default `TRUSTED_PROXY_HOPS` or 1). */
   trustedProxyHops?: number;
+  /** GA4 measurement ID served to the client via `/api/config` (default `GA_MEASUREMENT_ID`; null = off). */
+  gaMeasurementId?: string | null;
 }
 
 export type LobbyOptions = LobbyServerOptions;
@@ -1516,6 +1541,11 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
   });
   const store = opts.store ?? new FirestoreLobbyStore();
   const nowFn = opts.now ?? (() => Date.now());
+  const gaMeasurementId =
+    opts.gaMeasurementId !== undefined
+      ? resolveGaMeasurementId(opts.gaMeasurementId)
+      : resolveGaMeasurementId();
+  const cspHeader = buildCspHeader(gaMeasurementId);
   const secret = await resolveTicketSecret(opts.ticketSecret);
   const envRateLimit = Number(process.env.RATE_LIMIT_PER_MIN);
   const rateLimitPerMin =
@@ -2023,7 +2053,7 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
   });
 
   app.addHook('onSend', async (_req, reply, payload) => {
-    reply.header('Content-Security-Policy', CSP_HEADER);
+    reply.header('Content-Security-Policy', cspHeader);
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('X-Frame-Options', 'DENY');
     return payload;
@@ -2035,6 +2065,12 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
   app.get('/healthz', lobbyHealth);
   // Google Front End intercepts the exact path `/healthz` on *.a.run.app; `/healthz/` reaches us.
   app.get('/healthz/', lobbyHealth);
+
+  // Public, non-secret client config (GA4 web measurement IDs ship in every page that uses them).
+  app.get('/api/config', async (_req, reply) => {
+    reply.header('Cache-Control', 'public, max-age=300');
+    return { gaMeasurementId };
+  });
 
   app.post('/api/join', async (req, reply) => {
     const nowMs = nowFn();

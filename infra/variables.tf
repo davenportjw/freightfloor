@@ -141,3 +141,9 @@ variable "monthly_budget_usd" {
   type        = number
   default     = 400
 }
+
+variable "ga_measurement_id" {
+  description = "GA4 web stream measurement ID (G-XXXXXXXXXX) served to the client by the lobby; empty disables analytics. Only applied to the prod stack (suffix = \"\")."
+  type        = string
+  default     = ""
+}
