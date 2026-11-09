@@ -12,9 +12,13 @@ region = "us-central1"
 # Environment suffix ("" for production, "-stg" for isolated staging stack)
 suffix = ""
 
-# Optional container image overrides.
-# Leave empty ("") to automatically use:
-#   ${region}-docker.pkg.dev/${project_id}/warehouse/{site,lobby,loadtest}:latest
+# Image tag for site, lobby and loadtest. scripts/deploy.sh writes the short git SHA to
+# infra/image_tag.auto.tfvars (gitignored), which overrides this.
+image_tag = "latest"
+
+# Optional full image URI overrides (take precedence over image_tag).
+# Leave empty ("") to use:
+#   ${region}-docker.pkg.dev/${project_id}/warehouse/{site,lobby,loadtest}:${image_tag}
 site_image     = ""
 lobby_image    = ""
 loadtest_image = ""

@@ -40,12 +40,17 @@ RUN_LIVE=1 npm run test:redteam -w @warehouse/site
 ## 2. Cloud Build & Production Deployment (`davenporter-freightfloor`)
 
 ### Step 1: Build and Push Container Images
-Submit the multi-stage Docker builds (`Dockerfile.site`, `Dockerfile.lobby`, `Dockerfile.loadtest`) to Google Cloud Build using the least-privilege `warehouse-cloudbuild` service account, which pushes to Artifact Registry (`us-central1-docker.pkg.dev/davenporter-freightfloor/warehouse/`):
+`scripts/deploy.sh` does Steps 1 and 2 in one go. It refuses a dirty tree, builds with `_TAG=<short git SHA>`, writes `image_tag = "<sha>"` to the gitignored `infra/image_tag.auto.tfvars`, then runs `terraform fmt -check`, `validate` and `apply`. Terraform is the only thing that should change running images: a `gcloud run services update --image` deploy leaves Terraform pointing at a different tag, and the next plain `terraform apply` rolls the services back.
+
+To build by hand, submit the multi-stage Docker builds (`Dockerfile.site`, `Dockerfile.lobby`, `Dockerfile.loadtest`) to Google Cloud Build using the least-privilege `warehouse-cloudbuild` service account, which pushes to Artifact Registry (`us-central1-docker.pkg.dev/davenporter-freightfloor/warehouse/`) as both `:<_TAG>` and `:latest`:
 
 ```bash
 gcloud builds submit --config=cloudbuild.yaml --project=davenporter-freightfloor \
-  --service-account=projects/davenporter-freightfloor/serviceAccounts/warehouse-cloudbuild@davenporter-freightfloor.iam.gserviceaccount.com .
+  --service-account=projects/davenporter-freightfloor/serviceAccounts/warehouse-cloudbuild@davenporter-freightfloor.iam.gserviceaccount.com \
+  --substitutions=_TAG=$(git rev-parse --short HEAD) .
 ```
+
+Then set `image_tag` to that SHA (in `infra/image_tag.auto.tfvars` or with `-var image_tag=...`) before applying.
 
 ### Step 2: Format, Validate, and Apply Terraform (`infra/`)
 Terraform state is stored remotely in GCS (`gs://davenporter-freightfloor-tfstate/terraform/state` with object versioning, uniform bucket-level access, and public access prevention enabled). Always run `terraform fmt` and `terraform validate` before applying infrastructure changes:

@@ -16,20 +16,26 @@ variable "suffix" {
   default     = ""
 }
 
+variable "image_tag" {
+  description = "Artifact Registry tag for the site, lobby and loadtest images. scripts/deploy.sh sets it to the short git SHA (via the gitignored infra/image_tag.auto.tfvars) so Terraform, not ad-hoc gcloud updates, owns the running images."
+  type        = string
+  default     = "latest"
+}
+
 variable "site_image" {
-  description = "Container image URI for warehouse-site (defaults to <region>-docker.pkg.dev/<project_id>/warehouse/site:latest when empty)"
+  description = "Full image URI override for warehouse-site (empty = <region>-docker.pkg.dev/<project_id>/warehouse/site:<image_tag>)"
   type        = string
   default     = ""
 }
 
 variable "lobby_image" {
-  description = "Container image URI for warehouse-lobby (defaults to <region>-docker.pkg.dev/<project_id>/warehouse/lobby:latest when empty)"
+  description = "Full image URI override for warehouse-lobby (empty = <region>-docker.pkg.dev/<project_id>/warehouse/lobby:<image_tag>)"
   type        = string
   default     = ""
 }
 
 variable "loadtest_image" {
-  description = "Container image URI for loadtest-128 job (defaults to <region>-docker.pkg.dev/<project_id>/warehouse/loadtest:latest when empty)"
+  description = "Full image URI override for loadtest-128 job (empty = <region>-docker.pkg.dev/<project_id>/warehouse/loadtest:<image_tag>)"
   type        = string
   default     = ""
 }

@@ -3,9 +3,10 @@ data "google_project" "current" {
 }
 
 locals {
-  site_image     = var.site_image != "" ? var.site_image : "${var.region}-docker.pkg.dev/${var.project_id}/warehouse/site:latest"
-  lobby_image    = var.lobby_image != "" ? var.lobby_image : "${var.region}-docker.pkg.dev/${var.project_id}/warehouse/lobby:latest"
-  loadtest_image = var.loadtest_image != "" ? var.loadtest_image : "${var.region}-docker.pkg.dev/${var.project_id}/warehouse/loadtest:latest"
+  image_repo     = "${var.region}-docker.pkg.dev/${var.project_id}/warehouse"
+  site_image     = var.site_image != "" ? var.site_image : "${local.image_repo}/site:${var.image_tag}"
+  lobby_image    = var.lobby_image != "" ? var.lobby_image : "${local.image_repo}/lobby:${var.image_tag}"
+  loadtest_image = var.loadtest_image != "" ? var.loadtest_image : "${local.image_repo}/loadtest:${var.image_tag}"
   role_suffix    = replace(var.suffix, "-", "_")
 
   services = [
