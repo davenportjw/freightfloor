@@ -142,7 +142,12 @@ export const MAX_RECEIVED_TRANSFER_IDS = 2_000;
 export const WS_MAX_PAYLOAD_BYTES = 64 * 1024;
 export const DEFAULT_INPUT_LEASE_MS = 5_000;
 export const DEFAULT_IDLE_EVICTION_MS = 60_000;
-export const DEFAULT_IDLE_BREAK_MS = 5 * 60 * 1000;
+/**
+ * Real ms with 0 connected sockets before Gemini brain calls pause and an `IDLE_POLICY=break`
+ * site starts winding down. Kept short (90 s) because most visitors bounce within seconds and
+ * every running minute costs ~50 brain calls; override with `IDLE_BREAK_MS`.
+ */
+export const DEFAULT_IDLE_BREAK_MS = 90_000;
 export const DEFAULT_WIND_DOWN_MAX_MS = 60_000;
 /** Min real ms between countdown-only `delta.floorOrders` refreshes per connection. */
 export const FLOOR_ORDERS_INTERVAL_MS = 1_000;
@@ -748,8 +753,10 @@ export async function createSiteServer(
   const inputLeaseMs = options.inputLeaseMs ?? DEFAULT_INPUT_LEASE_MS;
   const idleEvictionMs = options.idleEvictionMs ?? DEFAULT_IDLE_EVICTION_MS;
   const evictOnRunComplete = options.evictOnRunComplete ?? true;
+  const envIdleBreakMs = Number(process.env.IDLE_BREAK_MS);
   const idleBreakThresholdMs =
-    options.idleBreakThresholdMs ?? DEFAULT_IDLE_BREAK_MS;
+    options.idleBreakThresholdMs ??
+    (Number.isFinite(envIdleBreakMs) && envIdleBreakMs > 0 ? envIdleBreakMs : DEFAULT_IDLE_BREAK_MS);
   const windDownMaxMs = options.windDownMaxMs ?? DEFAULT_WIND_DOWN_MAX_MS;
 
   const persistence = options.persistence ?? new InMemoryPersistenceStore();

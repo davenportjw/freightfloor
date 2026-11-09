@@ -47,6 +47,11 @@ Authenticates display name hygiene, enforces per-IP connection rate limits, sele
 |---|---|---|
 | `503` | `queue_unavailable` | The Firestore seat-queue transaction or read failed (any `/api/join` or `/api/queue*` path). Surfaced directly; the lobby never falls back to an in-memory queue in production. Retry later. |
 
+**Crawler Gate**
+| Status | `error` | When |
+|---|---|---|
+| `403` | `crawler_not_allowed` | Lobby `POST /api/join` only: the `User-Agent` identifies itself as a crawler or automated auditor (`isCrawlerUserAgent`: AdsBot, Googlebot, GoogleOther, Chrome-Lighthouse, SEO/AI scrapers, `FooBot/1.0`, `(+https://…)`). Checked before rate limiting, identity writes, or site wake. |
+
 **Lobby → Site WebSocket proxy headers**: the lobby strips client `X-Forwarded-For` and sends `x-warehouse-proxy` (signed proxy token), `x-warehouse-client-ip` (client IP resolved with `TRUSTED_PROXY_HOPS`), and `x-warehouse-client-ip-sig` (`HMAC-SHA256("client-ip:" + proxyToken + ":" + ip)`). The site uses the forwarded IP only when both the proxy token and the signature verify; otherwise it uses the socket peer address. Proxied frames are capped at `MAX_WS_FRAME_BYTES` (4096); larger frames close with code `1009`.
 
 ---

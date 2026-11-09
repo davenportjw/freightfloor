@@ -122,13 +122,15 @@ When all live shards reach their 32-driver cap (128+ concurrent players across t
 ## Factory Break State Machine
 
 To control Vertex AI Gemini brain costs and allow overflow shards (`slc-2`, `phx-3`, `abq-4`) to scale to zero when unused, each site runs a phase state machine controlled by `IDLE_POLICY`:
-- `IDLE_POLICY=run` (default for `den-1`): Never enters factory break; runs 24/7 at 1× speed.
-- `IDLE_POLICY=break` (default for overflow shards): Transitions to break when empty.
+- `IDLE_POLICY=run` / `warm`: Never enters factory break; runs 24/7 at 1× speed.
+- `IDLE_POLICY=break` (all four production shards): Transitions to break when empty.
+
+Independently of `IDLE_POLICY`, Gemini brain requests pause once a site has had 0 connected sockets for `IDLE_BREAK_MS` (default **90 s**, `DEFAULT_IDLE_BREAK_MS`). A lobby `POST /internal/wake` counts as human activity and restarts that window.
 
 ```mermaid
 stateDiagram-v2
   [*] --> running
-  running --> winding_down: no sockets for 2 real min AND idlePolicy = break
+  running --> winding_down: no sockets for IDLE_BREAK_MS (90 s) AND idlePolicy = break
   winding_down --> break: agents parked or 60 game-min cap
   break --> resuming: a player connects
   resuming --> running: 10 s countdown
@@ -138,7 +140,7 @@ stateDiagram-v2
 | Phase | Behavior |
 |---|---|
 | `running` | Normal 10 Hz tick loop. Orders spawn, Gemini brains make asynchronous decisions, and shift timers advance. |
-| `winding_down` | Triggered after 2 real minutes with 0 connected sockets when `IDLE_POLICY=break` (or via `setPhase`). No new orders are posted and no new Gemini brain requests are emitted. Agents finish deliveries currently on their forks, then park at chargers or the break room. If a player connects during `winding_down`, the site returns immediately to `running`. |
+| `winding_down` | Triggered after `IDLE_BREAK_MS` (default 90 real seconds) with 0 connected sockets when `IDLE_POLICY=break` (or via `setPhase`). No new orders are posted and no new Gemini brain requests are emitted. Agents finish deliveries currently on their forks, then park at chargers or the break room. If a player connects during `winding_down`, the site returns immediately to `running`. |
 | `break` | Entered once all agents are parked or after a 60 game-minute wind-down cap. The game clock freezes (including order due times and the shift timer). The site persists a v5 snapshot to Firestore. Gemini brain spend drops to zero, and on `min=0` shards the Cloud Run instance can scale to zero. |
 | `resuming` | When a player connects to a site in `break`, the shard restores its latest Firestore snapshot (if cold-starting), broadcasts a `phase` message ("Shift resumes in 10 s"), counts down 10 real seconds, and transitions to `running`. |
 

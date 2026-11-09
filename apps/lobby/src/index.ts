@@ -61,6 +61,22 @@ export const DEFAULT_QUEUE_SCALE_THRESHOLD = 8;
 export const DEFAULT_SEAT_CLAIM_LEASE_MS = 20_000;
 export const DEFAULT_QUEUE_HEARTBEAT_TTL_MS = 20_000;
 export const DEFAULT_OVERFLOW_IDLE_COOLDOWN_MS = 300_000;
+
+/** Named crawlers, ad/landing-page auditors, link unfurlers, and SEO/AI scrapers. */
+const KNOWN_CRAWLER_UA_RE =
+  /googlebot|adsbot|googleother|google-inspectiontool|mediapartners-google|apis-google|feedfetcher|chrome-lighthouse|bingbot|bingpreview|yandexbot|baiduspider|duckduckbot|applebot|facebookexternalhit|meta-externalagent|twitterbot|slackbot|discordbot|linkedinbot|telegrambot|ahrefsbot|semrushbot|mj12bot|dotbot|petalbot|gptbot|oai-searchbot|chatgpt-user|claudebot|anthropic-ai|ccbot|bytespider|perplexitybot|amazonbot|sourceaudit/i;
+/** Generic self-identifying bots: `FooBot/1.0`, `(+https://…)` contact links, crawler/spider. */
+const GENERIC_CRAWLER_UA_RE = /[a-z]bot\/\d|\(\+https?:|\bcrawler\b|\bspider\b/i;
+
+/**
+ * True when a `User-Agent` self-identifies as a crawler or automated auditor. Such clients never
+ * play, but a join wakes a scaled-to-zero site and runs its Gemini brains, so `/api/join` refuses
+ * them. Headless browsers and `node` (smoke/load harnesses) are intentionally not matched.
+ */
+export function isCrawlerUserAgent(userAgent: string | undefined | null): boolean {
+  if (!userAgent) return false;
+  return KNOWN_CRAWLER_UA_RE.test(userAgent) || GENERIC_CRAWLER_UA_RE.test(userAgent);
+}
 /** Shared seat-hold window after admission (matches the pending-driver expiry in getSites). */
 export const SEAT_HOLD_MS = 45_000;
 
@@ -2114,6 +2130,15 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
 
   app.post('/api/join', async (req, reply) => {
     const nowMs = nowFn();
+    // Crawlers (AdsBot, Googlebot, Lighthouse, SEO/AI scrapers) render the page and fire a join,
+    // which would wake a site shard and burn Gemini brain calls for nobody. Refuse before any
+    // rate-limit bookkeeping, identity writes, or site wake.
+    if (isCrawlerUserAgent(req.headers['user-agent'])) {
+      return reply.code(403).send({
+        error: 'crawler_not_allowed',
+        message: 'Automated crawlers cannot join a warehouse shift.',
+      });
+    }
     const ip = req.ip || '127.0.0.1';
     if (!limiter.allow(ip, nowMs)) {
       return reply.code(429).send({
