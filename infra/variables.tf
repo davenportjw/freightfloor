@@ -131,9 +131,9 @@ variable "site_memory" {
 }
 
 variable "billing_account_id" {
-  description = "Cloud Billing account that owns the project (for the budget alert)"
+  description = "Cloud Billing account (XXXXXX-XXXXXX-XXXXXX) that owns the project, used for the monthly budget alert. Set it in the gitignored infra/terraform.tfvars; empty skips the budget."
   type        = string
-  default     = "XXXXXX-XXXXXX-XXXXXX"
+  default     = ""
 }
 
 variable "monthly_budget_usd" {

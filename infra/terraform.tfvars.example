@@ -4,7 +4,7 @@
 # ============================================================================
 
 # Required: Your Google Cloud Project ID
-project_id = "davenporter-freightfloor"
+project_id = "your-gcp-project-id"
 
 # Default Google Cloud region for Cloud Run, Artifact Registry, Secret Manager & Model Armor
 region = "us-central1"
@@ -44,4 +44,10 @@ enable_loadtest_job = true
 enable_edge_lb      = false
 
 # GA4 web stream for your own domain (empty = analytics off). Applied only when suffix = "".
+# Find it in GA4 → Admin → Data streams → your web stream → Measurement ID.
 ga_measurement_id = ""
+
+# Cloud Billing account for the monthly budget alert (empty = no budget).
+# Find it with `gcloud billing projects describe <project_id>` (billingAccountName).
+billing_account_id = ""
+monthly_budget_usd = 400

@@ -817,10 +817,11 @@ resource "google_cloud_run_v2_job" "loadtest_128" {
 # Cost visibility: monthly budget alert (prod only)
 # ============================================================================
 
-# The Cloud Billing export for the whole billing account (every project) lands in
-# davenporter-admin:billing_export, managed by the davenporter-admin repo; see docs/operations.md §6.
+# The Cloud Billing export (account-wide, every project) is configured outside this stack; see
+# docs/operations.md "Cloud Billing Export & Cost Review". The budget is skipped when
+# billing_account_id is unset.
 resource "google_billing_budget" "monthly" {
-  count           = var.suffix == "" ? 1 : 0
+  count           = var.suffix == "" && var.billing_account_id != "" ? 1 : 0
   billing_account = var.billing_account_id
   display_name    = "freightfloor monthly (${var.project_id})"
 

@@ -54,14 +54,14 @@ Terraform state is stored remotely in GCS (`gs://davenporter-freightfloor-tfstat
 terraform -chdir=infra fmt
 terraform -chdir=infra init
 terraform -chdir=infra validate
-terraform -chdir=infra apply -var="project_id=davenporter-freightfloor" -var="suffix=" \
-  -var="ga_measurement_id=G-XXXXXXXXXX"
+terraform -chdir=infra apply   # reads infra/terraform.tfvars (gitignored)
 ```
 
-`ga_measurement_id` is the freightfloor.com GA4 web stream. The lobby serves it at `GET /api/config`
-and only then adds Google's tag hosts to its CSP; leaving it out turns GA4 off (strict CSP, no tag).
-Staging (`-stg`) stacks never get it. Key events: `site_join`, `level_start`, `level_end`,
-`manager_command`, `agent_command` (mapping in `apps/client/src/analytics.ts`).
+Copy `infra/terraform.tfvars.example` to `infra/terraform.tfvars` and fill in your own values
+(`project_id`, `ga_measurement_id`, `billing_account_id`, …). `*.tfvars` is gitignored, so
+account IDs and analytics IDs stay out of the repo; equivalent `-var=` flags work too.
+
+`ga_measurement_id` is optional; see [§8 Analytics Setup (GA4)](#8-analytics-setup-ga4).
 
 This provisions:
 - **4 Private Site Shards (Pattern A — Scale-to-Zero Shards)**: `site-den-1` (`min=0`, `IDLE_POLICY=break`, 20 agents) and `site-slc-2`, `site-phx-3`, `site-abq-4` (`min=0`, `IDLE_POLICY=break`, 12 agents), each **1 vCPU / 1 GiB** (`site_cpu` / `site_memory`, `cpu_idle=false`, `startup_cpu_boost=true`). All shards sleep at \$0 when empty and wake on demand when a player joins via the lobby; inbound Pub/Sub transfers no longer wake them (pull delivery). Restricted via Cloud Run IAM (`roles/run.invoker`) exclusively to `warehouse-lobby` with `REQUIRE_PROXY_AUTH=1`.
@@ -69,7 +69,7 @@ This provisions:
 - **Dispatcher's Call Feature Flag (default on)**: Terraform `enable_dispatchers_call = true` sets `ENABLE_DISPATCHERS_CALL="1"` on `@warehouse/site` (`0|false|off|no` disables it cleanly; unset = on) and advertises `welcome.limits.dispatchersCall`. When on, each Blitz run may get one Gemini question (`gemini-3.5-flash-lite` or the `GEMINI_MODEL` override, Vertex AI `global` via ADC, 4 s timeout, strict response schema, numeric telemetry only). Usage is charged to the daily `agent` budget category; an exhausted budget, model error or invalid output skips the call for that run with a logged error (no fallback question). Players can opt out with the **☰ → Settings** toggle, `?dispatch=1|0` or `localStorage['warehouse.feature.dispatchersCall']`; the client then sends `dispatchersCallPref { enabled: false }`.
 - **Public Lobby & WebSocket Gateway Service**: `warehouse-lobby` (`min=1` in prod / `0` for `-stg`, `max=2`, `cpu_idle=true` request-based CPU billing), the only service with `allUsers` invoker access, serving static assets instantly and proxying `/ws?site=<siteId>` to the private site shards.
 - **Pub/Sub**: `site-transfers` topic, `site-transfers-dlq`, and 4 filtered **pull** subscriptions (`attributes.toSite = "<siteId>"`, 7-day retention, no expiry) with `roles/pubsub.subscriber` for `warehouse-site@` on each.
-- **Cost visibility (prod only)**: the `google_billing_budget` "freightfloor monthly" budget (`monthly_budget_usd`, default \$400; emails billing admins at 50/90/100% actual and 100% forecast).
+- **Cost visibility (prod only)**: the `google_billing_budget` "freightfloor monthly" budget (`monthly_budget_usd`, default \$400; emails billing admins at 50/90/100% actual and 100% forecast). Created only when `billing_account_id` is set; see [§7](#7-cloud-billing-export--cost-review).
 - **Secret Manager**: `ticket-hmac-key` with a generated 64-character secret version used for both join tickets and `x-warehouse-proxy` headers.
 - **Firestore**: 7-day TTL policy on `journal.expireAt`.
 
@@ -189,7 +189,7 @@ In accordance with the resource lifecycle policy, every staging load test or smo
 | **Crawler join gate (`warehouse-lobby`)** | `POST /api/join` → `403 crawler_not_allowed` for self-identified crawlers | `isCrawlerUserAgent` matches AdsBot/Googlebot/GoogleOther/Chrome-Lighthouse, SEO/AI scrapers, and generic `FooBot/1.0` / `(+https://…)` agents, so they never wake a shard or spend Gemini calls. `node` and `HeadlessChrome` (smoke/load harnesses) are allowed. |
 | **Lobby (`warehouse-lobby`)** | `min_instance_count = 1` (prod; `0` for `-stg`), max 2 | One warm instance avoids the ~10 s cold start on a first visit (pick-up-and-play). Together with `den-1` (`min = 1`), it is the only always-on cost. |
 | **Artifact Registry (`warehouse`)** | Keep last **5 image versions**, delete anything older than **7 days** | Terraform `cleanup_policies` `keep-recent-5` (KEEP, wins) + `delete-older-than-7d` (DELETE). A KEEP rule alone deletes nothing. |
-| **Project spend** | **\$400 / month** budget alert | `google_billing_budget.monthly` (50/90/100% actual, 100% forecast). Detailed cost data lands in BigQuery `davenporter-admin:billing_export` (see §6). |
+| **Project spend** | **\$400 / month** budget alert | `google_billing_budget.monthly` (50/90/100% actual, 100% forecast). Detailed cost data comes from the Cloud Billing BigQuery export (see §7). |
 | **Firestore `journal` Collection** | **7-day TTL** | Enforced via Terraform `google_firestore_field.journal_ttl` on `expireAt`. |
 
 ---
@@ -242,21 +242,57 @@ npm run test:ast
 
 ---
 
-## 6. Cloud Billing Export & Cost Review
+## 7. Cloud Billing Export & Cost Review
 
-The Cloud Billing export covers the whole billing account (`XXXXXX-XXXXXX-XXXXXX`, every project), so it lives in the shared admin project rather than here: dataset `davenporter-admin:billing_export`, managed by the [`davenporter-admin`](https://github.com/davenportjw/davenporter-admin) repo. That repo's README covers switching the export on in the console. Cloudflare costs and usage for `freightfloor.com` land in `davenporter-admin:cloudflare`.
+Budgets only alert; to see *where* money goes you need the Cloud Billing export to BigQuery.
+The export is configured per **billing account** (it covers every project on that account), so
+keep it in a shared admin project rather than in this stack. Account IDs belong in your
+gitignored `infra/terraform.tfvars`, never in docs or code.
 
-This project keeps only its own budget (`google_billing_budget.monthly`). The account-wide budget lives in `davenporter-admin`.
+**1. Find your billing account.**
 
-Weekly freightfloor spend by service:
+```bash
+gcloud billing projects describe <project_id> --format='value(billingAccountName)'
+# -> billingAccounts/XXXXXX-XXXXXX-XXXXXX
+```
+
+**2. Create a destination dataset** (US multi-region is required for backfill) in your admin project:
+
+```bash
+bq --location=US mk --dataset <admin_project>:billing_export
+```
+
+**3. Turn the export on (console only).** Billing → *your account* → **Billing export** →
+**BigQuery export** → *Detailed usage cost* → **Edit settings** → choose `<admin_project>` and
+`billing_export` → **Save**. Data appears within a few hours. The detailed export has no
+historical backfill; the standard export backfills the current and previous month. Tables are
+named `gcp_billing_export_resource_v1_<ACCOUNT_ID_WITH_UNDERSCORES>` (detailed) and
+`gcp_billing_export_v1_…` (standard).
+
+**4. Add the budget alert.** Set `billing_account_id` (and optionally `monthly_budget_usd`) in
+`infra/terraform.tfvars` and `terraform apply`. Leaving it empty skips the budget.
+
+**5. Query spend.** Weekly net spend for this project by service:
 
 ```sql
-SELECT service.description AS service, ROUND(SUM(cost) + SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)), 2) AS net_usd
-FROM `davenporter-admin.billing_export.gcp_billing_export_resource_v1_XXXXXX_XXXXXX_XXXXXX`
+SELECT service.description AS service,
+       ROUND(SUM(cost) + SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)), 2) AS net_usd
+FROM `<admin_project>.billing_export.gcp_billing_export_resource_v1_<ACCOUNT_ID>`
 WHERE usage_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-  AND project.id = 'davenporter-freightfloor'
+  AND project.id = '<project_id>'
 GROUP BY service ORDER BY net_usd DESC;
 ```
+
+**Before the export has data**, Cloud Monitoring still shows the main cost drivers:
+
+| Driver | Metric |
+|---|---|
+| Gemini calls / tokens | `aiplatform.googleapis.com/publisher/online_serving/model_invocation_count`, `.../token_count` (split by `type` = input/output) |
+| Site wakeups | `run.googleapis.com/container/instance_count` per `service_name` |
+| Who woke a site | Cloud Run request logs for `POST /api/join` (`httpRequest.userAgent`) and `/internal/wake` |
+
+Multiply tokens by the prices in `GEMINI_PRICE_INPUT_PER_M` / `GEMINI_PRICE_OUTPUT_PER_M`
+(`apps/site/src/persistence.ts`) for an estimate.
 
 Cost levers already applied (2026-11-02 review of week 1, Oct 24–31, est. ~\$130/week):
 
@@ -270,4 +306,23 @@ Cost levers already applied (2026-11-02 review of week 1, Oct 24–31, est. ~\$1
 | Lobby min instance | Removed the `cab` traffic tags. A tagged revision keeps its own `min_instance_count`, which had kept a second lobby instance warm 24/7. Avoid leaving tags on `min=1` services. Both services now declare `traffic { type = LATEST, percent = 100 }` in Terraform, because removing tags with `gcloud run services update-traffic` pins the named revision, and later applies then roll out revisions that get no traffic. |
 | Firestore | Ranked leaderboard query + 30 s cache; callsign point lookups instead of a 500-doc scan per new player. |
 | Log volume | Transfer publish retries back off 5 s and log once per failure streak (a stale `site-transfers-cab` revision logged 1.26M stack-trace lines in one day). |
+| Crawler wakeups | Lobby `POST /api/join` returns `403 crawler_not_allowed` for self-identified crawlers (AdsBot, Googlebot, Lighthouse, …), which were waking `den-1` for ~5 min of brain calls each. |
+| Idle brain window | `DEFAULT_IDLE_BREAK_MS` 5 min → 90 s (`IDLE_BREAK_MS` env override); most visitors bounce within seconds. |
 
+## 8. Analytics Setup (GA4)
+
+The client ships GA4 support, but it is off until you give the lobby a measurement ID.
+
+1. In [Google Analytics](https://analytics.google.com/) create a property and a **Web** data
+   stream for your domain. Copy its **Measurement ID** (`G-XXXXXXXXXX`) from Admin → Data streams.
+2. Put it in the gitignored `infra/terraform.tfvars` as `ga_measurement_id = "G-XXXXXXXXXX"` and
+   `terraform apply`. Terraform sets `GA_MEASUREMENT_ID` on `warehouse-lobby` (prod stack only;
+   `-stg` stacks never get it). For local runs, set `GA_MEASUREMENT_ID` in `.env`.
+3. The lobby serves the ID at `GET /api/config` and only then adds Google's tag hosts to its CSP.
+   With no ID the CSP stays strict and no tag loads.
+4. Mark the key events in GA4 → Admin → Events: `site_join`, `level_start`, `level_end`,
+   `manager_command`, `agent_command` (mapping in `apps/client/src/analytics.ts`).
+5. Verify with GA4 **DebugView** or **Realtime** after loading the site once.
+
+Note: the measurement ID is public by design (every visitor's browser sees it), but keeping it
+in tfvars lets forks point analytics at their own property instead of yours.
