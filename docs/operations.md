@@ -333,6 +333,9 @@ The client ships GA4 support, but it is off until you give the lobby a measureme
    once per livery the browser announces; `livery_equip` `{ livery_id }` fires on each equip sent.
 5. Verify with GA4 **DebugView** or **Realtime** after loading the site once.
 
+To script steps 1 and 4 (property, stream, key events, custom dimensions and metrics) instead of
+using the console, see [analytics-automation.md](analytics-automation.md).
+
 Note: the measurement ID is public by design (every visitor's browser sees it), but keeping it
 in tfvars lets forks point analytics at their own property instead of yours.
 
