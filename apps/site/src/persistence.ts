@@ -161,6 +161,8 @@ export interface DailyResultInput {
   dayKey: string;
   pts: number;
   tape: string;
+  /** Livery equipped on this run (shown as a swatch on the public board). */
+  livery?: LiveryId;
   nowMs: number;
 }
 
@@ -187,6 +189,8 @@ export interface DailyEntryDoc {
   /** Run tape of the best run. */
   tape: string;
   bestAt: number;
+  /** Livery equipped on the player's latest run that day. */
+  livery?: LiveryId;
   /** Epoch ms; stored as a Firestore Timestamp for the `entries` TTL policy. */
   expireAt: number;
 }
@@ -200,6 +204,8 @@ export interface LeagueRunInput {
   siteId: SiteId;
   weekKey: string;
   pts: number;
+  /** Livery equipped on this run (shown as a swatch on the public board). */
+  livery?: LiveryId;
   nowMs: number;
 }
 
@@ -224,6 +230,8 @@ export interface LeagueEntryDoc {
   runs: number;
   siteId: SiteId;
   updatedAt: number;
+  /** Livery equipped on the player's latest timed run that week. */
+  livery?: LiveryId;
   /** Epoch ms; stored as a Firestore Timestamp for the `entries` TTL policy. */
   expireAt: number;
 }
@@ -247,6 +255,8 @@ export function applyLeagueRun(entry: LeagueEntryDoc | null, input: LeagueRunInp
     updatedAt: input.nowMs,
     expireAt: leagueEntryExpireAt(input.weekKey),
   };
+  const livery = input.livery ?? entry?.livery;
+  if (livery) next.livery = livery;
   return {
     entry: next,
     result: { weekPts: step.weekPts, delta: step.delta, counted: step.counted, runsCounted: step.topRuns.length },
@@ -318,6 +328,8 @@ export function applyDailyResult(
     bestAt: improved ? input.nowMs : entry.bestAt,
     expireAt: dailyEntryExpireAt(input.dayKey),
   };
+  const livery = input.livery ?? entry?.livery;
+  if (livery) next.livery = livery;
   return {
     streak: step.next,
     dailySites: addDailySite(player?.dailySites, input.siteId),

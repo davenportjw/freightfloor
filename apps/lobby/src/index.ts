@@ -18,6 +18,8 @@ import {
   MAX_WS_FRAME_BYTES,
   NetworkResponseSchema,
   LeaderboardEntrySchema,
+  isLiveryId,
+  type LiveryId,
   PHASES,
   PROXY_HEADER_NAME,
   QueueStatusSchema,
@@ -213,6 +215,8 @@ export interface StoredPlayerDoc {
   leagueWins?: number;
   /** Best finalized weekly podium place, 1–3 (written by `finalizeLeagueWeek`). */
   bestLeagueRank?: number;
+  /** Equipped livery (written by the site's `setLivery`); shown as a board swatch. */
+  livery?: LiveryId;
 }
 
 /**
@@ -228,6 +232,8 @@ export interface StoredLeagueEntry {
   /** Runs currently summed into `weekPts` (≤ 10). */
   runsCounted: number;
   siteId: string;
+  /** Livery on the player's latest timed run that week (site-written; ids outside the catalog dropped). */
+  livery?: LiveryId;
 }
 
 /** A week's public league board as read from the store. */
@@ -250,6 +256,8 @@ export interface StoredDailyEntry {
   siteId: string;
   /** Player's daily streak as of their latest completion that day. */
   streak: number;
+  /** Livery on the player's latest Daily run that day (site-written; ids outside the catalog dropped). */
+  livery?: LiveryId;
 }
 
 export interface QueueEntry {
@@ -346,6 +354,11 @@ export interface LobbyStore {
   finalizeLeagueWeek?(weekKey: string, nowMs: number): Promise<LeaguePodiumEntry[]>;
 }
 
+/** `{ livery }` when `raw` is a catalog livery id, else `{}` (unknown / legacy values never reach the wire). */
+export function liveryField(raw: unknown): { livery?: LiveryId } {
+  return typeof raw === 'string' && isLiveryId(raw) ? { livery: raw } : {};
+}
+
 const nonNegInt = (n: unknown): number => (typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
 
 /** Normalizes a stored league entry; returns null for malformed docs. */
@@ -358,6 +371,7 @@ function toStoredLeagueEntry(data: Record<string, unknown> | undefined): StoredL
     runs: nonNegInt(data.runs),
     runsCounted: Array.isArray(data.topRuns) ? data.topRuns.length : 0,
     siteId: typeof data.siteId === 'string' ? data.siteId : '',
+    ...liveryField(data.livery),
   };
 }
 
@@ -398,6 +412,7 @@ function toStoredDailyEntry(data: Record<string, unknown> | undefined): StoredDa
     attempts: typeof data.attempts === 'number' && data.attempts > 0 ? Math.floor(data.attempts) : 1,
     siteId: typeof data.siteId === 'string' ? data.siteId : '',
     streak: typeof data.streak === 'number' && data.streak > 0 ? Math.floor(data.streak) : 0,
+    ...liveryField(data.livery),
   };
 }
 
@@ -848,6 +863,7 @@ export class FirestoreLobbyStore implements LobbyStore {
         lifetimePoints,
         ...(bestBlitzPts !== undefined ? { bestBlitzPts } : {}),
         ...(ppm !== undefined ? { ppm } : {}),
+        ...liveryField(data.livery),
         deliveries,
         isBot: Boolean(data.isBot),
       });
@@ -2530,7 +2546,7 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
     }
     const body: DailyBoardResponse = {
       info: dailyInfoFor(day),
-      top: board.top.map((e) => ({ publicId: e.publicId, name: e.name, pts: e.bestPts, streak: e.streak, siteId: e.siteId })),
+      top: board.top.map((e) => ({ publicId: e.publicId, name: e.name, pts: e.bestPts, streak: e.streak, siteId: e.siteId, ...liveryField(e.livery) })),
       entrants: board.entrants,
       ...(standing
         ? { you: { rank: standing.above + 1, bestPts: standing.entry.bestPts, attempts: standing.entry.attempts } }
@@ -2626,7 +2642,7 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
     const body: LeagueResponse = {
       weekKey: week,
       endsAt: weekEndMs(week),
-      top: board.top.map((e) => ({ publicId: e.publicId, name: e.name, weekPts: e.weekPts, runs: e.runs, siteId: e.siteId })),
+      top: board.top.map((e) => ({ publicId: e.publicId, name: e.name, weekPts: e.weekPts, runs: e.runs, siteId: e.siteId, ...liveryField(e.livery) })),
       entrants: board.entrants,
       ...(standing
         ? { you: { rank: standing.above + 1, weekPts: standing.entry.weekPts, runsCounted: standing.entry.runsCounted } }
@@ -3391,6 +3407,7 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
           ...(normalizePpm(p.ppm) !== undefined ? { ppm: normalizePpm(p.ppm) } : {}),
           deliveries: p.deliveries,
           isBot: false,
+          ...liveryField(p.livery),
         };
       });
 

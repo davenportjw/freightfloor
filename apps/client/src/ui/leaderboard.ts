@@ -7,6 +7,8 @@ import type { UiCtx, UiModule } from './context.js';
 import { button, el, KeyedView, swatch, type Child } from './dom.js';
 import { difficultyLabel, plural, shiftLeft, teamColor } from './format.js';
 import { createPanel, type PanelHandle } from './panel.js';
+import type { LiveryDef } from '@warehouse/protocol';
+import { liveryPaletteFor } from './liveries.js';
 
 export type LeaderRow = ReturnType<typeof leaderboard>[number];
 
@@ -40,7 +42,11 @@ export function leaderboardHeader(myRank: number | null, t: number): string {
   return `Win the shift${myRank ? ` · #${myRank}` : ''} · ends in ${shiftLeft(t)}`;
 }
 
-export function leaderRowEl(r: { rank: number; row: LeaderRow; mine: boolean }, onClick: () => void): HTMLElement {
+export function leaderRowEl(
+  r: { rank: number; row: LeaderRow; mine: boolean },
+  onClick: () => void,
+  livery: LiveryDef | null = null,
+): HTMLElement {
   const who = r.row.human && r.row.driver ? ` · ${r.row.driver}` : '';
   const modeTag = r.row.human
     ? `${r.row.runMode === 'freerange' ? '🌐 Free' : r.row.runMode === 'daily' ? '📅 Daily' : '⏱️ Blitz'}${r.row.streak && r.row.streak >= 3 ? ` · 🔥×${r.row.streak}` : ''}`
@@ -55,7 +61,7 @@ export function leaderRowEl(r: { rank: number; row: LeaderRow; mine: boolean }, 
     },
     [
       el('span', { class: 'rank muted', text: String(r.rank) }),
-      swatch(r.row.human ? teamColor('Human') : teamColor(r.row.strat)),
+      swatch(r.row.human ? (livery?.primary ?? teamColor('Human')) : teamColor(r.row.strat)),
       el('span', { class: 'grow ellipsis', text: `${r.row.id}${who}${r.mine ? ' ★ you' : ''}` }),
       el('span', { class: 'muted small', text: modeTag }),
       el('span', { class: 'pts b', text: String(Math.round(r.row.pts)) }),
@@ -113,6 +119,7 @@ export function mountLeaderboard(zone: HTMLElement, ctx: UiCtx): UiModule & { pa
       const w = store.world;
       const lb = leaderboard(w);
       const view = leaderboardView(lb, store.renderMyVid());
+      const liveryOf = (id: string) => liveryPaletteFor(w.vehicles.find((v) => v.id === id) ?? {});
       header.textContent = leaderboardHeader(view.myRank, w.t);
       rows.render(
         JSON.stringify(
@@ -125,6 +132,7 @@ export function mountLeaderboard(zone: HTMLElement, ctx: UiCtx): UiModule & { pa
             r.row.strat,
             r.row.runMode,
             r.row.streak,
+            liveryOf(r.row.id)?.id ?? null,
           ]),
         ),
         () => {
@@ -133,7 +141,7 @@ export function mountLeaderboard(zone: HTMLElement, ctx: UiCtx): UiModule & { pa
             if (i > 0 && r.rank > view.rows[i - 1].rank + 1) {
               out.push(el('div', { class: 'gap muted', text: '⋯' }));
             }
-            out.push(leaderRowEl(r, () => actions.select(r.row.id)));
+            out.push(leaderRowEl(r, () => actions.select(r.row.id), liveryOf(r.row.id)));
           });
           if (!out.length) out.push(el('div', { class: 'empty', text: 'No vehicles on the floor.' }));
           return out;

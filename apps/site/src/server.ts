@@ -40,6 +40,7 @@ import {
   LIVERIES,
   LIVERY_COOLDOWN_MS,
   isLiveryId,
+  liveryFromIndex,
   liveryIndex,
   newlyUnlocked,
   unlockedLiveries,
@@ -972,6 +973,8 @@ export async function createSiteServer(
     const human = Boolean(v.human) && !isBotFlag;
     // Best pallets per real minute over this player's runs (AI/bots never stored).
     const runPpm = human && runDeliveries > 0 ? computeDriverPpm(world, v) : 0;
+    // Equipped paint for the public board swatch (validated on every `setLivery`).
+    const runLivery = liveryFromIndex(v.livery);
     // Daily Shift completion gate: clock reached 00:00 (runFinished) with ≥ 1 delivery, humans
     // only, once per run. Evicted / disconnected mid-run never reaches runFinished.
     const daily =
@@ -981,13 +984,13 @@ export async function createSiteServer(
       human &&
       runDeliveries >= 1 &&
       typeof v.dailyKey === 'string'
-        ? { dayKey: v.dailyKey, pts: runPts, tape: v.runTape ?? '' }
+        ? { dayKey: v.dailyKey, pts: runPts, tape: v.runTape ?? '', livery: runLivery }
         : null;
     // Weekly League gate: any finished timed run (Blitz or Daily) with ≥ 1 delivery, humans
     // only, once per run. Free Range never counts. The run counts for the ISO week it finishes in.
     const league =
       !alreadyPersisted && v.runFinished && isTimedRun(runMode) && human && runDeliveries >= 1
-        ? { weekKey: weekKey(nowMs), pts: runPts }
+        ? { weekKey: weekKey(nowMs), pts: runPts, livery: runLivery }
         : null;
     // Private run summary (exact server tape) for the share card, once per finished human run.
     if (!alreadyPersisted && v.runFinished && human) {
@@ -1037,7 +1040,7 @@ export async function createSiteServer(
   async function recordLeagueCompletion(
     cid: string,
     playerName: string,
-    league: { weekKey: string; pts: number },
+    league: { weekKey: string; pts: number; livery: LiveryId },
     nowMs: number,
   ): Promise<void> {
     try {
@@ -1048,6 +1051,7 @@ export async function createSiteServer(
         siteId,
         weekKey: league.weekKey,
         pts: league.pts,
+        livery: league.livery,
         nowMs,
       });
       const { rank, of } = await persistence.getLeagueRank(league.weekKey, rec.weekPts);
@@ -1081,7 +1085,7 @@ export async function createSiteServer(
   async function recordDailyCompletion(
     cid: string,
     playerName: string,
-    daily: { dayKey: string; pts: number; tape: string },
+    daily: { dayKey: string; pts: number; tape: string; livery: LiveryId },
     nowMs: number,
   ): Promise<void> {
     try {
@@ -1093,6 +1097,7 @@ export async function createSiteServer(
         dayKey: daily.dayKey,
         pts: daily.pts,
         tape: daily.tape,
+        livery: daily.livery,
         nowMs,
       });
       const { rank, of } = await persistence.getDailyRank(daily.dayKey, rec.bestPts);

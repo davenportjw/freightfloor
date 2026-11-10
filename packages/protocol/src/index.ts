@@ -321,6 +321,27 @@ export const SiteSummarySchema = SiteStatusSchema;
 export type SiteStatus = z.infer<typeof SiteStatusSchema>;
 export type SiteSummary = SiteStatus;
 
+/**
+ * Stable livery order. A livery's index in this tuple is its wire value
+ * (`QuantisedVehicleDelta.livery`), so only ever APPEND new ids.
+ */
+export const LIVERY_IDS = [
+  'standard',
+  'night_shift',
+  'hi_vis',
+  'cold_chain',
+  'century',
+  'gold_fork',
+  'regional_den',
+  'regional_slc',
+  'regional_phx',
+  'regional_abq',
+  'champion',
+  'streak_30',
+] as const;
+export const LiveryIdSchema = z.enum(LIVERY_IDS);
+export type LiveryId = z.infer<typeof LiveryIdSchema>;
+
 export const LeaderboardEntrySchema = z.object({
   /** Always equal to `publicId` on the wire (never the raw clientId); kept for compatibility. */
   clientId: z.string().min(1),
@@ -335,6 +356,8 @@ export const LeaderboardEntrySchema = z.object({
   /** Optional pallets-per-minute; rendered only when a server supplies it (not populated yet). */
   ppm: z.number().nonnegative().optional(),
   isBot: z.boolean().optional(),
+  /** Equipped livery (cosmetic swatch on the board); omitted when the player never chose one. */
+  livery: LiveryIdSchema.optional(),
 });
 export const PlayerLeaderboardEntrySchema = LeaderboardEntrySchema;
 export type LeaderboardEntry = z.infer<typeof LeaderboardEntrySchema>;
@@ -680,26 +703,6 @@ export const DispatchersCallPrefMessageSchema = z.object({
 });
 export type DispatchersCallPrefMessage = z.infer<typeof DispatchersCallPrefMessageSchema>;
 
-/**
- * Stable livery order. A livery's index in this tuple is its wire value
- * (`QuantisedVehicleDelta.livery`), so only ever APPEND new ids.
- */
-export const LIVERY_IDS = [
-  'standard',
-  'night_shift',
-  'hi_vis',
-  'cold_chain',
-  'century',
-  'gold_fork',
-  'regional_den',
-  'regional_slc',
-  'regional_phx',
-  'regional_abq',
-  'champion',
-  'streak_30',
-] as const;
-export const LiveryIdSchema = z.enum(LIVERY_IDS);
-export type LiveryId = z.infer<typeof LiveryIdSchema>;
 
 /**
  * Client → site: equip an unlocked livery. `id` is a plain string so the site can answer an
@@ -2311,6 +2314,8 @@ export const DailyBoardRowSchema = z.object({
   pts: z.number().int(),
   streak: z.number().int().nonnegative(),
   siteId: z.string(),
+  /** Livery equipped on the player's latest Daily run that day (cosmetic swatch). */
+  livery: LiveryIdSchema.optional(),
 });
 export type DailyBoardRow = z.infer<typeof DailyBoardRowSchema>;
 
@@ -2411,6 +2416,8 @@ export const LeagueRowSchema = z.object({
   /** Timed runs finished this week (counted or not). */
   runs: z.number().int().nonnegative(),
   siteId: z.string(),
+  /** Livery equipped on the player's latest timed run that week (cosmetic swatch). */
+  livery: LiveryIdSchema.optional(),
 });
 export type LeagueRow = z.infer<typeof LeagueRowSchema>;
 

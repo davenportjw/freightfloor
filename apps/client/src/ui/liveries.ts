@@ -15,6 +15,17 @@ export function liveryPaletteFor(v: { human?: boolean; livery?: number | null })
   return LIVERIES[id];
 }
 
+/**
+ * Board swatch for a livery id from a public board row (`/api/network`, `/api/daily`,
+ * `/api/league`): its primary colour and name, or null to keep the human teal (unset, `standard`,
+ * or an id this client doesn't know yet).
+ */
+export function boardLivery(id: string | null | undefined): { color: string; name: string } | null {
+  if (!id || id === 'standard' || !(LIVERY_IDS as readonly string[]).includes(id)) return null;
+  const d = LIVERIES[id as LiveryId];
+  return { color: d.primary, name: d.name };
+}
+
 export interface GarageCard {
   id: LiveryId;
   name: string;

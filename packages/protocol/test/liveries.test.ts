@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DailyBoardRowSchema,
+  LeaderboardEntrySchema,
+  LeagueRowSchema,
   LIVERIES,
   LIVERY_IDS,
   LiveryIdSchema,
@@ -107,5 +110,22 @@ describe('unlockedLiveries truth table', () => {
     ]);
     expect(newlyUnlocked({ leagueWins: 1 }, { leagueWins: 2 })).toEqual([]);
     expect(newlyUnlocked(null, null)).toEqual([]);
+  });
+});
+
+describe('board rows carry an optional livery', () => {
+  const lb = { clientId: 'p1_x', name: 'Ada', deliveries: 3 };
+  const daily = { publicId: 'p1_x', name: 'Ada', pts: 10, streak: 1, siteId: 'site-den-1' };
+  const league = { publicId: 'p1_x', name: 'Ada', weekPts: 10, runs: 1, siteId: 'site-den-1' };
+  it('accepts catalog ids and omission', () => {
+    for (const [schema, row] of [[LeaderboardEntrySchema, lb], [DailyBoardRowSchema, daily], [LeagueRowSchema, league]] as const) {
+      expect(schema.safeParse(row).success).toBe(true);
+      expect(schema.parse({ ...row, livery: 'gold_fork' })).toMatchObject({ livery: 'gold_fork' });
+    }
+  });
+  it('rejects ids outside the catalog', () => {
+    for (const [schema, row] of [[LeaderboardEntrySchema, lb], [DailyBoardRowSchema, daily], [LeagueRowSchema, league]] as const) {
+      expect(schema.safeParse({ ...row, livery: 'rainbow' }).success).toBe(false);
+    }
   });
 });

@@ -9,7 +9,7 @@ import { LIVERIES, liveryIndex, quantiseCoord, type LiveryId } from '@warehouse/
 import { createWorld } from '@warehouse/sim';
 import { applyQuantisedDelta, ClientStore, FLYOUT_IDS } from '../src/state.js';
 import type { RenderVehicleOverlay } from '../src/renderer.js';
-import { diffSeenUnlocks, garageButton, garageCards, liveryPaletteFor } from '../src/ui/liveries.js';
+import { boardLivery, diffSeenUnlocks, garageButton, garageCards, liveryPaletteFor } from '../src/ui/liveries.js';
 import { eventForClientMessage, unlockEvents } from '../src/analytics.js';
 import { vehicleParts } from '../src/render/vehicles.js';
 
@@ -148,5 +148,18 @@ describe('livery analytics', () => {
     expect(unlockEvents(['champion'])).toEqual([
       { name: 'unlock_achievement', params: { achievement_id: 'livery_champion' } },
     ]);
+  });
+});
+
+describe('boardLivery (public board swatches)', () => {
+  it('maps a catalog id to its colour and name', () => {
+    expect(boardLivery('gold_fork')).toEqual({ color: LIVERIES.gold_fork.primary, name: LIVERIES.gold_fork.name });
+  });
+  it('keeps the human teal for unset, standard, or unknown ids', () => {
+    expect(boardLivery(undefined)).toBeNull();
+    expect(boardLivery(null)).toBeNull();
+    expect(boardLivery('standard')).toBeNull();
+    expect(boardLivery('rainbow')).toBeNull();
+    expect(boardLivery('toString')).toBeNull();
   });
 });

@@ -325,6 +325,25 @@ describe('applyLeagueRun / leagueEntryExpireAt', () => {
   });
 });
 
+describe('board livery on entries', () => {
+  it('stores the run livery on the Daily entry and keeps the last one when a run has none', () => {
+    const first = applyDailyResult(null, null, input({ pts: 400, livery: 'hi_vis' }));
+    expect(first.entry.livery).toBe('hi_vis');
+    const worse = applyDailyResult(null, first.entry, input({ pts: 100, livery: 'night_shift' }));
+    expect(worse.entry.livery).toBe('night_shift');
+    const none = applyDailyResult(null, worse.entry, input({ pts: 50 }));
+    expect(none.entry.livery).toBe('night_shift');
+    expect(applyDailyResult(null, null, input())).not.toHaveProperty('entry.livery');
+  });
+
+  it('stores the run livery on the league entry and keeps the last one when a run has none', () => {
+    const first = applyLeagueRun(null, leagueInput({ pts: 40, livery: 'champion' }));
+    expect(first.entry.livery).toBe('champion');
+    expect(applyLeagueRun(first.entry, leagueInput({ pts: 10 })).entry.livery).toBe('champion');
+    expect(applyLeagueRun(null, leagueInput()).entry).not.toHaveProperty('livery');
+  });
+});
+
 describe('livery profile fields', () => {
   it('tracks daily sites (deduplicated) through applyDailyResult', () => {
     expect(addDailySite(undefined, 'den-1')).toEqual(['den-1']);

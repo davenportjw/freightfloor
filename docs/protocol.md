@@ -63,7 +63,7 @@ Returns aggregated live status for all warehouse shards (from Firestore heartbea
 | Field | Type | Description |
 |---|---|---|
 | `sites` | `SiteStatus[]` | Array of shard statuses: `{ id: SiteId, state: 'live' \| 'online' \| 'break' \| 'offline', drivers: number, spectators: number, tier: number, shipped: number, phase: Phase, wsUrl?: string, updatedAt?: number, maxDrivers?: number }`. `maxDrivers` is the per-site driver cap reported by the site heartbeat (site `MAX_DRIVERS`), falling back to the lobby's `MAX_DRIVERS_PER_SITE` (32) when the heartbeat has not reported one. |
-| `leaderboard` | `LeaderboardEntry[]` | Top players across the distribution network: `{ clientId: string, publicId: string, name: string, siteId?: SiteId, points?: number, lifetimePoints?: number, bestBlitzPts?: number, deliveries: number, isBot?: boolean, ppm?: number }` (`ppm` = the player's best pallets delivered per real minute in a run, sim `computeDriverPpm`; stored by the site on the Firestore player doc and omitted until the player has a delivery). **Raw clientIds are never exposed**: `clientId` and `publicId` both carry the opaque publicId (raw clientIds are bearer credentials for queue claims and own-identity joins). |
+| `leaderboard` | `LeaderboardEntry[]` | Top players across the distribution network: `{ clientId: string, publicId: string, name: string, siteId?: SiteId, points?: number, lifetimePoints?: number, bestBlitzPts?: number, deliveries: number, isBot?: boolean, ppm?: number, livery?: LiveryId }` (`livery` = the equipped paint from the player doc, a board swatch, omitted when unset or not a catalog id; `ppm` = the player's best pallets delivered per real minute in a run, sim `computeDriverPpm`; stored by the site on the Firestore player doc and omitted until the player has a delivery). **Raw clientIds are never exposed**: `clientId` and `publicId` both carry the opaque publicId (raw clientIds are bearer credentials for queue claims and own-identity joins). |
 | `queueSize` | `number?` | Current number of players waiting in the global FIFO driver seat queue. |
 | `maxTotalDrivers` | `number?` | Network-wide human driver cap across all active shards. |
 | `maxWarehouses` | `number?` | Maximum number of active warehouse shards in the network. |
@@ -88,7 +88,7 @@ The Daily Shift board for one UTC day. Entries are written only by the site (hum
 | Field | Type | Description |
 |---|---|---|
 | `info` | `DailyInfo` | `dailyInfoFor(date)`. |
-| `top` | `DailyBoardRow[]` (≤ `DAILY_BOARD_SIZE` = 20) | `{ publicId, name, pts, streak, siteId }` sorted by best points, descending. `pts` is the player's best score that day; `streak` is their Daily streak as of their latest completion that day. Reserved bot names are filtered out. |
+| `top` | `DailyBoardRow[]` (≤ `DAILY_BOARD_SIZE` = 20) | `{ publicId, name, pts, streak, siteId, livery? }` sorted by best points, descending. `livery` is the paint on the player's latest Daily run that day (a board swatch; omitted when unset). `pts` is the player's best score that day; `streak` is their Daily streak as of their latest completion that day. Reserved bot names are filtered out. |
 | `entrants` | `number` | Players with an entry for that day. |
 | `you` | `{ rank, bestPts, attempts }?` | Present when `publicId` has an entry. `rank` = 1 + entries with strictly more points (ties share a rank). |
 
@@ -116,7 +116,7 @@ The Weekly League board for one ISO week (Monday 00:00 UTC start). Entries are w
 |---|---|---|
 | `weekKey` | `WeekKey` | The resolved week. |
 | `endsAt` | `number` | Epoch ms of the next Monday 00:00 UTC (`weekEndMs`). |
-| `top` | `LeagueRow[]` (≤ `LEAGUE_BOARD_SIZE` = 20) | `{ publicId, name, weekPts, runs, siteId }` sorted by `weekPts`, descending. `runs` counts every timed run finished that week. Reserved bot names are filtered out. |
+| `top` | `LeagueRow[]` (≤ `LEAGUE_BOARD_SIZE` = 20) | `{ publicId, name, weekPts, runs, siteId, livery? }` sorted by `weekPts`, descending. `livery` is the paint on the player's latest timed run that week (a board swatch; omitted when unset). `runs` counts every timed run finished that week. Reserved bot names are filtered out. |
 | `entrants` | `number` | Players with an entry for that week. |
 | `you` | `{ rank, weekPts, runsCounted }?` | Present when `publicId` has an entry. `rank` = 1 + entries with strictly more week points (ties share a rank). |
 | `finalized` | `boolean` | `true` once the week has closed and its podium has been recorded. |
@@ -443,7 +443,7 @@ Shared by the sim, site, lobby and client so every shard agrees on the day's Dai
 | `nextDailyStreak(prev, today)` | Pure streak step for a completed Daily: same day → unchanged (`streakDelta 0`); previous day → `+1`; gap, no history, or malformed/future key → `1`. Also tracks `bestDailyStreak` and `dailiesCompleted` (first completion per day only). |
 | `displayStreak(lastDailyKey, streak, today)` | Read-time decay: the stored streak while `lastDailyKey >= yesterday`, else `0`. |
 | `DAILY_ENTRY_TTL_DAYS` / `DAILY_BOARD_SIZE` | `120` (board entries expire 120 days after their day) / `20` (rows in `GET /api/daily`). |
-| `DailyBoardRowSchema` / `DailyBoardResponseSchema` | `GET /api/daily` row `{ publicId, name, pts, streak, siteId }` and response `{ info, top, entrants, you? }`. |
+| `DailyBoardRowSchema` / `DailyBoardResponseSchema` | `GET /api/daily` row `{ publicId, name, pts, streak, siteId, livery? }` and response `{ info, top, entrants, you? }`. |
 | `DailyResultMessageSchema` | The private `dailyResult` server message (§3). |
 | `RunSummaryMessageSchema` / `DailyStatusMessageSchema` / `RunTapeSchema` | The private `runSummary` and `dailyStatus` server messages (§3) and the run-tape string rule. |
 | `weekKeyToStartMs(key)` / `weekEndMs(key)` / `addWeeks(key, n)` / `previousWeekKey(ms)` | ISO-week helpers (UTC, Monday start; ISO week 53 years handled). `weekKeyToStartMs` throws on a malformed or nonexistent key. |

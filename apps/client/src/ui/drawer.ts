@@ -10,6 +10,7 @@ import { button, el, KeyedView, swatch } from './dom.js';
 import { DASH, eventColor, teamColor, timeOfDay } from './format.js';
 import { hallRows, leaderboardView, leaderRowEl } from './leaderboard.js';
 import { valueChartBlock } from './valueChart.js';
+import { liveryPaletteFor } from './liveries.js';
 
 export const DRAWER_TAB_LABEL: Record<DrawerTab, string> = {
   leaderboard: 'Leaderboard',
@@ -53,7 +54,9 @@ export function mountDrawer(drawer: HTMLElement, ctx: UiCtx): UiModule {
         return [
           openFullBtn,
           el('div', { class: 'label sub', text: 'This shift' }),
-          ...v.rows.map((r) => leaderRowEl(r, () => actions.select(r.row.id))),
+          ...v.rows.map((r) =>
+            leaderRowEl(r, () => actions.select(r.row.id), liveryPaletteFor(w.vehicles.find((x) => x.id === r.row.id) ?? {})),
+          ),
           w.hallOfFame.length ? el('div', { class: 'label sub', text: 'Hall of fame' }) : el('span'),
           ...hallRows(w, 10),
           el('div', { class: 'label sub', text: 'Network (lifetime)' }),

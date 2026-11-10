@@ -15,6 +15,7 @@ import { button, el, KeyedView, swatch, type Child } from './dom.js';
 import { difficultyLabel, shiftLeft, teamColor } from './format.js';
 import { createFocusTrap, type TrapContainer } from './focusTrap.js';
 import { leagueEndsInText } from './league.js';
+import { boardLivery, liveryPaletteFor } from './liveries.js';
 import { LEAGUE_TOP_RUNS } from '@warehouse/protocol';
 
 export interface SillyAward {
@@ -36,6 +37,12 @@ function formatHolder(v: Vehicle): string {
   return v.human && v.driver ? `${v.driver} (${v.id})` : v.id;
 }
 
+
+/** Row swatch for a public board entry: the driver's livery colour (titled), else the human teal. */
+function boardSwatch(id: string | undefined): HTMLElement {
+  const b = boardLivery(id);
+  return el('i', { class: 'swatch', style: { background: b?.color ?? teamColor('Human') }, ...(b ? { title: `${b.name} livery` } : {}) });
+}
 /**
  * Pure helper computing the 6 live Silly Superlatives from authoritative `world.vehicles`.
  * Never invents numbers: when no vehicle has triggered a given mishap yet, returns a clean zero state.
@@ -418,7 +425,7 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
           el('td', { class: 'num muted', text: `#${idx + 1}` }),
           el('td', {}, [
             el('div', { class: 'lb-driver-cell' }, [
-              swatch(r.human ? teamColor('Human') : teamColor(r.strat)),
+              swatch(r.human ? (liveryPaletteFor(v ?? {})?.primary ?? teamColor('Human')) : teamColor(r.strat)),
               el('span', { text: who }),
               mine ? el('span', { class: 'tag lb-you-tag', text: '★ YOU' }) : null,
               r.human && !mine ? el('span', { class: 'tag', text: 'driver' }) : null,
@@ -662,7 +669,7 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
                   typeof e.ppm === 'number' && e.ppm > 0 ? `${e.ppm.toFixed(1)} PPM · ` : '';
                 return el('div', { class: `lb-row num${mine ? ' row-hl b' : ''}` }, [
                   el('span', { class: 'rank muted', text: `#${i + 1}` }),
-                  swatch(teamColor('Human')),
+                  boardSwatch(e.livery),
                   el('span', {
                     class: 'grow ellipsis',
                     text: `${e.name}${e.siteId ? ` · ${e.siteId.toUpperCase()}` : ''}${mine ? ' ★ you' : ''}`,
@@ -714,7 +721,7 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
           const mine = me !== null && r.publicId === me;
           return el('div', { class: `lb-row num${mine ? ' row-hl b' : ''}`, attrs: { 'data-public-id': r.publicId } }, [
             el('span', { class: 'rank muted', text: `#${i + 1}` }),
-            swatch(teamColor('Human')),
+            boardSwatch(r.livery),
             el('span', {
               class: 'grow ellipsis',
               text: `${r.name}${r.siteId ? ` · ${r.siteId.toUpperCase()}` : ''}${mine ? ' ★ you' : ''}`,
@@ -787,7 +794,7 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
           const mine = me !== null && r.publicId === me;
           return el('div', { class: `lb-row num${mine ? ' row-hl b' : ''}`, attrs: { 'data-public-id': r.publicId } }, [
             el('span', { class: 'rank muted', text: `#${i + 1}` }),
-            swatch(teamColor('Human')),
+            boardSwatch(r.livery),
             el('span', {
               class: 'grow ellipsis',
               text: `${r.name}${r.siteId ? ` · ${r.siteId.toUpperCase()}` : ''}${mine ? ' ★ you' : ''}`,
