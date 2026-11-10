@@ -102,6 +102,8 @@ export interface Actions {
   nlCommand(text: string): void;
   switchSite(siteId: SiteId): void;
   refreshNetwork(): void;
+  /** Re-fetch today's Daily board (`store.dailyBoard`). */
+  refreshDailyBoard(): void;
   /**
    * Find and switch to an existing callsign or resume code (`wr1_…`) via the lobby.
    * Returns null on success or an error string (new names are rejected).

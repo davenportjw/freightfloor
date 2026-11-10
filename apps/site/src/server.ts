@@ -33,6 +33,8 @@ import {
   type VehicleDecision,
   type Transfer,
   type WelcomeMessage,
+  dayKey,
+  displayStreak,
 } from '@warehouse/protocol';
 import {
   ArmorGuard,
@@ -831,6 +833,39 @@ export async function createSiteServer(
   const annexServers = new Map<SiteId, SiteServerInstance>();
   const annexCreationPromises = new Map<SiteId, Promise<SiteServerInstance>>();
 
+  /** Sends a private message to every authenticated socket owned by `cid`. */
+  function sendToOwner(cid: string, msg: ServerMessage): void {
+    for (const c of clients) {
+      if (c.authenticated && c.clientId === cid) sendTo(c.socket, msg);
+    }
+  }
+
+  /**
+   * Privately tells a human driver their Daily streak (read-decayed) after `welcome`. A failed
+   * profile read is logged and no status is sent; nothing is invented.
+   */
+  function sendDailyStatus(conn: ConnectedClient, nowMs: number): void {
+    const cid = conn.clientId;
+    if (!cid || conn.isBot) return;
+    const today = dayKey(nowMs);
+    persistence
+      .getPlayerStats(cid)
+      .then((p) => {
+        const last = p?.lastDailyKey ?? null;
+        sendTo(conn.socket, {
+          type: 'dailyStatus',
+          dailyKey: today,
+          streak: displayStreak(last, p?.dailyStreak ?? 0, today),
+          bestStreak: p?.bestDailyStreak ?? 0,
+          playedToday: last === today,
+        });
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[${siteId}] daily status read failed: ${message}`);
+      });
+  }
+
   async function persistVehicleStats(
     cid: string,
     playerName: string,
@@ -866,6 +901,17 @@ export async function createSiteServer(
       typeof v.dailyKey === 'string'
         ? { dayKey: v.dailyKey, pts: runPts, tape: v.runTape ?? '' }
         : null;
+    // Private run summary (exact server tape) for the share card, once per finished human run.
+    if (!alreadyPersisted && v.runFinished && human) {
+      sendToOwner(cid, {
+        type: 'runSummary',
+        runMode,
+        pts: runPts,
+        deliveries: runDeliveries,
+        tape: (v.runTape ?? '').slice(0, 40),
+        ...(runMode === 'daily' && typeof v.dailyKey === 'string' ? { dailyKey: v.dailyKey } : {}),
+      });
+    }
     await persistence.recordRunStats({
       clientId: cid,
       name: playerName,
@@ -891,11 +937,6 @@ export async function createSiteServer(
     daily: { dayKey: string; pts: number; tape: string },
     nowMs: number,
   ): Promise<void> {
-    const sendToOwner = (msg: ServerMessage): void => {
-      for (const c of clients) {
-        if (c.authenticated && c.clientId === cid) sendTo(c.socket, msg);
-      }
-    };
     try {
       const rec = await persistence.recordDailyResult({
         clientId: cid,
@@ -908,7 +949,7 @@ export async function createSiteServer(
         nowMs,
       });
       const { rank, of } = await persistence.getDailyRank(daily.dayKey, rec.bestPts);
-      sendToOwner({
+      sendToOwner(cid, {
         type: 'dailyResult',
         dailyKey: daily.dayKey,
         pts: Math.round(daily.pts),
@@ -923,7 +964,7 @@ export async function createSiteServer(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[${siteId}] daily result write failed for ${daily.dayKey}: ${message}`);
-      sendToOwner({
+      sendToOwner(cid, {
         type: 'error',
         code: 'daily_record_failed',
         message: 'Your Daily Shift score could not be saved. Please try again.',
@@ -2370,6 +2411,7 @@ export async function createSiteServer(
 
     conn.trafficLayer = false;
     sendTo(conn.socket, buildWelcome(conn));
+    sendDailyStatus(conn, nowMs);
 
     sendTo(conn.socket, {
       type: 'phase',

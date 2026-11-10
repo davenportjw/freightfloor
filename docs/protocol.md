@@ -171,7 +171,9 @@ type ServerMessage =
   | { type: 'relocationOffer'; fromSite: SiteId; targetSite: SiteId; targetDrivers: number; bonusPts: number; expiresAt: number; reason: string }
   | { type: 'relocateShard'; siteId: SiteId; wsUrl: string; ticket: string; expiresAt: number; bonusPts: number }
   | { type: 'runEvicted'; vid: number; reason: EvictionReason; pts: number; shipped: number; incidents: number; bestStreak: number; runMode: RunMode }
-  | { type: 'dailyResult'; dailyKey: string; pts: number; dailyBest: number; improved: boolean; dailyRank: number; dailyOf: number; attempts: number; streak: number; streakDelta: number };
+  | { type: 'dailyResult'; dailyKey: string; pts: number; dailyBest: number; improved: boolean; dailyRank: number; dailyOf: number; attempts: number; streak: number; streakDelta: number }
+  | { type: 'runSummary'; runMode: RunMode; pts: number; deliveries: number; tape: string; dailyKey?: string }
+  | { type: 'dailyStatus'; dailyKey: string; streak: number; bestStreak: number; playedToday: boolean };
 ```
 
 | `type` | Fields | Description |
@@ -191,6 +193,8 @@ type ServerMessage =
 | `relocateShard` | `siteId: SiteId`, `wsUrl: string`, `ticket: string`, `expiresAt: number` (epoch ms, the ticket's `exp`), `bonusPts: number` | Sent after `acceptRelocation`, containing a pre-signed carry-over `ticket` and `wsUrl` so the client can seamlessly reconnect to `siteId` without losing progress. |
 | `runEvicted` | `vid: number`, `reason: 'run_complete' \| 'idle_timeout' \| 'session_lease_expired' \| 'hard_cap_timeout' \| 'zero_deliveries_timeout'`, `pts: number`, `shipped: number`, `incidents: number`, `bestStreak: number`, `runMode: RunMode` | Sent to a driver when their seat lease is reclaimed upon run completion, idle timeout, session lease expiry, zero-delivery timeout, or Free Range hard-cap timeout, transitioning the connection to spectator mode with final run stats. |
 | `dailyResult` | `dailyKey`, `pts`, `dailyBest`, `improved`, `dailyRank`, `dailyOf`, `attempts`, `streak`, `streakDelta` | Private: sent only to the finishing driver's own sockets after a **completed** Daily Shift (clock reached 00:00 with ≥ 1 delivery; humans only) is recorded. `dailyBest` is the player's best score today (best of unlimited attempts), `dailyRank`/`dailyOf` their 1-based standing among today's entrants, `streak` the updated daily streak and `streakDelta` `1` on the day's first completion, else `0`. Not sent when the write fails. |
+| `runSummary` | `runMode`, `pts`, `deliveries`, `tape`, `dailyKey?` | Private: sent to a human driver's own sockets once, the moment their run finishes (clock reached 00:00). `tape` is the exact server `runTape` (`RunTapeSchema`: `O` on-time, `L` late, `X` incident, ≤ 40 chars) for the share card; it is never broadcast in `delta`. `dailyKey` is set for Daily runs. |
+| `dailyStatus` | `dailyKey`, `streak`, `bestStreak`, `playedToday` | Private: sent once after `welcome` to human drivers from their stored profile. `streak` is the read-decayed Daily streak (`displayStreak`, 0 after a missed day); `playedToday` is true when the player already completed today's Daily. Not sent when the profile read fails (the failure is logged). |
 
 **Opaque player ids on the wire**: every `clientId` the site sends (`welcome.you.clientId`, `presence.players[].clientId`, `snapshot.vehicles[].ownerClientId`/`controlledByClientId`, `snapshot.players`, `snapshot.difficultyVotes` / `delta.votes` keys, `snapshot.cards` / `delta.hands` keys, `completedRuns[].clientId`, and event `clientId` / `owner` / `player` fields) is the player's **publicId** (`p1_…`, same derivation as the lobby), never the raw clientId. The mapping is uniform, so the recipient's own id is also its publicId and client-side equality checks work unchanged. The sim, Firestore snapshots, and heartbeats keep raw clientIds internally.
 
@@ -382,6 +386,7 @@ Shared by the sim, site, lobby and client so every shard agrees on the day's Dai
 | `DAILY_ENTRY_TTL_DAYS` / `DAILY_BOARD_SIZE` | `120` (board entries expire 120 days after their day) / `20` (rows in `GET /api/daily`). |
 | `DailyBoardRowSchema` / `DailyBoardResponseSchema` | `GET /api/daily` row `{ publicId, name, pts, streak, siteId }` and response `{ info, top, entrants, you? }`. |
 | `DailyResultMessageSchema` | The private `dailyResult` server message (§3). |
+| `RunSummaryMessageSchema` / `DailyStatusMessageSchema` / `RunTapeSchema` | The private `runSummary` and `dailyStatus` server messages (§3) and the run-tape string rule. |
 
 `CompletedRunRecord` (sim, persisted with completed runs) gains `dailyKey?: string \| null` on daily runs and `tape?: string` on every run (`O` on-time, `L` late, `X` incident; max `RUN_TAPE_MAX = 40`).
 

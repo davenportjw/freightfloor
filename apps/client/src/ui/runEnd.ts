@@ -6,7 +6,8 @@
  * - Progression & rival callout bar (PB / delta vs previous run, and next rival or #1 status)
  * - Compact embedded leaderboard table with filter tabs (All: Humans + AI vs Human Runs Only)
  * - AI telemetry coach line and contracts outcome line
- * - Footer actions: Full Standings, Watch the floor, Play again ↵
+ * - Daily runs: today's rank (`#7 of 213`), the streak line, and a Share button (share card)
+ * - Footer actions: Full Standings, Watch the floor, Play again ↵ (Daily again on Daily runs)
  * Every number comes from `ui.runEnd` (built from the live vehicle and world in main.ts checkRunEnd).
  */
 import { isLeaseEvictionReason, type RunEndLeaderboardRow, type RunEndSummary } from '../state.js';
@@ -16,8 +17,30 @@ import { presenceView } from './presence.js';
 import { createFocusTrap, type TrapContainer } from './focusTrap.js';
 import { recapDecisionText, recapDirectiveText } from './aiInsight.js';
 import { runDeltaHeadline } from './runOne.js';
+import { buildShareText, shareResult, type ShareNavigator, type ShareOutcome } from './shareCard.js';
+import type { DailyResultMessage, DailyStatusMessage } from '@warehouse/protocol';
 
 export type RunEndFilterTab = 'all' | 'humans';
+
+/** Daily standing line on the results sheet: rank once recorded, the real save error, or saving. */
+export function dailyRankText(result: DailyResultMessage | null, error: string | null): string {
+  if (result) {
+    const best = result.improved ? 'new best today' : `best today ${result.dailyBest.toLocaleString('en-US')}`;
+    return `#${result.dailyRank} of ${result.dailyOf} today · ${best}`;
+  }
+  if (error) return `Daily not saved: ${error}`;
+  return 'Saving your Daily…';
+}
+
+/** Streak line for a recorded Daily (`bestStreak` from my status, for the restart case). */
+export function dailyStreakText(result: DailyResultMessage, status: DailyStatusMessage | null): string {
+  if (result.streakDelta > 0) {
+    if (result.streak > 1) return `🔥 ${result.streak} — extended!`;
+    const best = status?.bestStreak ?? 0;
+    return best > 1 ? `🔥 1 — streak reset · best 🔥${best}` : '🔥 1 — streak started';
+  }
+  return `🔥 ${result.streak} · attempt ${result.attempts} today`;
+}
 
 /** Fare-core run stats: best combo, SPEEDY share of rated trips, cards completed. */
 export function runEndFareStats(
@@ -106,6 +129,71 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
   const focusTrap = createFocusTrap(overlay as unknown as TrapContainer<HTMLElement>);
   /** The primary "Run again" button of the last render (initial focus for the trap). */
   let playAgainBtn: HTMLElement | null = null;
+  /** Last share attempt for the shown summary (reset when a new summary opens). */
+  let shareState: ShareOutcome | { status: 'idle' } | { status: 'pending' } = { status: 'idle' };
+
+  async function doShare(): Promise<void> {
+    const { store, actions } = ctx;
+    const summary = store.runSummary;
+    if (!summary) return;
+    const daily = store.daily;
+    const result = store.dailyResult;
+    const isDaily = summary.runMode === 'daily' && daily !== null && (!summary.dailyKey || summary.dailyKey === daily.dayKey);
+    const share = buildShareText({
+      runMode: summary.runMode,
+      tape: summary.tape,
+      pts: summary.pts,
+      deliveries: summary.deliveries,
+      daily: isDaily && daily
+        ? {
+            number: daily.number,
+            modifierLabel: daily.modifier.label,
+            ...(result && result.dailyKey === daily.dayKey
+              ? { rank: result.dailyRank, of: result.dailyOf, streak: result.streak }
+              : {}),
+          }
+        : null,
+      origin: typeof location !== 'undefined' ? location.origin : undefined,
+    });
+    shareState = { status: 'pending' };
+    store.changed();
+    const nav = typeof navigator !== 'undefined' ? (navigator as unknown as ShareNavigator) : undefined;
+    shareState = await shareResult(share, nav);
+    if (shareState.status === 'copied') actions.notify('status', 'Result copied to the clipboard');
+    else if (shareState.status === 'manual') actions.notify('error', `Could not share automatically (${shareState.error}). Copy the text below.`);
+    store.changed();
+  }
+
+  function shareRow(): HTMLElement {
+    const ready = ctx.store.runSummary !== null;
+    const btn = button(
+      shareState.status === 'pending' ? 'Sharing…' : '📤 Share',
+      'ghost',
+      () => void doShare(),
+      ready ? 'Share your result (no card spoilers)' : 'Waiting for the final run tape from the server',
+    );
+    btn.dataset.role = 'share-result';
+    if (!ready || shareState.status === 'pending') btn.setAttribute('disabled', '');
+    const status =
+      shareState.status === 'copied'
+        ? 'Copied ✓'
+        : shareState.status === 'shared'
+          ? 'Shared ✓'
+          : !ready
+            ? 'Waiting for run tape…'
+            : '';
+    const children: (HTMLElement | null)[] = [btn, status ? el('span', { class: 'muted', text: ` ${status}` }) : null];
+    if (shareState.status === 'manual') {
+      const ta = el('textarea', {
+        class: 'share-manual',
+        attrs: { readonly: '', rows: '5', 'data-role': 'share-manual', 'aria-label': 'Share text' },
+      }) as HTMLTextAreaElement;
+      ta.value = shareState.text;
+      ta.addEventListener('focus', () => ta.select());
+      children.push(ta);
+    }
+    return el('div', { class: 'ct-line', attrs: { 'data-role': 'share-row' } }, children);
+  }
 
   function render(s: RunEndSummary): void {
     const { store, actions } = ctx;
@@ -418,15 +506,16 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
       );
     }
 
+    const againMode = s.runMode === 'daily' ? 'daily' : 'blitz';
     const again = button(
       '',
       'go',
-      () => actions.retryNewRun('blitz'),
+      () => actions.retryNewRun(againMode),
       isQueuedOrFull
         ? `Join the FIFO waiting line for ${s.nextRunName}`
         : `Start ${s.nextRunName} with a fresh vehicle and new contracts`,
     );
-    again.append(isQueuedOrFull ? 'Get Back in Line ' : 'Run again ', kbd('↵'));
+    again.append(isQueuedOrFull ? 'Get Back in Line ' : againMode === 'daily' ? 'Daily again ' : 'Run again ', kbd('↵'));
     again.dataset.role = 'play-again';
     again.setAttribute('data-role', 'play-again');
     playAgainBtn = again;
@@ -458,7 +547,29 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
             ? '⏱ Lease Complete'
             : s.runMode === 'freerange'
               ? '🏁 Run over'
-              : '🏁 Blitz complete';
+              : s.runMode === 'daily'
+                ? `📅 Daily${store.daily ? ` #${store.daily.number}` : ''} complete`
+                : '🏁 Blitz complete';
+
+    let dailyEl: HTMLElement | null = null;
+    if (s.runMode === 'daily') {
+      const result = store.dailyResult;
+      dailyEl = el('div', { class: 'results-context-bar', attrs: { 'data-role': 'daily-result' } }, [
+        el('span', {
+          class: `results-pill ${store.dailyResultError && !result ? 'warn' : 'good'}`,
+          attrs: { 'data-role': 'daily-rank' },
+          text: dailyRankText(result, store.dailyResultError),
+        }),
+        result
+          ? el('span', {
+              class: 'results-pill rival',
+              attrs: { 'data-role': 'daily-streak' },
+              text: dailyStreakText(result, store.dailyStatus),
+            })
+          : null,
+        store.daily ? el('span', { class: 'muted', text: ` ${store.daily.modifier.label}` }) : null,
+      ]);
+    }
 
     const card = el(
       'div',
@@ -480,6 +591,7 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
           box(String(s.deliveries), delivSub),
           box(`×${(s.comboBest ?? 1).toFixed(1)}`, `best combo · ${s.onTimePct}% on-time`),
         ]),
+        ...(dailyEl ? [dailyEl] : []),
         el('div', { class: 'results-context-bar', attrs: { 'data-role': 'results-context' } }, contextPills),
         el('div', { class: 'results-lb' }, [
           el('div', { class: 'results-lb-head' }, [
@@ -491,6 +603,7 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
         ...(aiCoachEl ? [aiCoachEl] : []),
         ...(recapEl ? [recapEl] : []),
         el('div', { class: 'ct-line', attrs: { 'data-role': 'results-contracts' }, text: contractsLine(cards) }),
+        s.runMode === 'freerange' ? null : shareRow(),
         el('div', { class: 'sheet-foot' }, [
           fullStandingsBtn,
           el('span', { class: 'grow' }),
@@ -518,6 +631,7 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
         if (!summary) {
           lastRenderedSummary = null;
           lastRenderKey = '';
+          shareState = { status: 'idle' };
         }
         return;
       }
@@ -537,9 +651,17 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
         q?.totalQueued ?? q?.queueSize,
         q?.estimatedWaitSec,
         q?.seatLeaseId,
+        ctx.store.runSummary?.tape ?? null,
+        ctx.store.dailyResult?.dailyRank ?? null,
+        ctx.store.dailyResult?.dailyOf ?? null,
+        ctx.store.dailyResultError,
+        shareState.status,
       ]);
       if (summary !== lastRenderedSummary || renderKey !== lastRenderKey) {
-        if (summary !== lastRenderedSummary) activeTab = 'all';
+        if (summary !== lastRenderedSummary) {
+          activeTab = 'all';
+          if (lastRenderedSummary !== null) shareState = { status: 'idle' };
+        }
         lastRenderedSummary = summary;
         lastRenderKey = renderKey;
         render(summary);

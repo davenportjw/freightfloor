@@ -2036,11 +2036,21 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
       streak: 1,
       streakDelta: 1,
     });
+    // The finisher's private run summary carries the exact server tape.
+    const summary = await ok.client.waitForType('runSummary');
+    expect(summary).toEqual({ type: 'runSummary', runMode: 'daily', pts: 240, deliveries: 3, tape: 'OOO', dailyKey: dayKey });
     await new Promise((r) => setTimeout(r, 50));
     // Only the finisher's own socket hears about it; zero-delivery, unfinished and bot runs never enter.
     for (const other of [zero, running, bot]) {
       expect(other.client.messages.some((m) => m.type === 'dailyResult')).toBe(false);
     }
+    // A finished zero-delivery run still gets its summary; unfinished and bot runs do not.
+    expect(zero.client.messages.some((m) => m.type === 'runSummary')).toBe(true);
+    expect(running.client.messages.some((m) => m.type === 'runSummary')).toBe(false);
+    expect(bot.client.messages.some((m) => m.type === 'runSummary')).toBe(false);
+    // Humans get their (empty) Daily status after welcome; bots never do.
+    expect(ok.client.messages.find((m) => m.type === 'dailyStatus')).toMatchObject({ streak: 0, bestStreak: 0, playedToday: false });
+    expect(bot.client.messages.some((m) => m.type === 'dailyStatus')).toBe(false);
     expect(await store.getDailyRank(dayKey, 0)).toEqual({ rank: 2, of: 1 });
     const profile = await store.getPlayerStats('daily-ok');
     expect(profile).toMatchObject({ dailyStreak: 1, bestDailyStreak: 1, lastDailyKey: dayKey, dailiesCompleted: 1 });
@@ -2048,5 +2058,34 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     expect(profile?.bestBlitzPts).toBeUndefined();
     expect(profile?.totalDeliveries).toBe(3);
   });
-});
 
+  it('35. sends a returning player their read-decayed Daily streak after welcome', async () => {
+    const { server, wsUrl } = await bootServer();
+    const today = dayKeyOf(Date.now());
+    const yesterday = dayKeyOf(Date.now() - 86_400_000);
+    const twoAgo = dayKeyOf(Date.now() - 2 * 86_400_000);
+    const seed = (cid: string, day: string) =>
+      server.persistence.recordDailyResult({
+        clientId: cid,
+        publicId: 'p1_' + 'x'.repeat(22),
+        name: cid,
+        siteId: 'den-1',
+        dayKey: day,
+        pts: 100,
+        tape: 'O',
+        nowMs: Date.now(),
+      });
+    await seed('streak-live', twoAgo);
+    await seed('streak-live', yesterday);
+    await seed('streak-today', today);
+    await seed('streak-lapsed', twoAgo);
+    const statusFor = async (cid: string) => {
+      const client = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(makeTicket(cid, cid))}`);
+      activeClients.push(client);
+      return client.waitForType('dailyStatus');
+    };
+    expect(await statusFor('streak-live')).toEqual({ type: 'dailyStatus', dailyKey: today, streak: 2, bestStreak: 2, playedToday: false });
+    expect(await statusFor('streak-today')).toMatchObject({ streak: 1, playedToday: true });
+    expect(await statusFor('streak-lapsed')).toMatchObject({ streak: 0, bestStreak: 1, playedToday: false });
+  });
+});

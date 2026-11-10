@@ -408,6 +408,21 @@ describe('@warehouse/protocol', () => {
         streakDelta: 0,
       },
       {
+        type: 'runSummary' as const,
+        runMode: 'daily' as const,
+        pts: 320,
+        deliveries: 4,
+        tape: 'OOLXO',
+        dailyKey: '2026-12-03',
+      },
+      {
+        type: 'dailyStatus' as const,
+        dailyKey: '2026-12-03',
+        streak: 5,
+        bestStreak: 9,
+        playedToday: false,
+      },
+      {
         type: 'brainDecision' as const,
         reqId: 41,
         agentId: 3,

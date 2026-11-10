@@ -1761,6 +1761,7 @@ canvas#world.cone-mode { cursor: crosshair; }
 #run .seg-mode .big { font-size: 18px; }
 #run .seg-mode.blitz .big { color: var(--blue-d); }
 #run .seg-mode.freerange .big { color: var(--teal-d); }
+#run .seg-mode.daily .big { color: var(--blue-d); }
 #run .seg-mode.overdrive .big { color: var(--violet); }
 #run .streak.hot .big, #run .seg.max .big { color: var(--amber); }
 #run .pips { display: flex; gap: 3px; align-items: center; height: 16px; }

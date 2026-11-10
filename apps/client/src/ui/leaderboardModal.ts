@@ -302,6 +302,7 @@ export function computeSillyAwards(
 
 const MODAL_TABS: ReadonlyArray<{ id: LeaderboardModalTab; label: string }> = [
   { id: 'all', label: 'All (Dashboard)' },
+  { id: 'today', label: '📅 Today' },
   { id: 'standings', label: '🏁 Shift Standings' },
   { id: 'silly', label: '🤪 Silly Superlatives' },
   { id: 'hall', label: '🏛️ Hall of Fame' },
@@ -396,7 +397,9 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
       const teamLabel = r.human
         ? r.runMode === 'freerange'
           ? '🌐 Free Range'
-          : '⏱️ 3m Blitz'
+          : r.runMode === 'daily'
+            ? '📅 Daily'
+            : '⏱️ 3m Blitz'
         : r.strat;
       return el(
         'tr',
@@ -680,11 +683,83 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
     );
   }
 
+  function renderTodayPane(): HTMLElement {
+    const board = store.dailyBoard;
+    const data = board.data;
+    const info = data?.info ?? store.daily;
+    const me = store.selfPublicId();
+    const title = info ? `📅 Daily #${info.number} · ${info.modifier.label}` : '📅 Today’s Daily Shift';
+    const refresh = button(
+      board.status === 'loading' ? 'Loading…' : '↻ Refresh',
+      'btn small',
+      () => actions.refreshDailyBoard(),
+      "Refresh today's Daily board",
+    );
+    refresh.dataset.role = 'daily-board-refresh';
+    if (board.status === 'loading') refresh.setAttribute('disabled', '');
+    const summary: string[] = [];
+    if (data) {
+      summary.push(`${data.entrants} ${data.entrants === 1 ? 'driver' : 'drivers'} today`);
+      if (data.you) summary.push(`you: #${data.you.rank} · best ${data.you.bestPts.toLocaleString('en-US')} pts · ${data.you.attempts} ${data.you.attempts === 1 ? 'attempt' : 'attempts'}`);
+    }
+    let body: HTMLElement;
+    if (data && data.top.length) {
+      body = el(
+        'div',
+        { class: 'lb-hall-list', attrs: { 'data-role': 'daily-board' } },
+        data.top.map((r, i) => {
+          const mine = me !== null && r.publicId === me;
+          return el('div', { class: `lb-row num${mine ? ' row-hl b' : ''}`, attrs: { 'data-public-id': r.publicId } }, [
+            el('span', { class: 'rank muted', text: `#${i + 1}` }),
+            swatch(teamColor('Human')),
+            el('span', {
+              class: 'grow ellipsis',
+              text: `${r.name}${r.siteId ? ` · ${r.siteId.toUpperCase()}` : ''}${mine ? ' ★ you' : ''}`,
+            }),
+            el('span', { class: 'muted small', text: r.streak > 0 ? `🔥${r.streak}` : '' }),
+            el('span', { class: 'pts b', text: `${r.pts.toLocaleString('en-US')} pts` }),
+          ]);
+        }),
+      );
+    } else {
+      body = el('div', {
+        class: 'empty',
+        attrs: { 'data-role': 'daily-board-empty' },
+        text:
+          board.status === 'error'
+            ? `Could not load today's board: ${board.error ?? 'unknown error'}`
+            : board.status === 'ready'
+              ? 'No one has finished today’s Daily yet. Be the first.'
+              : 'Loading today’s board…',
+      });
+    }
+    return el(
+      'section',
+      { class: 'intro-pane lb-modal-pane', attrs: { 'data-pane': 'today', 'aria-label': "Today's Daily Shift board" } },
+      [
+        el('div', { class: 'lb-pane-head' }, [el('h3', { class: 'intro-pane__title', text: title }), refresh]),
+        el('p', {
+          class: 'hint',
+          text: info
+            ? `Same contracts and modifier for every driver today. ${info.modifier.blurb} Best run counts.`
+            : 'Same contracts and modifier for every driver today. Best run counts.',
+        }),
+        summary.length ? el('p', { class: 'hint', attrs: { 'data-role': 'daily-board-summary' }, text: summary.join(' · ') }) : null,
+        board.status === 'error' && data && data.top.length
+          ? el('p', { class: 'hint', attrs: { role: 'status' }, text: `Refresh failed: ${board.error ?? 'unknown error'}` })
+          : null,
+        body,
+      ],
+    );
+  }
+
   function renderModalContent(tab: LeaderboardModalTab): Child[] {
     if (!store.welcomed) {
       return [el('div', { class: 'empty', text: 'Waiting for live warehouse telemetry…' })];
     }
     switch (tab) {
+      case 'today':
+        return [el('div', { class: 'lb-modal-single' }, [renderTodayPane()])];
       case 'standings':
         return [el('div', { class: 'lb-modal-single' }, [renderStandingsPane()])];
       case 'silly':
@@ -717,6 +792,11 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
       const wasHidden = overlay.hidden;
       overlay.hidden = false;
       const tab = store.ui.leaderboardModalTab;
+      // Today tab: fetch on first open and after my Daily improved (updatedAt cleared).
+      if (tab === 'today' && (store.dailyBoard.status === 'idle' || (store.dailyBoard.status === 'ready' && store.dailyBoard.updatedAt === null))) {
+        // Deferred: store listeners run synchronously and this is inside a UI update pass.
+        queueMicrotask(() => actions.refreshDailyBoard());
+      }
       for (const t of tabButtons) {
         const on = t.id === tab;
         t.b.classList.toggle('on', on);
@@ -733,7 +813,7 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
             `${v.id}:${Math.round(v.sPts)}:${v.sShipped}:${v.incidents}:${v.palletDrops ?? 0}:${v.skids ?? 0}:${v.nearMisses}:${Math.round(v.battery)}:${v.state}`,
         )
         .join(',');
-      const key = `${store.welcomed}|${tab}|${Math.floor(w.t)}|${vKey}|${w.hallOfFame.length}|${store.network.updatedAt}|${store.you?.name ?? ''}`;
+      const key = `${store.welcomed}|${tab}|${Math.floor(w.t)}|${vKey}|${w.hallOfFame.length}|${store.network.updatedAt}|${store.you?.name ?? ''}|${tab === 'today' ? `${store.dailyBoard.status}:${store.dailyBoard.updatedAt}:${store.daily?.dayKey ?? ''}` : ''}`;
       bodyView.render(key, () => renderModalContent(tab));
       if (wasHidden) focusTrap.activate(closeBtn);
     },

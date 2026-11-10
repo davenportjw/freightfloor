@@ -8,6 +8,7 @@ import { button, el, kbd } from './dom.js';
 import { HOTKEYS } from './hotkeys.js';
 import { createFocusTrap, type TrapContainer } from './focusTrap.js';
 import type { StorageLike } from './panel.js';
+import type { DailyInfo, DailyStatusMessage } from '@warehouse/protocol';
 
 export const HELP_SEEN_KEY = 'warehouse.help.seen';
 
@@ -21,6 +22,17 @@ export interface HelpModule extends UiModule {
 }
 
 /** Start button label: "Connecting…" while a drive is queued before the welcome arrived. */
+/**
+ * Intro Daily intent pill text, e.g. `📅 Daily #42 · Cold Chain Day · 🔥5`. The streak shows
+ * only when my status for the same day is known and alive; `✓` once today's Daily is done.
+ */
+export function dailyPillText(daily: DailyInfo, status: DailyStatusMessage | null): string {
+  const parts = [`📅 Daily #${daily.number}`, daily.modifier.label];
+  const mine = status && status.dailyKey === daily.dayKey ? status : null;
+  if (mine && mine.streak > 0) parts.push(`🔥${mine.streak}`);
+  return parts.join(' · ') + (mine?.playedToday ? ' ✓' : '');
+}
+
 export function introStartLabel(pendingDrive: boolean): string {
   return pendingDrive ? 'Connecting…' : 'Start driving →';
 }
@@ -199,6 +211,31 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       tryEnterFloor();
     },
   });
+
+  // ---- Daily Shift intent pill (hidden until the welcome carries today's Daily) ----
+  const dailyPill = el('button', {
+    class: 'btn intent-pill intent-pill--accent intro-daily-pill',
+    attrs: { type: 'button', 'data-role': 'intro-daily-pill' },
+    onClick: (ev) => {
+      ev.preventDefault();
+      if (!ctx.store.daily) return;
+      ctx.actions.setRunMode('daily');
+      tryEnterFloor();
+    },
+  });
+  const dailyRow = el('div', { class: 'intent-pills intro-daily', attrs: { 'data-role': 'intro-daily' } }, [dailyPill]);
+  dailyRow.hidden = true;
+  function syncDailyPill(): void {
+    const daily = ctx.store.daily;
+    dailyRow.hidden = !daily;
+    if (!daily) return;
+    const text = dailyPillText(daily, ctx.store.dailyStatus);
+    if (dailyPill.textContent !== text) dailyPill.textContent = text;
+    const tip = `Today's Daily Shift: same contracts and modifier for everyone. ${daily.modifier.blurb}`;
+    if (dailyPill.title !== tip) dailyPill.title = tip;
+    dailyPill.classList.toggle('on', ctx.store.ui.runMode === 'daily');
+    dailyPill.setAttribute('aria-pressed', String(ctx.store.ui.runMode === 'daily'));
+  }
 
   // ---- view switch: one secondary pill button to the AI explainer, one back ----
   const aiLink = button('🧠 How the AI works', 'btn intro-ai-link', () => switchTab('ai'));
@@ -1308,6 +1345,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       aiPane,
       lifecyclePane,
       spinupBox,
+      dailyRow,
       footer,
     ],
   );
@@ -1327,6 +1365,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       syncDriveCameraHelp();
       syncCabViewHelp();
       syncSpinup();
+      syncDailyPill();
       const pending = Boolean(ctx.store.ui.pendingDrive);
       const label = introStartLabel(pending);
       if (startBtn.textContent !== label) startBtn.textContent = label;

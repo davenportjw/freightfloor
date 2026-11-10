@@ -212,13 +212,15 @@ The client (`apps/client`, vanilla TypeScript + Canvas2D, Vite) has two HUD layo
 
 | Module | Element | Role |
 |---|---|---|
-| `ui/runCapsule.ts` | `#run` | Drive: Blitz clock / PPM · points + streak · combo pips · position ▲/▼ |
+| `ui/runCapsule.ts` | `#run` | Drive: Blitz / Daily clock (`Daily #N`, modifier in the tooltip) / PPM · points + streak · combo pips · position ▲/▼ |
 | `ui/objective.ts` | `#objective`, `#fare`, `#alert`, `#reloc` | Drive: next goal, order-choice strip (uses `ui/fareChoice.ts`), the single alert line (battery / spill / refusals / relocation, newest wins); Floor: relocation pill |
 | `ui/contracts.ts` | `#contracts` | Drive: contract rows with segmented progress, replacement offers |
 | `ui/dash.ts` | `#dash` | Drive: battery, driving keys legend (WASD / E), boost meter (Shift), Co-Pilot toggle, Drive camera orientation toggle (`R`), key hints (incl. `?` Controls) |
 | `ui/contractPick.ts` | `#pickSheet` | Start-of-run contract pick sheet |
 | `ui/standings.ts` | `#standingsSheet` | Hold-Tab standings + difficulty vote |
-| `ui/runEnd.ts` | `#runEnd` | Results sheet |
+| `ui/runEnd.ts` | `#runEnd` | Results sheet. On Daily runs it adds the daily rank and streak line (private `dailyResult`) and a **Daily again** primary button. Blitz and Daily runs get a Share row |
+| `ui/shareCard.ts` | — | Pure share-card text (`buildShareText`: tape squares from the private `runSummary`, no card titles) and the `shareResult` chain (share sheet → clipboard → selectable text field) |
+| `ui/leaderboardModal.ts` | `#leaderboardModal` | Full-screen leaderboard: Dashboard, **📅 Today** (`GET /api/daily` via `net.ts` `fetchDailyBoard` → `store.dailyBoard`), Shift Standings, Silly Superlatives, Hall of Fame, Network Lifetime |
 | `ui/chat.ts` | `#chat` | Co-Pilot (`agentCommand`) / Floor (`nlCommand`) chat |
 | `ui/menu.ts` | `#menuBtn`, `#githubBtn`, `#brandBadge`, `#menu`, `#flyout` | ☰ menu (with `.menu-powered-link` → `https://davenporter.com`), top-left GitHub repository icon link (`#githubBtn`), brand badge (`#brandBadge` with `#davenporterHudLink` → `https://davenporter.com`), and flyouts (Fleet, Drivers, Value, Network, Layers, Settings) |
 | `ui/teamStandings.ts` | `#standFly` | Team Standings flyout (`stats.board`) |

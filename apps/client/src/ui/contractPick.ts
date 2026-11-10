@@ -85,7 +85,7 @@ export function mountContractPick(root: HTMLElement, ctx: UiCtx): UiModule {
       const mode = store.ui.runMode;
       if (pickNote && Date.now() >= pickNote.until) pickNote = null;
       const note = pickNote?.text ?? null;
-      view.render(JSON.stringify([o.key, [...sel].sort(), mode, o.pick, note]), () => {
+      view.render(JSON.stringify([o.key, [...sel].sort(), mode, o.pick, note, store.daily?.dayKey ?? null]), () => {
         const cards = o.offer.map((c, i) => {
           const on = sel.has(c.id);
           const perk = perkText(c);
@@ -106,7 +106,7 @@ export function mountContractPick(root: HTMLElement, ctx: UiCtx): UiModule {
             ],
           );
         });
-        const modeBtn = (m: 'blitz' | 'freerange', label: string, tip: string): HTMLElement =>
+        const modeBtn = (m: 'blitz' | 'freerange' | 'daily', label: string, tip: string): HTMLElement =>
           el('button', {
             class: `seg-btn${mode === m ? ' on' : ''}`,
             text: label,
@@ -136,6 +136,9 @@ export function mountContractPick(root: HTMLElement, ctx: UiCtx): UiModule {
             el('div', { class: 'seg-toggle', attrs: { 'data-role': 'deal-mode-selector' } }, [
               modeBtn('blitz', '⏱ Blitz', '3-minute timed run'),
               modeBtn('freerange', '🌐 Free Range', 'No timer — scored by pallets per minute'),
+              store.daily
+                ? modeBtn('daily', `📅 Daily #${store.daily.number}`, `Today's Daily Shift · ${store.daily.modifier.label}: ${store.daily.modifier.blurb}`)
+                : null,
             ]),
             el('span', { class: 'grow' }),
             note ? el('span', { class: 'pick-note', text: note, attrs: { role: 'status', 'data-role': 'pick-note' } }) : null,

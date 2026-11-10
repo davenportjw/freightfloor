@@ -13,6 +13,7 @@ import type {
   ServerMessage,
   SiteId,
 } from '@warehouse/protocol';
+import { DailyBoardResponseSchema, type DailyBoardResponse } from '@warehouse/protocol';
 import { lobbyErrorMessage } from './resumeCode.js';
 
 export const RECONNECT_BASE_MS = 500;
@@ -557,6 +558,27 @@ export async function fetchNetwork(): Promise<NetworkFetch> {
       return { ok: false, error: '/api/network returned an unexpected payload' };
     }
     return { ok: true, data };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export type DailyBoardFetch =
+  | { ok: true; data: DailyBoardResponse }
+  | { ok: false; error: string };
+
+/** Today's Daily board (`GET /api/daily`), with my standing when `publicId` is known. */
+export async function fetchDailyBoard(
+  publicId: string | null,
+  fetchFn: typeof fetch = fetch,
+): Promise<DailyBoardFetch> {
+  try {
+    const qs = publicId ? `?publicId=${encodeURIComponent(publicId)}` : '';
+    const res = await fetchFn(`/api/daily${qs}`);
+    if (!res.ok) return { ok: false, error: `/api/daily ${await readError(res)}` };
+    const parsed = DailyBoardResponseSchema.safeParse(await res.json());
+    if (!parsed.success) return { ok: false, error: '/api/daily returned an unexpected payload' };
+    return { ok: true, data: parsed.data };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

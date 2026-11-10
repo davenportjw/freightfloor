@@ -1506,6 +1506,39 @@ export const DailyResultMessageSchema = z.object({
 });
 export type DailyResultMessage = z.infer<typeof DailyResultMessageSchema>;
 
+/** Run event tape: `O` on-time delivery, `L` late delivery, `X` incident; ≤ 40 chars (sim `RUN_TAPE_MAX`). */
+export const RunTapeSchema = z.string().max(40).regex(/^[OLX]*$/);
+
+/**
+ * Private summary of a human driver's finished run, sent only to that driver's own sockets the
+ * moment the clock reaches 00:00 (Blitz and Daily). It carries the exact server `runTape` the
+ * share card renders; the tape never rides the broadcast delta.
+ */
+export const RunSummaryMessageSchema = z.object({
+  type: z.literal('runSummary'),
+  runMode: RunModeSchema,
+  pts: z.number().int(),
+  deliveries: z.number().int().nonnegative(),
+  tape: RunTapeSchema,
+  /** Daily runs only: the UTC day the run counts for. */
+  dailyKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+});
+export type RunSummaryMessage = z.infer<typeof RunSummaryMessageSchema>;
+
+/**
+ * Private Daily Shift standing for a human driver, sent once after `welcome` from their stored
+ * profile. `streak` is already decayed for read (`displayStreak`); `playedToday` is true once
+ * the player has a completed Daily for `dailyKey`.
+ */
+export const DailyStatusMessageSchema = z.object({
+  type: z.literal('dailyStatus'),
+  dailyKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  streak: z.number().int().nonnegative(),
+  bestStreak: z.number().int().nonnegative(),
+  playedToday: z.boolean(),
+});
+export type DailyStatusMessage = z.infer<typeof DailyStatusMessageSchema>;
+
 export const ServerMessageSchema = z.discriminatedUnion('type', [
   WelcomeMessageSchema,
   DeltaMessageSchema,
@@ -1522,6 +1555,8 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
   BrainDecisionMessageSchema,
   DispatchersCallRevealMessageSchema,
   DailyResultMessageSchema,
+  RunSummaryMessageSchema,
+  DailyStatusMessageSchema,
 ]);
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;
 
@@ -1541,6 +1576,8 @@ export const SERVER_MESSAGE_TYPES = [
   'brainDecision',
   'dispatchersCallReveal',
   'dailyResult',
+  'runSummary',
+  'dailyStatus',
 ] as const;
 
 // ============================================================================
@@ -2199,7 +2236,7 @@ export const DailyBoardRowSchema = z.object({
 });
 export type DailyBoardRow = z.infer<typeof DailyBoardRowSchema>;
 
-/** `GET /api/daily?date=<dayKey>[&clientId=…]` response. */
+/** `GET /api/daily?date=<dayKey>[&publicId=…]` response. */
 export const DailyBoardResponseSchema = z.object({
   info: DailyInfoSchema,
   top: z.array(DailyBoardRowSchema).max(DAILY_BOARD_SIZE),

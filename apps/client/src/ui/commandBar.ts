@@ -71,6 +71,6 @@ export function runOverView(
   const pts = Math.round(me.runPts ?? me.sPts ?? 0);
   return {
     over: true,
-    text: `🏁 ${me.runMode === 'freerange' ? 'Run' : '3-Minute Blitz'} over · ${pts} pts — your forklift is parked until you start a new run`,
+    text: `🏁 ${me.runMode === 'freerange' ? 'Run' : me.runMode === 'daily' ? 'Daily Shift' : '3-Minute Blitz'} over · ${pts} pts — your forklift is parked until you start a new run`,
   };
 }

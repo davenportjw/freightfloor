@@ -5,7 +5,7 @@
  * Everything shown comes from the live site. When a call fails the real error is surfaced
  * (alert line / floor feed / connection pill); nothing is simulated locally.
  */
-import type { ClientMessage, ServerMessage, SiteId } from '@warehouse/protocol';
+import { isTimedRun, type ClientMessage, type ServerMessage, type SiteId } from '@warehouse/protocol';
 import {
   blitzLeaderboard,
   dayIndex,
@@ -16,7 +16,7 @@ import {
   type Vehicle,
 } from '@warehouse/sim';
 import { InputController } from './input.js';
-import { fetchNetwork, isStaleJoin, NetClient, type NetStatus } from './net.js';
+import { fetchDailyBoard, fetchNetwork, isStaleJoin, NetClient, type NetStatus } from './net.js';
 import { guardedFrame } from './frameLoop.js';
 import { NetworkPoller } from './networkPoller.js';
 import { blocksDriving } from './ui/modal.js';
@@ -26,6 +26,7 @@ import { cabTouchDirs } from './fpv/cabMath.js';
 import { calloutFor, rivalBubbleFor } from './render/fx.js';
 import { GhostPlanner, ghostPolyline, ghostTarget } from './render/ghost.js';
 import { cycleIndex } from './ui/fareChoice.js';
+import { isDailyLink } from './ui/shareCard.js';
 import {
   ClientStore,
   formatRunDisplayName,
@@ -188,6 +189,8 @@ function loadClientId(): string {
 
 function boot(): void {
   const store = new ClientStore();
+  // Inbound share link (`/?daily=N`): focus the intro's Daily pill and join in Daily mode.
+  if (isDailyLink(location.search)) store.ui.runMode = 'daily';
   let clientId = loadClientId();
   let depletedRunVid: string | null = null;
   /** Finished vehicle we are replacing via retryNewRun; its results stay down until the new welcome. */
@@ -358,6 +361,22 @@ function boot(): void {
     intervalMs: NETWORK_POLL_MS,
   });
   const pollNetwork = (): Promise<void> => poller.poll();
+
+  /** `/api/daily` for the Today tab; one request at a time, real errors kept for display. */
+  let dailyBoardInFlight = false;
+  async function loadDailyBoard(): Promise<void> {
+    if (dailyBoardInFlight) return;
+    dailyBoardInFlight = true;
+    const prev = store.dailyBoard;
+    store.dailyBoard = { ...prev, status: 'loading', error: null };
+    store.changed();
+    const res = await fetchDailyBoard(store.selfPublicId());
+    dailyBoardInFlight = false;
+    store.dailyBoard = res.ok
+      ? { status: 'ready', data: res.data, error: null, updatedAt: Date.now() }
+      : { status: 'error', data: prev.data, error: res.error, updatedAt: Date.now() };
+    store.changed();
+  }
 
   const rackLift = new RackLiftController();
 
@@ -686,6 +705,7 @@ function boot(): void {
       });
     },
     refreshNetwork: () => void pollNetwork(),
+    refreshDailyBoard: () => void loadDailyBoard(),
     async resumeCallsign(raw) {
       const trimmed = raw.trim();
       const inputErr = resumeInputError(trimmed);
@@ -725,6 +745,7 @@ function boot(): void {
       // The lobby join carries runMode (NetClient reads store.ui.runMode), so set it before re-joining.
       if (mode) store.ui.runMode = mode;
       store.ui.runEnd = null;
+      store.clearRunResults();
       store.evictedReason = null;
       // Leave runEndDismissedVid alone (Floor view stays Floor until the fresh run's welcome) and
       // block the finished car's results from re-popping while the rejoin is in flight.
@@ -741,7 +762,7 @@ function boot(): void {
         fullShard ? `Joining waiting line as ${displayName}…` : `Starting ${displayName}…`,
         fullShard
           ? 'All 32 driver slots are full; requesting a FIFO waiting-line seat.'
-          : `Spawning a fresh vehicle with 100% battery${store.ui.runMode === 'freerange' ? ' in Free Range (no timer)' : ' for a 3-minute Blitz'}.`,
+          : `Spawning a fresh vehicle with 100% battery${store.ui.runMode === 'freerange' ? ' in Free Range (no timer)' : store.ui.runMode === 'daily' ? ' for the Daily Shift' : ' for a 3-minute Blitz'}.`,
       );
       store.changed();
       // A fresh socket + requeue: true so evicted / spectator players or full shards enter the FIFO line or get a fresh slot.
@@ -980,7 +1001,7 @@ function boot(): void {
     if (!me || !store.isDriving()) return;
     if (
       !me.runFinished &&
-      me.runMode === 'blitz' &&
+      isTimedRun(me.runMode) &&
       me.runEndsAt != null &&
       store.world.t >= me.runEndsAt
     ) {
@@ -992,7 +1013,7 @@ function boot(): void {
       return;
     }
     if (store.ui.helpOpen) {
-      if (me.runMode === 'blitz') {
+      if (isTimedRun(me.runMode)) {
         store.ui.helpOpen = false;
       } else {
         return;
@@ -1180,6 +1201,7 @@ function boot(): void {
         const welcomedMe = store.myVehicle();
         rejoinFinishedVid = null;
         if (welcomedMe && !welcomedMe.runFinished) {
+          store.clearRunResults();
           store.ui.runEnd = null;
           store.ui.runEndDismissedVid = null;
           depletedRunVid = null;
@@ -1205,7 +1227,8 @@ function boot(): void {
           });
         }
         refreshDriveFirst();
-        if (store.driveFirst && store.ui.runMode !== 'blitz') actions.setRunMode('blitz');
+        // Run-1 onboarding is a timed run: Free Range waits, but a chosen Daily (share link / pill) stays.
+        if (store.driveFirst && store.ui.runMode === 'freerange') actions.setRunMode('blitz');
         noteRunStart();
         maybeAutoKeep();
         checkRunEnd();
@@ -1301,6 +1324,11 @@ function boot(): void {
           store.changed();
           break;
         }
+        if (msg.code === 'daily_record_failed') {
+          // Shown on the results sheet in place of the Daily rank (never a guessed rank).
+          store.dailyResultError = msg.message || 'Your Daily Shift score could not be saved.';
+          store.changed();
+        }
         notify(errorKind(store.hudMode(), Date.now(), lastOrderAt), serverErrorText(msg.code, msg.message));
         // Any server refusal (incl. internal_error / spectator_forbidden / vehicle_changed) answers
         // an in-flight Co-Pilot command: it will not echo.
@@ -1362,6 +1390,17 @@ function boot(): void {
         store.dispatchersCall = dcApplyReveal(store.dispatchersCall, msg, Date.now());
         store.changed();
         break;
+      case 'runSummary':
+        store.applyRunSummary(msg);
+        break;
+      case 'dailyStatus':
+        store.applyDailyStatus(msg);
+        break;
+      case 'dailyResult':
+        store.applyDailyResult(msg);
+        // A new best moves the Today board: refetch next time it is shown.
+        if (msg.improved) store.dailyBoard = { ...store.dailyBoard, updatedAt: null };
+        break;
       case 'relocationOffer':
         store.ui.relocationOffer = msg;
         // Drive: the alert line (with Accept); Floor: the relocation pill already shows it.
@@ -1412,7 +1451,7 @@ function boot(): void {
     const me = store.isDriving() ? store.myVehicle() : null;
     if (
       me &&
-      me.runMode === 'blitz' &&
+      isTimedRun(me.runMode) &&
       (me.runFinished || (me.runEndsAt != null && store.world.t >= me.runEndsAt)) &&
       !store.ui.runEnd &&
       store.ui.runEndDismissedVid !== me.id

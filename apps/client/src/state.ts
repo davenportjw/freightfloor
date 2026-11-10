@@ -35,6 +35,12 @@ import {
   type ValueSample,
   type VehicleDecision,
   type WelcomeMessage,
+  type DailyBoardResponse,
+  type DailyInfo,
+  type DailyResultMessage,
+  type DailyStatusMessage,
+  type RunSummaryMessage,
+  isTimedRun,
 } from '@warehouse/protocol';
 import {
   dcVisible,
@@ -406,14 +412,14 @@ export function applyQuantisedDelta(
     if (typeof d.skids === 'number') v.skids = d.skids;
     if (typeof d.palletDrops === 'number') v.palletDrops = d.palletDrops;
     if (typeof d.deliveries === 'number') v.deliveries = d.deliveries;
-    if (d.runMode === 'blitz' || d.runMode === 'freerange') v.runMode = d.runMode;
+    if (d.runMode === 'blitz' || d.runMode === 'freerange' || d.runMode === 'daily') v.runMode = d.runMode;
     if (d.runStartedAt !== undefined) {
-      if (!(v.id === myVid && v.runMode === 'blitz' && v.runStartedAt !== null && d.runStartedAt === null)) {
+      if (!(v.id === myVid && isTimedRun(v.runMode) && v.runStartedAt !== null && d.runStartedAt === null)) {
         v.runStartedAt = d.runStartedAt;
       }
     }
     if (d.runEndsAt !== undefined) {
-      if (!(v.id === myVid && v.runMode === 'blitz' && v.runEndsAt !== null && d.runEndsAt === null)) {
+      if (!(v.id === myVid && isTimedRun(v.runMode) && v.runEndsAt !== null && d.runEndsAt === null)) {
         v.runEndsAt = d.runEndsAt;
       }
     }
@@ -427,7 +433,7 @@ export function applyQuantisedDelta(
       if (
         !(
           v.id === myVid &&
-          v.runMode === 'blitz' &&
+          isTimedRun(v.runMode) &&
           v.runFinished &&
           !d.runFinished &&
           v.runEndsAt != null &&
@@ -535,7 +541,7 @@ export interface PhaseInfo {
 export type DrawerTab = 'leaderboard' | 'value' | 'days' | 'events' | 'brain';
 export const DRAWER_TABS: DrawerTab[] = ['leaderboard', 'value', 'days', 'events', 'brain'];
 
-export type LeaderboardModalTab = 'all' | 'standings' | 'hall' | 'network' | 'silly';
+export type LeaderboardModalTab = 'all' | 'today' | 'standings' | 'hall' | 'network' | 'silly';
 
 export interface RunEndLeaderboardRow {
   rank: number;
@@ -611,6 +617,14 @@ export interface RunEndSummary {
   recap?: AiRecap | null;
 }
 
+/** `GET /api/daily` fetch state (real response or the real error; never invented rows). */
+export interface DailyBoardState {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  data: DailyBoardResponse | null;
+  error: string | null;
+  updatedAt: number | null;
+}
+
 export interface UiState {
   drawerOpen: boolean;
   drawerTab: DrawerTab;
@@ -672,7 +686,7 @@ export interface UiState {
   fareKey: string | null;
   /** Populated when the player's 3-Minute Blitz run finishes (`runFinished === true`). */
   runEnd: RunEndSummary | null;
-  /** Selected driver play mode ('blitz' | 'freerange'). */
+  /** Selected driver play mode ('blitz' | 'freerange' | 'daily'). */
   runMode: RunMode;
   /** Active cross-site surge relocation offer (+75 pts) when current shard is crowded. */
   relocationOffer: RelocationOfferMessage | null;
@@ -927,6 +941,19 @@ export class ClientStore {
     updatedAt: null,
     switching: null,
   };
+
+  /** Today's Daily Shift (`welcome.daily`); null until a welcome carries it. */
+  daily: DailyInfo | null = null;
+  /** My Daily streak standing (private `dailyStatus`); null until the site sends it. */
+  dailyStatus: DailyStatusMessage | null = null;
+  /** My last finished run (private `runSummary`, exact server tape); cleared on a new run. */
+  runSummary: RunSummaryMessage | null = null;
+  /** My last recorded Daily (private `dailyResult`); cleared on a new run. */
+  dailyResult: DailyResultMessage | null = null;
+  /** Daily save failure for the last run (`error` `daily_record_failed`); cleared on a new run. */
+  dailyResultError: string | null = null;
+  /** Today board (`GET /api/daily`) for the leaderboard modal's Today tab. */
+  dailyBoard: DailyBoardState = { status: 'idle', data: null, error: null, updatedAt: null };
 
   /** Bumped when the floor map is rebuilt (welcome / tier change) so the renderer can re-fit. */
   mapVersion = 0;
@@ -1348,6 +1375,40 @@ export class ClientStore {
   // ---- message application -------------------------------------------------
 
   /** Returns an error string when the snapshot could not be restored (nothing is applied then). */
+  /** Private run summary for my finished run (share card tape). */
+  applyRunSummary(msg: RunSummaryMessage): void {
+    this.runSummary = msg;
+    this.changed();
+  }
+
+  /** Private Daily standing after welcome. */
+  applyDailyStatus(msg: DailyStatusMessage): void {
+    this.dailyStatus = msg;
+    this.changed();
+  }
+
+  /** Private Daily result: also advances my streak status so the intro pill stays current. */
+  applyDailyResult(msg: DailyResultMessage): void {
+    this.dailyResult = msg;
+    this.dailyResultError = null;
+    const prevBest = this.dailyStatus?.bestStreak ?? 0;
+    this.dailyStatus = {
+      type: 'dailyStatus',
+      dailyKey: msg.dailyKey,
+      streak: msg.streak,
+      bestStreak: Math.max(prevBest, msg.streak),
+      playedToday: true,
+    };
+    this.changed();
+  }
+
+  /** Forget the previous run's private results (a new run is starting). */
+  clearRunResults(): void {
+    this.runSummary = null;
+    this.dailyResult = null;
+    this.dailyResultError = null;
+  }
+
   applyWelcome(msg: WelcomeMessage): string | null {
     let restored: World | null = null;
     if (msg.snapshot) {
@@ -1371,6 +1432,14 @@ export class ClientStore {
     }
     this.floorOrders = msg.floorOrders ?? null;
     this.floorOrdersAt = Date.now();
+    if (msg.daily) {
+      // A new UTC day invalidates yesterday's streak status and board.
+      if (this.daily && this.daily.dayKey !== msg.daily.dayKey) {
+        this.dailyStatus = null;
+        this.dailyBoard = { status: 'idle', data: null, error: null, updatedAt: null };
+      }
+      this.daily = msg.daily;
+    }
     this.welcomed = true;
     if (msg.you.role === 'driver' && msg.you.vid) {
       this.evictedReason = null;
