@@ -2084,7 +2084,13 @@ export function nextVisitLedger(prev: Partial<VisitLedger> | null | undefined, t
 // from `dailySeed(dayKey)`) and the same personal modifier. Modifiers affect only the daily
 // driver, never the shared floor. Effects live in @warehouse/sim; this is the metadata.
 
-/** Day key of Daily #1. */
+/**
+ * Day key of Daily #1: the permanent launch epoch (2026-11-10, UTC).
+ *
+ * Frozen. Changing this renumbers every Daily (`dailyNumber`) and reshuffles the modifier
+ * rotation (`dailyModifierFor`), which orphans stored boards, streaks and shared results.
+ * Pinned by `packages/protocol/test/daily.test.ts`.
+ */
 export const DAILY_EPOCH_DAY = '2026-11-10';
 
 /** 1-based Daily number for a day key (≤ 0 before the epoch). */

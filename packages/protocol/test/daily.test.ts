@@ -34,6 +34,22 @@ describe('@warehouse/protocol: Daily Shift', () => {
     expect(dailyNumber(addDays(DAILY_EPOCH_DAY, -1))).toBe(0);
   });
 
+  it('pins the launch epoch and its modifier rotation (never change after launch)', () => {
+    expect(DAILY_EPOCH_DAY).toBe('2026-11-10');
+    expect(dayKeyToMs(DAILY_EPOCH_DAY)).toBe(Date.UTC(2026, 10, 10));
+    expect(dailyNumber('2027-01-01')).toBe(53);
+    const week = Array.from({ length: 7 }, (_, i) => dailyModifierFor(addDays(DAILY_EPOCH_DAY, i)).id);
+    expect(week).toEqual([
+      'long_haul',
+      'eco_run',
+      'cold_chain',
+      'combo_day',
+      'express',
+      'heavy_load',
+      'clean_shift',
+    ]);
+  });
+
   it('accepts the daily run mode and treats blitz + daily as timed runs', () => {
     expect(RunModeSchema.parse('daily')).toBe('daily');
     expect(isTimedRun('blitz')).toBe(true);

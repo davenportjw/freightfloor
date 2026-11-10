@@ -431,7 +431,7 @@ Shared by the sim, site, lobby and client so every shard agrees on the day's Dai
 |---|---|
 | `RUN_MODES` / `RunModeSchema` | `'blitz' \| 'freerange' \| 'daily'`. |
 | `isTimedRun(mode)` | `true` for `'blitz'` and `'daily'`. Use it wherever behaviour depends on the personal run clock. |
-| `DAILY_EPOCH_DAY` | Day key of Daily #1 (`'2026-11-10'`, set to the launch day before the client ships). |
+| `DAILY_EPOCH_DAY` | Day key of Daily #1: the permanent launch epoch `'2026-11-10'` (UTC). Frozen: changing it renumbers every Daily and reshuffles the modifier rotation. Pinned by `packages/protocol/test/daily.test.ts`. |
 | `dailyNumber(dayKey)` | 1-based Daily number (≤ 0 before the epoch). |
 | `dailySeed(dayKey)` | FNV-1a of `'ff-daily:' + dayKey`; throws on a malformed key. |
 | `mulberry32(seed)` / `fnv1a(s)` | Deterministic PRNG and hash, independent of any world RNG. |
