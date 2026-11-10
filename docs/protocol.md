@@ -16,8 +16,8 @@ Authenticates display name hygiene, enforces per-IP connection rate limits, sele
 | `name` | `string` | No | Optional retry run callsign (`2..20` chars after NFKC normalization). For human drivers, the lobby assigns or preserves an official `Adjective-Noun-NN` callsign (`generateDriverCallsign`) and never adds custom user-defined names. |
 | `resume` | `string` | No | Optional **resume code** (`wr1_` + 32 base64url chars, the `resumeToken` returned by a previous join) or **existing driver callsign** to find and switch to an existing driver identity in the game. Unknown callsigns, raw `clientId`s, and invalid resume codes are rejected (`404 invalid_resume_code`) and never create a new name. |
 | `prefer` | `SiteId` (`^(den\|slc\|phx\|abq)-[1-9]\d*$`) | No | Optional preferred canonical or overflow regional site ID (used when reconnecting or transferring sites). |
-| `mode` | `RunMode` (`'blitz' \| 'freerange'`) | No | Optional driver run mode (`'blitz'` for 3-Minute Blitz scored runs; `'freerange'` for open-ended continuous runs routed below the 26-driver soft cap). |
-| `runMode` | `RunMode` (`'blitz' \| 'freerange'`) | No | Alias for `mode` accepted on both Lobby and Site `POST /api/join` endpoints and embedded into the signed HMAC ticket. |
+| `mode` | `RunMode` (`'blitz' \| 'freerange' \| 'daily'`) | No | Optional driver run mode (`'blitz'` for 3-Minute Blitz scored runs; `'freerange'` for open-ended continuous runs routed below the 26-driver soft cap; `'daily'` for the Daily Shift, a timed run like Blitz). The lobby join schema accepts `'daily'` once `/api/daily` ships; the shared `RunModeSchema` and the site already accept it. |
+| `runMode` | `RunMode` (`'blitz' \| 'freerange' \| 'daily'`) | No | Alias for `mode` accepted on both Lobby and Site `POST /api/join` endpoints and embedded into the signed HMAC ticket. |
 | `requeue` | `boolean` | No | Optional flag requesting re-entry into the FIFO driver seat queue after a completed or evicted run. |
 | `seatLeaseId` | `string` | No | Optional active or promoted seat lease ID (`4..64` chars) when claiming a reserved driver seat. |
 | `spectateOnly` | `boolean` | No | Optional flag to connect strictly as a spectator without requesting or queuing for a driver seat. |
@@ -113,7 +113,7 @@ type ClientMessage =
 | `transferSite` | `siteId: SiteId` | Requests a clean handoff to another shard (`'den-1' \| 'slc-2' \| 'phx-3' \| 'abq-4'`), releasing the current vehicle lease and persisting player stats. |
 | `layers` | `traffic: boolean` | Opt-in overlay subscription. `traffic: true` subscribes this connection to the sparse heat layer (`stats.heat`, see §3.2); `false` unsubscribes. Default is unsubscribed on every (re)connect. |
 | `a2uiAction` | `screenId: string`, `actionId: string`, `dispatch?: DispatchParams`, `managerOp?: ManagerOp` | Submits an interactive A2UI clarification screen selection. For a Dispatcher's Call card, `screenId` is the minigame `id` and `actionId` is `dc-opt-<idx>`; the server executes its own stored option and ignores `dispatch` (§3.7). |
-| `setRunMode` | `mode: 'blitz' \| 'freerange'` | Switches the driver's active run mode between 3-Minute Blitz (`'blitz'`) and Free Range (`'freerange'`). |
+| `setRunMode` | `mode: 'blitz' \| 'freerange' \| 'daily'` | Switches the driver's active run mode between 3-Minute Blitz (`'blitz'`), Free Range (`'freerange'`) and the Daily Shift (`'daily'`). `isTimedRun(mode)` is true for `'blitz'` and `'daily'` (both run the personal 3-minute clock). |
 | `acceptRelocation` | `targetSite: SiteId` | Accepts a Cross-Site Surge Relocation offer, awarding `+75` relocation bonus points and minting a carry-over ticket to `targetSite`. |
 | `dispatchersCallPref` | `enabled: boolean` | Per-connection opt-out of the Dispatcher's Call minigame (§3.7). The client sends `enabled: false` after `welcome` when the player turned it off. |
 
@@ -323,6 +323,27 @@ See `docs/gameplay.md` §3c for the rules (window, situations, 8 s pick, scoring
 | `dispatchers_call` | `vid, id, situation, optionCount, deadline` | A card was offered (`deadline` = game time the pick closes). |
 | `dispatchers_call_pick` | `vid, id, optionIdx, geminiIdx, agreed, orderIds, evalUntil` | The driver picked; the option was executed through `dispatchOrderRoute`. |
 | `dispatchers_call_result` | `vid, id, situation, optionIdx, geminiIdx, agreed, timedOut, dispatched, delivered, onTime, pts` | The outcome window closed (or the run ended, or the pick timed out with `pts: 0`). `pts` was added to `runPts` / `sPts`. |
+
+---
+
+## 3a. Daily Shift helpers (`@warehouse/protocol` §9)
+
+Shared by the sim, site, lobby and client so every shard agrees on the day's Daily Shift. Gameplay rules: `docs/gameplay.md` §3d.
+
+| Export | Description |
+|---|---|
+| `RUN_MODES` / `RunModeSchema` | `'blitz' \| 'freerange' \| 'daily'`. |
+| `isTimedRun(mode)` | `true` for `'blitz'` and `'daily'`. Use it wherever behaviour depends on the personal run clock. |
+| `DAILY_EPOCH_DAY` | Day key of Daily #1 (`'2026-11-10'`, set to the launch day before the client ships). |
+| `dailyNumber(dayKey)` | 1-based Daily number (≤ 0 before the epoch). |
+| `dailySeed(dayKey)` | FNV-1a of `'ff-daily:' + dayKey`; throws on a malformed key. |
+| `mulberry32(seed)` / `fnv1a(s)` | Deterministic PRNG and hash, independent of any world RNG. |
+| `DAILY_MODIFIER_IDS` / `DailyModifierIdSchema` | `cold_chain`, `long_haul`, `express`, `clean_shift`, `heavy_load`, `combo_day`, `eco_run`. |
+| `DAILY_MODIFIERS` / `DailyModifierSchema` | `{ id, label, blurb }` player-facing copy per modifier. Effects live in `@warehouse/sim` `DAILY_EFFECTS`. |
+| `dailyModifierFor(dayKey)` | The day's modifier: a seeded permutation per 7-day block from the epoch, never the same modifier two days running. |
+| `DailyInfoSchema` | `{ dayKey, number, modifier: DailyModifier, cards: string[], resetsAt }`. `cards` are the opening-hand titles in deal order; `resetsAt` is the next UTC midnight (epoch ms). Built by `@warehouse/sim` `dailyInfo(dayKey)`. |
+
+`CompletedRunRecord` (sim, persisted with completed runs) gains `dailyKey?: string \| null` on daily runs and `tape?: string` on every run (`O` on-time, `L` late, `X` incident; max `RUN_TAPE_MAX = 40`).
 
 ---
 

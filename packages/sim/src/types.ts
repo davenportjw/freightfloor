@@ -1,3 +1,5 @@
+import type { DailyModifierId } from '@warehouse/protocol';
+
 export const SIM_VERSION = 5;
 
 export const MAP_W = 60;
@@ -427,7 +429,7 @@ export interface VehicleTarget {
   bay?: string;
 }
 
-export type RunMode = 'blitz' | 'freerange';
+export type RunMode = 'blitz' | 'freerange' | 'daily';
 export const BLITZ_DURATION_MIN = 180; // 180 sim-min = 180 real seconds (3 real min) at 10 Hz (0.1 sim-min/tick)
 export const RUN_CARD_GRACE_MIN = 15; // informational card-pick window (runGraceUntil); the Blitz clock itself starts only on first input, keepCards, or Co-Pilot
 
@@ -589,6 +591,17 @@ export interface Vehicle {
   runDeliveries: number;
   runOnTime: number;
   runIncidents: number;
+  /**
+   * Run event tape for the share card, one char per event in order: `O` on-time delivery,
+   * `L` late delivery, `X` incident. Capped at `RUN_TAPE_MAX`; reset by `startDriverRun`.
+   */
+  runTape?: string;
+  /** True once the driver charged during the current run (Eco Run bonus gate). */
+  runCharged?: boolean;
+  /** Daily Shift day key (`YYYY-MM-DD`): stamped at deal, re-stamped when the clock starts. */
+  dailyKey?: string | null;
+  /** Daily Shift personal modifier for `dailyKey` (daily runs only). */
+  dailyMod?: DailyModifierId | null;
   streak: number;
   bestStreak: number;
   runFinished: boolean;
@@ -1065,6 +1078,10 @@ export interface CompletedRunRecord {
   runNumber: number; // e.g., 1
   type: VehicleType;
   runMode: RunMode;
+  /** Daily Shift day key for daily runs. */
+  dailyKey?: string | null;
+  /** Run event tape (`O`/`L`/`X`), see `Vehicle.runTape`. */
+  tape?: string;
   pts: number;
   shipped: number;
   onTime: number;
@@ -1084,6 +1101,11 @@ export interface World {
   siteId: string;
   seed: number;
   rngState: number;
+  /**
+   * Host wall clock (epoch ms), set by the server before each tick. Only the Daily Shift reads
+   * it (to pick the UTC day); never serialized. Unset → `Date.now()`.
+   */
+  wallMs?: number;
   t: number;
   shiftTime: number;
   tier: number;

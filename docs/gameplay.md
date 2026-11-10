@@ -164,6 +164,28 @@ Once per **Blitz** run, near the midpoint, Gemini spots a real floor situation a
 
 ---
 
+## 3d. Daily Shift (`'daily'`)
+
+One shared Daily Shift per UTC day (reset at 00:00 UTC). It is a third run mode next to Blitz and Free Range, and plays exactly like a 3-Minute Blitz: same 180 game-min clock (`isTimedRun(mode)` is true for `'blitz'` and `'daily'`), drive-first start, single opening deal with no redraws, idle-eviction suppression and run-end release. Attempts are unlimited; the best score of the day counts (persistence lands with `/api/daily`).
+
+- **Same hand for everyone**: `dailyFor(dayKey)` deals `BLITZ_DEAL_SIZE` distinct Blitz-deck titles from its own `mulberry32(dailySeed(dayKey))` stream. It never reads or advances `w.rngState`, so every shard and every world seed deals the same three cards. `dailyInfo(dayKey)` returns the public `DailyInfo` (`dayKey`, `number`, `modifier`, `cards`, `resetsAt`).
+- **Day attribution**: `startDriverRun` stamps `v.dailyKey` / `v.dailyMod` from the host wall clock (`World.wallMs`, set by the site server each tick; `Date.now()` otherwise). A Daily belongs to the UTC day its clock starts on: if midnight passes between the deal and the first input, `startBlitzClock` re-stamps the new day and re-deals its hand. Once the clock runs the day never changes. `CompletedRunRecord.dailyKey` carries the day.
+- **Personal modifier**: one modifier per day (`dailyModifierFor`, a seeded 7-day rotation where every modifier appears once per block and never two days running). It applies only to the human on the daily run (`dailyModOf`), never to the shared floor, AI trucks or other drivers. Numbers live in `DAILY_EFFECTS`:
+
+| Modifier | Effect |
+|---|---|
+| `cold_chain` (Cold Chain Day) | Cold Storage zone `W` pallets pay ×2. |
+| `long_haul` (Long Haul) | Long-haul deliveries (`farClass: 'long'` or par ≥ `LONG_PAR_MIN`) pay ×1.5. |
+| `express` (Express Freight) | Deadline window ×0.75 (on time means `t ≤ created + (due − created) × 0.75`); Speedy pays ×2.0 instead of ×1.5. |
+| `clean_shift` (Clean Shift) | +150 at run end with zero incidents; each incident costs an extra 50 on top of `INCIDENT_PENALTY`. |
+| `heavy_load` (Heavy Load) | Top speed ×0.85; every delivery pays ×1.25. |
+| `combo_day` (Combo Day) | Combo ladder gains a ×2.5 step above ×2 (combo-max cards still fire once, on first reaching ×2). |
+| `eco_run` (Eco Run) | Battery drain ×1.5; +100 at run end if the driver never charged (`runCharged`). |
+
+  Run-end bonuses (Clean Shift, Eco Run) need at least one delivery.
+- **Run tape**: every human run (Blitz and Daily) records `runTape`, one character per event in order: `O` on-time delivery, `L` late delivery, `X` incident. It is capped at `RUN_TAPE_MAX = 40` characters (later events are dropped), resets on a new run, and is stored as `CompletedRunRecord.tape` for the share card.
+- Free Range is not affected; the `bestBlitzPts` lifetime stat stays Blitz-only.
+
 ## 4. Facility Tiers & Expansion (Up to Tier 6 / 60 Vehicles)
 
 Each warehouse site dynamically expands its floor plan as the active vehicle count grows:

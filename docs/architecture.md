@@ -12,6 +12,8 @@ Rather than placing 128 forklifts onto a single gridlocked warehouse floor, the 
 
 Each site shard runs an authoritative **10 Hz simulation loop** (`packages/sim`) on a dedicated Cloud Run service (`max=1` instance per site service) to guarantee a single authoritative world owner and stable address. Each shard supports up to **32 concurrent human/pilot drivers** (plus up to 28 AI agents, expanding up to `FLEET_CAP = 60` vehicles at facility Tier 6) and up to **300 total WebSocket connections** (including spectators).
 
+**Wall clock in the sim.** The sim runs on game time (`w.t`). The site server sets `world.wallMs = Date.now()` before every `tick`, and day-keyed features (the Daily Shift's `dailyKey` / modifier via `worldDayKey`) read it instead of calling `Date.now()` directly, so tests can pin a UTC day. `wallMs` is host state and is not serialized into snapshots.
+
 **Brain scheduling.** `AgentBrainScheduler.drainQueue` dispatches each `DecisionRequest` into its own concurrency slot, up to `MAX_CONCURRENT_BRAIN_CALLS`. A slot is freed as soon as its request settles. The background tick calls `drainQueue(..., { wait: false })`, so a slow or hung Gemini call never blocks other agents' decisions or the next tick. Each Vertex call:
 - has a hard 4 s abort (`BRAIN_CALL_TIMEOUT_MS`);
 - sends the per-kind `responseSchema`;

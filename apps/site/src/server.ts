@@ -19,6 +19,7 @@ import {
   HEAT_INTERVAL_MS,
   BOARD_INTERVAL_MS,
   DISPATCH_MAX_COUNT,
+  isTimedRun,
   type EvictionReason,
   type SiteId,
   type ServerMessage,
@@ -1765,7 +1766,7 @@ export async function createSiteServer(
         if (v?.autopilot && !v.runFinished) continue;
         // Once a Blitz run clock has started, let the 3-minute Blitz timer finish naturally
         // as 'run_complete' rather than evicting mid-run for 'idle_timeout'.
-        if (v && v.runMode === 'blitz' && v.runEndsAt != null && !v.runFinished) continue;
+        if (v && isTimedRun(v.runMode) && v.runEndsAt != null && !v.runFinished) continue;
         // If another tab for the same client/vehicle is still active, do not evict the shared vehicle.
         let siblingActive = false;
         for (const other of clients) {
@@ -1879,6 +1880,7 @@ export async function createSiteServer(
     }
 
     const prevPhase = world.phase;
+    world.wallMs = Date.now();
     tick(world);
 
     // Dispatcher's Call: detect real situations in each human's Blitz window and ask
@@ -2246,7 +2248,7 @@ export async function createSiteServer(
         // A 0% battery mid-Blitz is not a finished run (the sim lets the clock run out), so a
         // reconnect must resume the same vehicle rather than replace it.
         const blitzStillRunning =
-          ev.runMode === 'blitz' &&
+          isTimedRun(ev.runMode) &&
           ev.runEndsAt != null &&
           !ev.runFinished &&
           world.t < ev.runEndsAt;
@@ -2563,7 +2565,7 @@ export async function createSiteServer(
             if (
               movementPressed &&
               !v.runFinished &&
-              v.runMode === 'blitz' &&
+              isTimedRun(v.runMode) &&
               v.runStartedAt === null
             ) {
               if (v.runEndsAt == null) {

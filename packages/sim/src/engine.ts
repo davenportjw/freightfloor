@@ -1,4 +1,17 @@
-import { DISPATCH_MAX_COUNT } from '@warehouse/protocol';
+import {
+  DISPATCH_MAX_COUNT,
+  type DailyInfo,
+  type DailyModifierId,
+  DAILY_MODIFIERS,
+  addDays,
+  dailyModifierFor,
+  dailyNumber,
+  dailySeed,
+  dayKey,
+  dayKeyToMs,
+  isTimedRun,
+  mulberry32,
+} from '@warehouse/protocol';
 import {
   AgentContext,
   AgentDirective,
@@ -556,7 +569,7 @@ export const LAST_CALL_MIN = 90;
  * Uses the live run clock when started, otherwise `BLITZ_DURATION_MIN`.
  */
 export function runLengthMin(v?: Vehicle | null): number | null {
-  if (!v || v.runMode !== 'blitz') return null;
+  if (!v || !isTimedRun(v.runMode)) return null;
   if (v.runStartedAt != null && v.runEndsAt != null && v.runEndsAt > v.runStartedAt) {
     return v.runEndsAt - v.runStartedAt;
   }
@@ -688,12 +701,14 @@ export function rateFare(actual: number, par: number | null | undefined, onTime:
 }
 
 export function comboOf(v: Vehicle): number {
-  return COMBO_STEPS[Math.max(0, Math.min(COMBO_STEPS.length - 1, v.comboStep ?? 0))];
+  const steps = comboStepsOf(v);
+  return steps[Math.max(0, Math.min(steps.length - 1, v.comboStep ?? 0))];
 }
 
 function setComboStep(v: Vehicle, step: number): void {
-  v.comboStep = Math.max(0, Math.min(COMBO_STEPS.length - 1, step));
-  v.combo = COMBO_STEPS[v.comboStep];
+  const steps = comboStepsOf(v);
+  v.comboStep = Math.max(0, Math.min(steps.length - 1, step));
+  v.combo = steps[v.comboStep];
   v.comboBest = Math.max(v.comboBest ?? 1, v.combo);
 }
 
@@ -730,8 +745,10 @@ function stampParLoaded(w: World, o: Order): void {
 }
 
 function stepCombo(w: World, v: Vehicle): void {
-  setComboStep(v, (v.comboStep ?? 0) + 1);
-  if (v.combo === COMBO_STEPS[COMBO_STEPS.length - 1]) cardsOnComboMax(w, v);
+  const prev = v.comboStep ?? 0;
+  setComboStep(v, prev + 1);
+  // Combo-max cards trigger on first reaching ×2 (Combo Day's extra ×2.5 step doesn't re-fire).
+  if (prev < COMBO_STEPS.length - 1 && v.comboStep === COMBO_STEPS.length - 1) cardsOnComboMax(w, v);
 }
 
 /** Reset combo (Slow, crash, pallet drop, skid). Combo King perk floors the reset at 1.2×. */
@@ -763,13 +780,16 @@ function resetFareStats(v: Vehicle): void {
 
 export function startDriverRun(w: World, v: Vehicle, mode: RunMode = 'blitz'): void {
   v.runMode = mode;
-  v.runStartedAt = mode === 'blitz' ? null : w.t;
-  v.runGraceUntil = mode === 'blitz' ? Math.round((w.t + RUN_CARD_GRACE_MIN) * 10) / 10 : null;
+  v.runStartedAt = isTimedRun(mode) ? null : w.t;
+  v.runGraceUntil = isTimedRun(mode) ? Math.round((w.t + RUN_CARD_GRACE_MIN) * 10) / 10 : null;
   v.runEndsAt = null;
   v.runPts = 0;
   v.runDeliveries = 0;
   v.runOnTime = 0;
   v.runIncidents = 0;
+  v.runTape = '';
+  v.runCharged = false;
+  stampDaily(w, v);
   v.streak = 0;
   v.bestStreak = 0;
   v.runFinished = false;
@@ -790,7 +810,13 @@ export function startDriverRun(w: World, v: Vehicle, mode: RunMode = 'blitz'): v
  * opening cards never burns run time.
  */
 export function startBlitzClock(w: World, v: Vehicle): void {
-  if (v.runMode !== 'blitz' || v.runStartedAt !== null || v.runFinished || v.wheelPaused) return;
+  if (!isTimedRun(v.runMode) || v.runStartedAt !== null || v.runFinished || v.wheelPaused) return;
+  // A Daily belongs to the UTC day its clock starts on. If midnight passed between the deal
+  // and the first input, switch to the new day and re-deal its hand before the clock runs.
+  if (v.runMode === 'daily' && v.dailyKey !== worldDayKey(w)) {
+    stampDaily(w, v);
+    redealRunHand(w, v);
+  }
   if (v.runEndsAt == null) {
     v.runStartedAt = w.t;
     v.runEndsAt = Math.round((w.t + BLITZ_DURATION_MIN) * 10) / 10;
@@ -1337,6 +1363,8 @@ export function recordCompletedRun(w: World, v: Vehicle): CompletedRunRecord | n
     runNumber,
     type: v.type,
     runMode: v.runMode ?? 'blitz',
+    ...(v.runMode === 'daily' ? { dailyKey: v.dailyKey ?? null } : {}),
+    tape: v.runTape ?? '',
     pts,
     shipped,
     onTime: v.runOnTime ?? 0,
@@ -1395,7 +1423,7 @@ export function spawnPlayerVehicle(
       const isNewRun = nextRun !== null && nextRun !== prevRun;
       // 0% battery never ends a live Blitz run (limp mode + chargers); only a finished run,
       // a new run number, or a dead battery outside a live Blitz replaces the vehicle.
-      const liveBlitz = ev.runMode === 'blitz' && !ev.runFinished;
+      const liveBlitz = isTimedRun(ev.runMode) && !ev.runFinished;
       if ((ev.battery <= 0 && !liveBlitz) || ev.runFinished || isNewRun) {
         if (
           ev.runFinished ||
@@ -1739,6 +1767,10 @@ export function release(w: World, vid: string): void {
   v.runDeliveries = st?.runDeliveries ?? 0;
   v.runOnTime = st?.runOnTime ?? 0;
   v.runIncidents = st?.runIncidents ?? 0;
+  v.runTape = '';
+  v.runCharged = false;
+  v.dailyKey = null;
+  v.dailyMod = null;
   v.streak = st?.streak ?? 0;
   v.bestStreak = st?.bestStreak ?? 0;
   setComboStep(v, st?.comboStep ?? 0);
@@ -1778,7 +1810,7 @@ function pauseDedicatedVehicle(w: World, dv: Vehicle): void {
   if (dv.wheelPaused) return;
   dv.wheelPaused = true;
   dv.runPausedLeft =
-    dv.runMode === 'blitz' && !dv.runFinished && dv.runEndsAt != null && dv.runStartedAt != null
+    isTimedRun(dv.runMode) && !dv.runFinished && dv.runEndsAt != null && dv.runStartedAt != null
       ? Math.max(0, Math.round((dv.runEndsAt - w.t) * 10) / 10)
       : null;
 }
@@ -3288,7 +3320,9 @@ export function goCharge(w: World, v: Vehicle): void {
 }
 
 function drain(w: World, v: Vehicle, pct: number): void {
-  const mul = getCardModifiers(w, v).batteryDrainMul;
+  const mul =
+    getCardModifiers(w, v).batteryDrainMul *
+    (dailyModOf(v) === 'eco_run' ? DAILY_EFFECTS.eco_run.drainMul : 1);
   const actual = pct * mul;
   v.battery = Math.max(0, v.battery - actual);
   if (v.battery < 0.05) v.battery = 0;
@@ -3389,7 +3423,7 @@ export function dropPalletOnCollision(
     const sv = stratOf(v);
     v.forkTarget = 0.15;
     v.incidents++;
-    v.runIncidents = (v.runIncidents ?? 0) + 1;
+    noteRunIncident(v);
     v.streak = 0;
     resetCombo(w, v, 'drop');
     v.palletDrops = (v.palletDrops ?? 0) + dropped.length;
@@ -3477,7 +3511,7 @@ function incident(
     v.stunnedUntil = w.t + CRASH_STUN_MIN;
     v.speedNow = 0;
     v.incidents++;
-    v.runIncidents = (v.runIncidents ?? 0) + 1;
+    noteRunIncident(v);
     v.streak = 0;
     resetCombo(w, v, 'crash');
     // Boosting into a crash spills ALL cargo; otherwise a 50% chance to drop one pallet.
@@ -3801,7 +3835,7 @@ function scoreTrip(
 ): DeliverRec {
   const { s, kwhEach, mods, payoutMul, recs, poachedOwners } = ctx;
   o.state = 'done';
-  const onTime = w.t <= o.due;
+  const onTime = deliveredOnTime(w, v, o);
   if (o.dispatchCallId) recordDispatchersCallDelivery(w, o, onTime);
   {
     if (onTime) {
@@ -3816,14 +3850,18 @@ function scoreTrip(
     const rating = rateFare(actual, par, onTime);
     const combo = comboOf(v);
     const allBonus = bonus + (mods.ptsBonus ?? 0) + (o.p0 ? (mods.p0Bonus ?? 0) : 0);
-    // Scoring: (value + bonuses) × rating × combo × payoutMul. The delivery streak is a
-    // stat only (no multiplier).
+    // Scoring: (value + bonuses) × rating × combo × payoutMul × daily modifier. The delivery
+    // streak is a stat only (no multiplier).
     const base = o.value + allBonus;
-    const ratingMul = RATING_MUL[rating];
-    const pts = base * ratingMul * combo * payoutMul;
+    const ratingMul =
+      rating === 'speedy' && dailyModOf(v) === 'express'
+        ? DAILY_EFFECTS.express.speedyMul
+        : RATING_MUL[rating];
+    const pts = base * ratingMul * combo * payoutMul * dailyScoreMul(v, o);
     addPts(v, pts);
     v.sShipped++;
     v.runDeliveries = (v.runDeliveries ?? 0) + 1;
+    appendRunTape(v, onTime ? 'O' : 'L');
     if (rating === 'slow') resetCombo(w, v, 'slow');
     else stepCombo(w, v);
     v.fareTrips = (v.fareTrips ?? 0) + 1;
@@ -4314,8 +4352,9 @@ function stepHumanSingle(
         ? 0.55
         : 1;
   const liftAccMul = v.liftBoostUntil && w.t < v.liftBoostUntil ? 1.35 : 1;
+  const dailySpeedMul = dailyModOf(v) === 'heavy_load' ? DAILY_EFFECTS.heavy_load.speedMul : 1;
   const speedMul =
-    mods.speedMul * diffSpeed * (isBoosting ? BOOST_SPEED_MUL : 1) * liftSpeedMul;
+    mods.speedMul * diffSpeed * (isBoosting ? BOOST_SPEED_MUL : 1) * liftSpeedMul * dailySpeedMul;
   const batFactor = v.battery <= 0 ? 0.55 : v.battery < 10 ? 0.72 : 1;
   const maxF =
     3.15 *
@@ -4398,6 +4437,7 @@ function stepHumanSingle(
     if (onCharger && v.speedNow === 0) {
       const chargeRate = 15 + (mods.chargeBonus ?? 0);
       v.battery = Math.min(100, v.battery + chargeRate * dt);
+      v.runCharged = true;
       if (v.battery >= 100) v.humanCharging = false;
     } else {
       v.humanCharging = false;
@@ -5292,7 +5332,7 @@ function onShiftEnd(w: World): void {
     // the rollover (their run is not over), so remember how much of it is already banked;
     // a finished-but-not-evicted vehicle is banked once and zeroed like everyone else.
     v.bank += (v.sPts ?? 0) - (v.bankedPts ?? 0);
-    if (v.human && v.runMode === 'blitz' && !v.runFinished) {
+    if (v.human && isTimedRun(v.runMode) && !v.runFinished) {
       v.bankedPts = v.sPts ?? 0;
       return;
     }
@@ -5705,6 +5745,132 @@ export const BLITZ_DECK = [
 /** Cards offered in the single Blitz opening deal. */
 export const BLITZ_DEAL_SIZE = 3;
 
+// ---------- Daily Shift ----------
+/** Max `runTape` length (share card shows up to 20; the tail beyond the cap is dropped). */
+export const RUN_TAPE_MAX = 40;
+
+/** The day's shared opening hand: `BLITZ_DEAL_SIZE` Blitz-deck titles in deal order. */
+export interface DailyDeal {
+  dayKey: string;
+  modifier: DailyModifierId;
+  cards: string[];
+}
+
+/**
+ * Pure: the Daily Shift for a UTC day key. Seeds its own mulberry32 stream from
+ * `dailySeed(dayKey)`, so it never reads or advances `w.rngState` and every shard deals the
+ * same titles.
+ */
+export function dailyFor(key: string): DailyDeal {
+  const next = mulberry32(dailySeed(key));
+  const pool: string[] = [...BLITZ_DECK];
+  const cards: string[] = [];
+  while (cards.length < BLITZ_DEAL_SIZE && pool.length) {
+    cards.push(pool.splice(Math.floor(next() * pool.length), 1)[0]);
+  }
+  return { dayKey: key, modifier: dailyModifierFor(key).id, cards };
+}
+
+/** Public `DailyInfo` for a day key (welcome message, lobby config, `/api/daily`). */
+export function dailyInfo(key: string): DailyInfo {
+  const deal = dailyFor(key);
+  return {
+    dayKey: key,
+    number: dailyNumber(key),
+    modifier: DAILY_MODIFIERS[deal.modifier],
+    cards: deal.cards,
+    resetsAt: dayKeyToMs(addDays(key, 1)),
+  };
+}
+
+/** UTC day key from the host wall clock (`w.wallMs`, set by the server each tick). */
+export function worldDayKey(w: Pick<World, 'wallMs'>): string {
+  return dayKey(w.wallMs ?? Date.now());
+}
+
+/**
+ * Numeric effects of each Daily modifier. They apply only to a human on a daily run
+ * (`dailyModOf`), never to the shared floor or other drivers.
+ */
+export const DAILY_EFFECTS = {
+  cold_chain: { coldZone: 'W', coldMul: 2 },
+  long_haul: { longMul: 1.5 },
+  express: { windowMul: 0.75, speedyMul: 2.0 },
+  clean_shift: { cleanBonus: 150, incidentPenalty: 50 },
+  heavy_load: { speedMul: 0.85, deliveryMul: 1.25 },
+  combo_day: { extraStep: 2.5 },
+  eco_run: { drainMul: 1.5, noChargeBonus: 100 },
+} as const;
+
+/** The active Daily modifier for this vehicle, or null when it is not on a daily run. */
+export function dailyModOf(v: Vehicle): DailyModifierId | null {
+  return v.human && v.runMode === 'daily' ? (v.dailyMod ?? null) : null;
+}
+
+/** Stamp the daily key + modifier from the wall clock (daily runs only; clears otherwise). */
+function stampDaily(w: World, v: Vehicle): void {
+  if (v.runMode !== 'daily') {
+    v.dailyKey = null;
+    v.dailyMod = null;
+    return;
+  }
+  const key = worldDayKey(w);
+  v.dailyKey = key;
+  v.dailyMod = dailyModifierFor(key).id;
+}
+
+/** Append one event to the run tape (`O` on-time, `L` late, `X` incident), capped. */
+function appendRunTape(v: Vehicle, ch: 'O' | 'L' | 'X'): void {
+  if (!v.human) return;
+  const tape = v.runTape ?? '';
+  if (tape.length < RUN_TAPE_MAX) v.runTape = tape + ch;
+}
+
+/** Count one run incident: counter, tape, and the Clean Shift per-incident penalty. */
+function noteRunIncident(v: Vehicle): void {
+  v.runIncidents = (v.runIncidents ?? 0) + 1;
+  appendRunTape(v, 'X');
+  if (dailyModOf(v) === 'clean_shift') addPts(v, -DAILY_EFFECTS.clean_shift.incidentPenalty);
+}
+
+/** Daily delivery multiplier from the modifier (1 when none applies). */
+function dailyScoreMul(v: Vehicle, o: Order): number {
+  switch (dailyModOf(v)) {
+    case 'cold_chain':
+      return o.slot?.zone === DAILY_EFFECTS.cold_chain.coldZone ? DAILY_EFFECTS.cold_chain.coldMul : 1;
+    case 'long_haul':
+      return o.farClass === 'long' || (o.parLoaded ?? 0) >= LONG_PAR_MIN ? DAILY_EFFECTS.long_haul.longMul : 1;
+    case 'heavy_load':
+      return DAILY_EFFECTS.heavy_load.deliveryMul;
+    default:
+      return 1;
+  }
+}
+
+/** On-time test, with the Express deadline window 25% shorter for the daily driver. */
+function deliveredOnTime(w: World, v: Vehicle, o: Order): boolean {
+  if (dailyModOf(v) === 'express' && o.due > o.created) {
+    return w.t <= o.created + (o.due - o.created) * DAILY_EFFECTS.express.windowMul;
+  }
+  return w.t <= o.due;
+}
+
+/** Combo ladder with the Combo Day extra step. */
+const COMBO_DAY_STEPS: readonly number[] = [...COMBO_STEPS, DAILY_EFFECTS.combo_day.extraStep];
+
+/** Combo ladder for this vehicle (Combo Day adds one step above ×2). */
+function comboStepsOf(v: Vehicle): readonly number[] {
+  return dailyModOf(v) === 'combo_day' ? COMBO_DAY_STEPS : COMBO_STEPS;
+}
+
+/** Run-end Daily bonuses (Clean Shift, Eco Run); only for runs with ≥ 1 delivery. */
+function applyDailyRunEnd(v: Vehicle): void {
+  const mod = dailyModOf(v);
+  if (!mod || (v.runDeliveries ?? 0) < 1) return;
+  if (mod === 'clean_shift' && (v.runIncidents ?? 0) === 0) addPts(v, DAILY_EFFECTS.clean_shift.cleanBonus);
+  if (mod === 'eco_run' && !v.runCharged) addPts(v, DAILY_EFFECTS.eco_run.noChargeBonus);
+}
+
 /** The human vehicle driving for a hand key, if any. */
 function humanForHand(w: World, player: string): Vehicle | undefined {
   return w.vehicles.find((x) => x.human && ownsHandKey(x, player));
@@ -5741,8 +5907,9 @@ function discardHand(w: World, key: string): void {
 export function dealCards(w: World, player = 'you', isRedraw = false) {
   const h = (w.cards[player] ??= { shift: -1, offer: null, cards: [] });
   const si = shiftIndex(w.t);
-  const blitz = humanForHand(w, player)?.runMode === 'blitz';
-  if (blitz && isRedraw) return h; // Blitz: dealt once at run start, no replacement offers.
+  const hv = humanForHand(w, player);
+  const blitz = isTimedRun(hv?.runMode);
+  if (blitz && isRedraw) return h; // Blitz/Daily: dealt once at run start, no replacement offers.
   if (!isRedraw) {
     if (h.shift === si && (h.offer || h.cards.length)) return h;
     h.shift = si;
@@ -5750,6 +5917,21 @@ export function dealCards(w: World, player = 'you', isRedraw = false) {
   } else {
     if (h.offer) return h;
     h.shift = si;
+  }
+  if (hv?.runMode === 'daily') {
+    // Daily Shift: the day's shared titles (seeded per day, never from w.rngState).
+    const deal = dailyFor(hv.dailyKey ?? worldDayKey(w));
+    const offer = deal.cards
+      .map((title) => SKILLS.find((s) => s.title === title))
+      .filter((s): s is (typeof SKILLS)[number] => Boolean(s))
+      .map((s) => mkSkill(w, s));
+    h.offer = offer;
+    delete h.pick;
+    w.totals.cardDeals++;
+    emit(w, 'card', `Daily Shift #${dailyNumber(deal.dayKey)} cards dealt. Keep at least one.`, {
+      player,
+    });
+    return h;
   }
   if (blitz) {
     const pool = SKILLS.filter((s) => (BLITZ_DECK as readonly string[]).includes(s.title));
@@ -6003,7 +6185,7 @@ const ON_TIME_COUNT_CARD = 'Priority Broker';
  * a third of the run), else the final LAST_CALL_MIN of the 480-min shift.
  */
 export function inLastCall(w: World, v: Vehicle): boolean {
-  if (v.runMode === 'blitz') {
+  if (isTimedRun(v.runMode)) {
     return v.runEndsAt != null && w.t >= v.runEndsAt - lastCallMin(v) && w.t <= v.runEndsAt;
   }
   return w.t - shiftIndex(w.t) * 480 >= 480 - LAST_CALL_MIN;
@@ -6301,7 +6483,7 @@ function cardsResolveShift(w: World): void {
     );
     const human = !!(dv && dv.human);
     // Blitz human drivers have personal 3-min timers isolated from global 480-min shift boundaries
-    if (human && dv?.runMode === 'blitz') return;
+    if (human && isTimedRun(dv?.runMode)) return;
     h.cards.forEach((c) => {
       if (c.status !== 'active') return;
       if (dv && resolveRunEndCard(w, c, dv)) return;
@@ -6321,7 +6503,7 @@ function cardsResolveShift(w: World): void {
       const dv = w.vehicles.find(
         (v) => v.human && (v.controlledByClientId === player || v.driver === player),
       );
-      return dv?.runMode === 'blitz' && h.cards.some((c) => c.id === o.card && c.status === 'active');
+      return isTimedRun(dv?.runMode) && h.cards.some((c) => c.id === o.card && c.status === 'active');
     });
     if (!belongsToBlitzHuman) o.card = null;
   });
@@ -6329,7 +6511,7 @@ function cardsResolveShift(w: World): void {
     const dv = w.vehicles.find(
       (v) => v.human && (v.controlledByClientId === p || v.driver === p),
     );
-    if (dv && dv.runMode !== 'blitz') {
+    if (dv && !isTimedRun(dv.runMode)) {
       dealCards(w, p);
     }
   });
@@ -6709,7 +6891,7 @@ function fareChoiceUpkeep(w: World, v: Vehicle): void {
   let off = v.fareOffer && v.fareOffer.carpool === carpool ? v.fareOffer : null;
   // Drive-first: before the Blitz clock starts the Co-Pilot timer is held at zero, so the
   // auto-pick can never fire while the driver hasn't started playing.
-  const preClock = v.runMode === 'blitz' && v.runStartedAt === null;
+  const preClock = isTimedRun(v.runMode) && v.runStartedAt === null;
   const since = off && !preClock ? off.since : w.t;
   if (off) {
     const keep: FareOption[] = [];
@@ -7073,7 +7255,7 @@ export function tick(w: World, dt = TICK_MIN): void {
       v.human &&
       !v.runFinished &&
       !v.wheelPaused &&
-      v.runMode === 'blitz' &&
+      isTimedRun(v.runMode) &&
       v.runEndsAt != null &&
       w.t >= v.runEndsAt
     ) {
@@ -7095,6 +7277,7 @@ export function tick(w: World, dt = TICK_MIN): void {
       // order claims, carried pallets, route reservations and card tags are released.
       const hk = w.cards[handKey(v)] ? handKey(v) : v.driver && w.cards[v.driver] ? v.driver : handKey(v);
       releaseDriverHold(w, v, hk);
+      applyDailyRunEnd(v);
       v.runFinished = true;
       v.speedNow = 0;
       v.path = [];
@@ -7103,7 +7286,7 @@ export function tick(w: World, dt = TICK_MIN): void {
       emit(
         w,
         'shift',
-        `${v.driver || v.id} completed 3-Minute Blitz with ${Math.round(v.runPts ?? 0)} pts (${v.runDeliveries ?? 0} pallets, best streak ×${v.bestStreak ?? 0}).`,
+        `${v.driver || v.id} completed ${v.runMode === 'daily' ? 'the Daily Shift' : '3-Minute Blitz'} with ${Math.round(v.runPts ?? 0)} pts (${v.runDeliveries ?? 0} pallets, best streak ×${v.bestStreak ?? 0}).`,
         { vid: v.id },
       );
     }
@@ -7372,7 +7555,7 @@ export function dispatchersCallWindow(w: World, v: Vehicle): DispatchersCallWind
   if (
     w.phase !== 'running' ||
     !v.human ||
-    v.runMode !== 'blitz' ||
+    !isTimedRun(v.runMode) ||
     v.runStartedAt == null ||
     v.runFinished ||
     v.dispatchersCall
@@ -7489,7 +7672,7 @@ export function skipDispatchersCall(
 ): DispatchersCallState | null {
   const dc = v.dispatchersCall;
   if (dc && dc.status !== 'offered') return null;
-  if (!v.human || v.runMode !== 'blitz' || v.runFinished) return null;
+  if (!v.human || !isTimedRun(v.runMode) || v.runFinished) return null;
   const state: DispatchersCallState = dc
     ? { ...dc, status: 'skipped', skipReason: reason }
     : {
