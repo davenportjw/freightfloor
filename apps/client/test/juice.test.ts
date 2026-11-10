@@ -6,6 +6,11 @@ import { describe, expect, it } from 'vitest';
 import { LIVERIES, type DailyResultMessage } from '@warehouse/protocol';
 import { HUMAN, type SimEvent } from '@warehouse/sim';
 import {
+  cabJuiceAnchor,
+  paintCabRing,
+  paintConfetti,
+  paintEdgeFlash,
+  type JuiceCtx,
   confettiFrame,
   confettiPalette,
   dailyJuice,
@@ -120,5 +125,79 @@ describe('pruneJuice', () => {
     const many = Array.from({ length: 10 }, (_, i) => ringJuice(i));
     expect(pruneJuice(many, 10)).toHaveLength(JUICE_MAX);
     expect(pruneJuice([ringJuice(0)], JUICE_MS.ring + 1)).toEqual([]);
+  });
+});
+
+/** Records painter calls (no DOM in the client test env). */
+function recorder() {
+  const calls: Array<[string, ...unknown[]]> = [];
+  const stops: Array<[number, string]> = [];
+  const ctx = {
+    globalAlpha: 1,
+    fillStyle: '' as unknown,
+    strokeStyle: '' as unknown,
+    lineWidth: 1,
+    save: () => calls.push(['save']),
+    restore: () => calls.push(['restore']),
+    translate: (x: number, y: number) => calls.push(['translate', x, y]),
+    rotate: (r: number) => calls.push(['rotate', r]),
+    fillRect: (...a: number[]) => calls.push(['fillRect', ...a, ctx.globalAlpha, ctx.fillStyle]),
+    beginPath: () => calls.push(['beginPath']),
+    ellipse: (...a: number[]) => calls.push(['ellipse', ...a]),
+    stroke: () => calls.push(['stroke', ctx.globalAlpha, ctx.strokeStyle, ctx.lineWidth]),
+    createRadialGradient: () => ({ addColorStop: (o: number, c: string) => stops.push([o, c]) }),
+  };
+  return { ctx: ctx as unknown as JuiceCtx, calls, stops };
+}
+
+describe('shared juice painters (iso + Cab View)', () => {
+  it('edge flash fills the viewport with a gold edge gradient, and skips zero alpha', () => {
+    const r = recorder();
+    paintEdgeFlash(r.ctx, 800, 600, 0);
+    expect(r.calls).toEqual([]);
+    paintEdgeFlash(r.ctx, 800, 600, 0.4);
+    expect(r.calls.find((c) => c[0] === 'fillRect')?.slice(1, 5)).toEqual([0, 0, 800, 600]);
+    expect(r.stops).toEqual([[0, 'rgba(245,158,11,0)'], [1, 'rgba(245,158,11,0.400)']]);
+    expect(r.calls.filter((c) => c[0] === 'save').length).toBe(r.calls.filter((c) => c[0] === 'restore').length);
+  });
+
+  it('confetti paints one balanced rect per bit at the scaled offset', () => {
+    const j = juiceForEvent(fare(), 'v1', null, 1000)!;
+    const bits = confettiFrame(j, 1300, false);
+    const r = recorder();
+    paintConfetti(r.ctx, bits, 100, 200, 2);
+    const rects = r.calls.filter((c) => c[0] === 'fillRect');
+    expect(rects.length).toBe(bits.length);
+    const t0 = r.calls.find((c) => c[0] === 'translate')!;
+    expect(t0[1]).toBeCloseTo(100 + bits[0].dx * 2);
+    expect(t0[2]).toBeCloseTo(200 + bits[0].dy * 2);
+    expect(r.calls.filter((c) => c[0] === 'save').length).toBe(bits.length);
+    expect(r.calls.filter((c) => c[0] === 'restore').length).toBe(bits.length);
+  });
+
+  it('Cab View anchor sits at the lower centre and scales with the viewport', () => {
+    const small = cabJuiceAnchor(400, 300);
+    const big = cabJuiceAnchor(1920, 1080);
+    expect(small.x).toBe(200);
+    expect(small.y).toBeCloseTo(300 * 0.62);
+    expect(big.ringPx).toBeGreaterThan(small.ringPx);
+    expect(small.scale).toBeGreaterThanOrEqual(1);
+    expect(big.scale).toBeLessThanOrEqual(2.2);
+  });
+
+  it('Cab View ring is a squashed floor ellipse in the ring colour; reduced motion keeps its radius', () => {
+    const j = ringJuice(0);
+    const draw = (now: number, reduced: boolean) => {
+      const r = recorder();
+      paintCabRing(r.ctx, 800, 600, ringFrame(j, now, reduced)!, GOLD);
+      return r.calls;
+    };
+    const calls = draw(200, false);
+    const e = calls.find((c) => c[0] === 'ellipse')! as number[] & unknown[];
+    expect(e[1]).toBe(400);
+    expect(e[4] as number).toBeCloseTo((e[3] as number) * 0.35);
+    expect(calls.find((c) => c[0] === 'stroke')![2]).toBe(GOLD);
+    const rx = (now: number) => draw(now, true).find((c) => c[0] === 'ellipse')![3];
+    expect(rx(100)).toBe(rx(900));
   });
 });

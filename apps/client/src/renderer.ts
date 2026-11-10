@@ -3,7 +3,7 @@
  * block (2:1 iso, TW=64/TH=32, extruded shaded boxes). It only draws real world state;
  * camera, picking and remote-vehicle interpolation live here, pure math lives in ./render/.
  */
-import { confettiFrame, flashAlpha, pruneJuice, ringFrame, type Juice } from './render/juice.js';
+import { confettiFrame, flashAlpha, paintConfetti, paintEdgeFlash, pruneJuice, ringFrame, type Juice } from './render/juice.js';
 import {
   evaluateRackLift,
   guide as simGuide,
@@ -755,13 +755,7 @@ export class WarehouseRenderer {
       if (j.kind === 'flash') {
         const a = flashAlpha(j, now, this.reducedMotion);
         if (a <= 0) continue;
-        const r = Math.max(this.VW, this.VH) * 0.75;
-        const g = ctx.createRadialGradient(this.VW / 2, this.VH / 2, r * 0.55, this.VW / 2, this.VH / 2, r);
-        g.addColorStop(0, 'rgba(245,158,11,0)');
-        g.addColorStop(1, `rgba(245,158,11,${a.toFixed(3)})`);
-        ctx.globalAlpha = 1;
-        ctx.fillStyle = g;
-        ctx.fillRect(0, 0, this.VW, this.VH);
+        paintEdgeFlash(ctx, this.VW, this.VH, a);
         continue;
       }
       if (!p) continue;
@@ -775,15 +769,7 @@ export class WarehouseRenderer {
       const bits = confettiFrame(j, now, this.reducedMotion);
       if (!bits.length) continue;
       const [ox, oy] = pt.P(p.x, p.y, 40);
-      for (const b of bits) {
-        ctx.globalAlpha = b.alpha;
-        ctx.fillStyle = b.color;
-        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-        ctx.translate(ox + b.dx * z, oy + b.dy * z);
-        ctx.rotate(b.rot);
-        ctx.fillRect((-b.size * z) / 2, (-b.size * z) / 4, b.size * z, (b.size * z) / 2);
-      }
-      ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      paintConfetti(ctx, bits, ox, oy, z);
     }
     ctx.restore();
   }

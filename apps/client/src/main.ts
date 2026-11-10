@@ -105,7 +105,7 @@ import {
 } from './analytics.js';
 import { recordLocalVisit } from './visits.js';
 import { diffSeenUnlocks, liveryPaletteFor } from './ui/liveries.js';
-import { dailyJuice, juiceForEvent, ringJuice, streakMilestone } from './render/juice.js';
+import { dailyJuice, juiceForEvent, ringJuice, streakMilestone, type Juice } from './render/juice.js';
 
 // Re-exported for the existing test suite (test/client.test.ts).
 export { applyQuantisedDelta, formatRunDisplayName, nextRunDisplayName, parseRunDisplayName } from './state.js';
@@ -427,6 +427,11 @@ function boot(): void {
   // three.js + the cab renderer are a separate chunk, fetched the first time the player drives in
   // the cab. A missing WebGL context is a real error: we switch back to iso and say so.
   let cab: CabRenderer | null = null;
+  /** Moment juice goes to both renderers so it survives an iso ⇄ cab switch mid-effect. */
+  const pushJuice = (j: Juice, now: number): void => {
+    renderer.pushJuice(j, now);
+    cab?.pushJuice(j, now);
+  };
   let cabLoading = false;
   let cabFailed = false;
   function ensureCab(): void {
@@ -1312,7 +1317,7 @@ function boot(): void {
           }
           const jv = calloutVid ? store.world.vehicles.find((v) => v.id === calloutVid) : undefined;
           const j = juiceForEvent(ev, calloutVid, jv ? liveryPaletteFor(jv) : null, now);
-          if (j) renderer.pushJuice(j, now);
+          if (j) pushJuice(j, now);
           const b = rivalBubbleFor(ev, calloutVid);
           if (b) {
             renderer.pushBubble(b, now);
@@ -1324,7 +1329,7 @@ function boot(): void {
         }
         if (juiceVid && juiceVid === calloutVid && prevStreak != null) {
           const next = store.world.vehicles.find((v) => v.id === juiceVid)?.streak ?? 0;
-          if (streakMilestone(prevStreak, next) != null) renderer.pushJuice(ringJuice(now), now);
+          if (streakMilestone(prevStreak, next) != null) pushJuice(ringJuice(now), now);
         }
         noteRunStart();
         noteMyOrders();
@@ -1469,7 +1474,7 @@ function boot(): void {
         break;
       case 'dailyResult':
         store.applyDailyResult(msg);
-        for (const j of dailyJuice(msg, now)) renderer.pushJuice(j, now);
+        for (const j of dailyJuice(msg, now)) pushJuice(j, now);
         // A new best moves the Today board: refetch next time it is shown.
         if (msg.improved) store.dailyBoard = { ...store.dailyBoard, updatedAt: null };
         break;

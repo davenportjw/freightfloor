@@ -21,6 +21,17 @@ import {
 } from '@warehouse/sim';
 import type { GuideInfo, RenderOptions } from '../renderer.js';
 import { arrowColor, BUBBLE_MS, CALLOUT_MS, calloutColor, guideUrgency, wrapBubbleText, type Callout, type RivalBubble } from '../render/fx.js';
+import {
+  cabJuiceAnchor,
+  confettiFrame,
+  flashAlpha,
+  paintCabRing,
+  paintConfetti,
+  paintEdgeFlash,
+  pruneJuice,
+  ringFrame,
+  type Juice,
+} from '../render/juice.js';
 import { forkHeightM, isoZ, ISO_PX_PER_M, liftWindowM, beamTopM, TILE_M } from '../render/liftGeometry.js';
 import { PoseTracker, type Pose } from '../render/motion.js';
 import { Painter } from '../render/painter.js';
@@ -212,6 +223,8 @@ export class CabRenderer {
   private visible = false;
   private callouts: Array<Callout & { born: number }> = [];
   private bubbles: Array<RivalBubble & { born: number }> = [];
+  /** Moment juice (confetti / ring / PB flash), drawn on the 2D overlay. */
+  private juice: Juice[] = [];
   private poses = new Map<string, Pose>();
   /** Free-look offsets (rad) from dragging the cab view; spring back to 0 on release. */
   private lookYaw = 0;
@@ -354,6 +367,10 @@ export class CabRenderer {
   pushCallout(c: Callout, nowMs: number): void {
     this.callouts.push({ ...c, born: nowMs });
     if (this.callouts.length > 4) this.callouts.shift();
+  }
+
+  pushJuice(j: Juice, nowMs: number): void {
+    this.juice = pruneJuice([...this.juice, j], nowMs);
   }
 
   pushBubble(b: RivalBubble, nowMs: number): void {
@@ -1029,6 +1046,22 @@ export class CabRenderer {
       ctx.textBaseline = 'top';
       lines.forEach((l, i) => ctx.fillText(l, x + 8, y + 6 + i * 15));
       ctx.restore();
+    }
+
+    this.drawJuice(nowMs);
+  }
+
+  /** Moment juice in the cab: bursts from the lower centre (your forks), PB flash on the screen edge. */
+  private drawJuice(nowMs: number): void {
+    this.juice = pruneJuice(this.juice, nowMs);
+    if (!this.juice.length) return;
+    const a = cabJuiceAnchor(this.VW, this.VH);
+    for (const j of this.juice) {
+      if (j.kind === 'flash') paintEdgeFlash(this.ctx, this.VW, this.VH, flashAlpha(j, nowMs, this.reducedMotion));
+      else if (j.kind === 'ring') {
+        const f = ringFrame(j, nowMs, this.reducedMotion);
+        if (f) paintCabRing(this.ctx, this.VW, this.VH, f, j.colors[0]);
+      } else paintConfetti(this.ctx, confettiFrame(j, nowMs, this.reducedMotion), a.x, a.y, a.scale);
     }
   }
 

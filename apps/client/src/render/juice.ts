@@ -126,3 +126,64 @@ export function flashAlpha(j: Juice, now: number, reduced: boolean): number {
   if (reduced) return peak * (1 - k);
   return k < 0.15 ? peak * (k / 0.15) : peak * (1 - (k - 0.15) / 0.85);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Shared screen-space painters (iso renderer and Cab View overlay draw the same effects).
+
+/** The slice of `CanvasRenderingContext2D` the painters use (kept narrow so tests can record). */
+export type JuiceCtx = Pick<
+  CanvasRenderingContext2D,
+  | 'save' | 'restore' | 'translate' | 'rotate' | 'fillRect' | 'createRadialGradient'
+  | 'beginPath' | 'ellipse' | 'stroke'
+> & { globalAlpha: number; fillStyle: string | CanvasGradient | CanvasPattern; strokeStyle: string | CanvasGradient | CanvasPattern; lineWidth: number };
+
+/** Gold edge flash over a `w`×`h` CSS-px viewport. */
+export function paintEdgeFlash(ctx: JuiceCtx, w: number, h: number, alpha: number): void {
+  if (alpha <= 0) return;
+  const r = Math.max(w, h) * 0.75;
+  const g = ctx.createRadialGradient(w / 2, h / 2, r * 0.55, w / 2, h / 2, r);
+  g.addColorStop(0, 'rgba(245,158,11,0)');
+  g.addColorStop(1, `rgba(245,158,11,${alpha.toFixed(3)})`);
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+  ctx.restore();
+}
+
+/** Confetti bits around screen origin (`ox`, `oy`), offsets scaled by `scale`. */
+export function paintConfetti(ctx: JuiceCtx, bits: readonly ConfettiBit[], ox: number, oy: number, scale: number): void {
+  for (const b of bits) {
+    const s = b.size * scale;
+    ctx.save();
+    ctx.globalAlpha = b.alpha;
+    ctx.fillStyle = b.color;
+    ctx.translate(ox + b.dx * scale, oy + b.dy * scale);
+    ctx.rotate(b.rot);
+    ctx.fillRect(-s / 2, -s / 4, s, s / 2);
+    ctx.restore();
+  }
+}
+
+/**
+ * Cab View anchor: effects burst from the lower centre (where your forks are), and the ring is a
+ * floor-perspective ellipse whose radius tracks the viewport. `ringPx` is pixels per ring tile.
+ */
+export function cabJuiceAnchor(w: number, h: number): { x: number; y: number; ringPx: number; squash: number; scale: number } {
+  const m = Math.min(w, h);
+  return { x: w / 2, y: h * 0.62, ringPx: m * 0.16, squash: 0.35, scale: Math.max(1, Math.min(2.2, m / 420)) };
+}
+
+/** Cab View ring pulse: a floor ellipse around the anchor. */
+export function paintCabRing(ctx: JuiceCtx, w: number, h: number, f: { radius: number; alpha: number; width: number }, color: string): void {
+  const a = cabJuiceAnchor(w, h);
+  const rx = f.radius * a.ringPx;
+  ctx.save();
+  ctx.globalAlpha = f.alpha;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = f.width * a.scale;
+  ctx.beginPath();
+  ctx.ellipse(a.x, a.y, rx, rx * a.squash, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}

@@ -241,7 +241,7 @@ Short client-side effects play when existing game state changes. They add no ser
 - Confetti is seeded from the event (`mulberry32`), so it looks the same every time and uses no `Math.random`.
 - At most 6 effects are live at once (`JUICE_MAX`). Each lasts under 1.2 s.
 - **Reduced motion** (`prefers-reduced-motion: reduce`): no confetti, the ring stays still and only fades, and the flash becomes a dim glow.
-- The effects show in the Drive and Floor iso view only, not in Cab View.
+- **Cab View**: the same effects draw on the cab overlay. Confetti bursts from the lower centre (your forks), the ring is a flattened floor ellipse there, and the flash runs around the screen edge. Effects go to both views, so switching views mid-effect keeps them.
 
 ## 4. Facility Tiers & Expansion (Up to Tier 6 / 60 Vehicles)
 
