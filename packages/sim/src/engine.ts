@@ -2,15 +2,12 @@ import {
   DISPATCH_MAX_COUNT,
   type DailyInfo,
   type DailyModifierId,
-  DAILY_MODIFIERS,
-  addDays,
+  dailyCardsFor,
+  dailyInfoFor,
   dailyModifierFor,
   dailyNumber,
-  dailySeed,
   dayKey,
-  dayKeyToMs,
   isTimedRun,
-  mulberry32,
 } from '@warehouse/protocol';
 import {
   AgentContext,
@@ -5757,30 +5754,18 @@ export interface DailyDeal {
 }
 
 /**
- * Pure: the Daily Shift for a UTC day key. Seeds its own mulberry32 stream from
- * `dailySeed(dayKey)`, so it never reads or advances `w.rngState` and every shard deals the
- * same titles.
+ * Pure: the Daily Shift for a UTC day key. The hand comes from `@warehouse/protocol`
+ * `dailyCardsFor` (its own mulberry32 stream on `dailySeed(dayKey)` over `DAILY_DECK`, which
+ * must equal `BLITZ_DECK`), so it never reads or advances `w.rngState` and every shard and
+ * the lobby deal the same titles.
  */
 export function dailyFor(key: string): DailyDeal {
-  const next = mulberry32(dailySeed(key));
-  const pool: string[] = [...BLITZ_DECK];
-  const cards: string[] = [];
-  while (cards.length < BLITZ_DEAL_SIZE && pool.length) {
-    cards.push(pool.splice(Math.floor(next() * pool.length), 1)[0]);
-  }
-  return { dayKey: key, modifier: dailyModifierFor(key).id, cards };
+  return { dayKey: key, modifier: dailyModifierFor(key).id, cards: dailyCardsFor(key) };
 }
 
 /** Public `DailyInfo` for a day key (welcome message, lobby config, `/api/daily`). */
 export function dailyInfo(key: string): DailyInfo {
-  const deal = dailyFor(key);
-  return {
-    dayKey: key,
-    number: dailyNumber(key),
-    modifier: DAILY_MODIFIERS[deal.modifier],
-    cards: deal.cards,
-    resetsAt: dayKeyToMs(addDays(key, 1)),
-  };
+  return dailyInfoFor(key);
 }
 
 /** UTC day key from the host wall clock (`w.wallMs`, set by the server each tick). */

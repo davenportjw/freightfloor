@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { dailyInfoFor, dayKey } from '@warehouse/protocol';
 import {
   buildCspHeader,
   buildLobbyServer,
@@ -8,6 +9,7 @@ import {
 } from '../src/index.js';
 
 const TEST_SECRET = 'test-hmac-secret-key-for-warehouse-lobby-2026';
+const NOW = Date.UTC(2026, 10, 12, 15, 0, 0);
 
 describe('@warehouse/lobby: GA4 client config', () => {
   it('only accepts well-formed GA4 measurement IDs', () => {
@@ -42,10 +44,12 @@ describe('@warehouse/lobby: GA4 client config', () => {
       store: new InMemoryLobbyStore([]),
       ticketSecret: TEST_SECRET,
       gaMeasurementId: 'G-ABC123XYZ9',
+      now: () => NOW,
     });
     const res = await app.inject({ method: 'GET', url: '/api/config' });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ gaMeasurementId: 'G-ABC123XYZ9' });
+    expect(res.json()).toEqual({ gaMeasurementId: 'G-ABC123XYZ9', daily: dailyInfoFor(dayKey(NOW)) });
+    expect(res.headers['cache-control']).toBe('public, max-age=300');
     expect(res.headers['content-security-policy']).toBe(buildCspHeader('G-ABC123XYZ9'));
     await app.close();
   });
@@ -55,9 +59,10 @@ describe('@warehouse/lobby: GA4 client config', () => {
       store: new InMemoryLobbyStore([]),
       ticketSecret: TEST_SECRET,
       gaMeasurementId: null,
+      now: () => NOW,
     });
     const res = await app.inject({ method: 'GET', url: '/api/config' });
-    expect(res.json()).toEqual({ gaMeasurementId: null });
+    expect(res.json()).toEqual({ gaMeasurementId: null, daily: dailyInfoFor(dayKey(NOW)) });
     expect(res.headers['content-security-policy']).toBe(CSP_HEADER);
     await app.close();
   });

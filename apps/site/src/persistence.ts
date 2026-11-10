@@ -2,7 +2,13 @@ import { FieldValue, Firestore, Timestamp } from '@google-cloud/firestore';
 import { PubSub, type Message, type Subscription } from '@google-cloud/pubsub';
 import type { ArmorReasonCode } from '@warehouse/armor';
 import {
+  DAILY_ENTRY_TTL_DAYS,
   GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS,
+  addDays,
+  dailyInfoFor,
+  dayKeyToMs,
+  nextDailyStreak,
+  type DailyStreakState,
   type DecisionKind,
   type Phase,
   type SiteId,
@@ -71,6 +77,143 @@ export interface PlayerProfileDoc {
   shiftsPlayed: number;
   lastSiteId: SiteId;
   updatedAt: number;
+  /** Consecutive UTC days with a completed Daily Shift (decayed at read time, `displayStreak`). */
+  dailyStreak?: number;
+  bestDailyStreak?: number;
+  /** Day key of the last completed Daily Shift. */
+  lastDailyKey?: string;
+  /** Distinct days with a completed Daily Shift. */
+  dailiesCompleted?: number;
+}
+
+/** One finished (or abandoned) run's contribution to a player's lifetime totals. */
+export interface RunStatsInput {
+  clientId: string;
+  name: string;
+  isBot: boolean;
+  siteId: SiteId;
+  /** Deliveries to add to `totalDeliveries`. */
+  deliveries: number;
+  /** Points to add to `totalScore`. */
+  score: number;
+  /** Blitz run score to fold into `bestBlitzPts` (omit for other modes). */
+  blitzPts?: number;
+  /** Run pallets-per-real-minute to fold into `ppm` (omit or 0 when not applicable). */
+  ppm?: number;
+  nowMs: number;
+}
+
+/** A completed Daily Shift run (clock reached 00:00 with ≥ 1 delivery; humans only). */
+export interface DailyResultInput {
+  clientId: string;
+  /** Opaque public id stored on the board entry (raw clientIds never leave the server). */
+  publicId: string;
+  name: string;
+  siteId: SiteId;
+  dayKey: string;
+  pts: number;
+  tape: string;
+  nowMs: number;
+}
+
+export interface DailyResultRecord {
+  /** The player's best score for `dayKey` after this run. */
+  bestPts: number;
+  /** True when this run created or raised the day's best. */
+  improved: boolean;
+  attempts: number;
+  streak: number;
+  streakDelta: number;
+}
+
+/** `daily/{dayKey}/entries/{clientId}`: a player's best Daily Shift of a day. */
+export interface DailyEntryDoc {
+  dayKey: string;
+  publicId: string;
+  name: string;
+  bestPts: number;
+  attempts: number;
+  siteId: SiteId;
+  /** Player's daily streak as of their latest completion that day. */
+  streak: number;
+  /** Run tape of the best run. */
+  tape: string;
+  bestAt: number;
+  /** Epoch ms; stored as a Firestore Timestamp for the `entries` TTL policy. */
+  expireAt: number;
+}
+
+/** Firestore TTL deadline for a day's board entries: `DAILY_ENTRY_TTL_DAYS` after the day. */
+export function dailyEntryExpireAt(dayKey: string): number {
+  return dayKeyToMs(addDays(dayKey, DAILY_ENTRY_TTL_DAYS));
+}
+
+/** Folds a run into existing lifetime totals (pure; shared by both stores). */
+export function applyRunStats(existing: PlayerProfileDoc | null, input: RunStatsInput): PlayerProfileDoc {
+  const prevBestBlitz = existing?.bestBlitzPts ?? 0;
+  const bestBlitz = Math.max(prevBestBlitz, input.blitzPts ?? 0);
+  const runPpm = Number.isFinite(input.ppm) ? (input.ppm as number) : 0;
+  const ppm = Math.max(existing?.ppm ?? 0, runPpm);
+  const next: PlayerProfileDoc = {
+    ...(existing ?? {}),
+    clientId: input.clientId,
+    name: input.name,
+    isBot: input.isBot,
+    totalDeliveries: (existing?.totalDeliveries ?? 0) + input.deliveries,
+    totalScore: (existing?.totalScore ?? 0) + input.score,
+    shiftsPlayed: (existing?.shiftsPlayed ?? 0) + 1,
+    lastSiteId: input.siteId,
+    updatedAt: input.nowMs,
+  };
+  if (bestBlitz > 0) next.bestBlitzPts = bestBlitz;
+  if (ppm > 0) next.ppm = ppm;
+  return next;
+}
+
+function streakStateOf(doc: Partial<PlayerProfileDoc> | null | undefined): Partial<DailyStreakState> {
+  return {
+    dailyStreak: doc?.dailyStreak,
+    bestDailyStreak: doc?.bestDailyStreak,
+    lastDailyKey: doc?.lastDailyKey ?? null,
+    dailiesCompleted: doc?.dailiesCompleted,
+  };
+}
+
+/**
+ * Pure core of `recordDailyResult`: given the player's doc and their existing entry for the
+ * day, returns the streak fields to merge into the player, the next entry, and the result.
+ */
+export function applyDailyResult(
+  player: Partial<PlayerProfileDoc> | null,
+  entry: DailyEntryDoc | null,
+  input: DailyResultInput,
+): { streak: DailyStreakState; entry: DailyEntryDoc; result: DailyResultRecord } {
+  const step = nextDailyStreak(streakStateOf(player), input.dayKey);
+  const pts = Math.round(input.pts);
+  const improved = !entry || pts > entry.bestPts;
+  const next: DailyEntryDoc = {
+    dayKey: input.dayKey,
+    publicId: input.publicId,
+    name: input.name,
+    bestPts: improved ? pts : entry.bestPts,
+    attempts: (entry?.attempts ?? 0) + 1,
+    siteId: improved ? input.siteId : entry.siteId,
+    streak: step.next.dailyStreak,
+    tape: improved ? input.tape : entry.tape,
+    bestAt: improved ? input.nowMs : entry.bestAt,
+    expireAt: dailyEntryExpireAt(input.dayKey),
+  };
+  return {
+    streak: step.next,
+    entry: next,
+    result: {
+      bestPts: next.bestPts,
+      improved,
+      attempts: next.attempts,
+      streak: step.next.dailyStreak,
+      streakDelta: step.streakDelta,
+    },
+  };
 }
 
 export interface DecisionJournalEntry {
@@ -164,6 +307,15 @@ export interface PersistenceStore {
   getHallOfFame(limit?: number): Promise<HallOfFameEntry[]>;
   upsertPlayerStats(stats: PlayerProfileDoc): Promise<void>;
   getPlayerStats(clientId: string): Promise<PlayerProfileDoc | null>;
+  /** Atomically folds a run into `players/{clientId}` totals (no lost updates across shards). */
+  recordRunStats(input: RunStatsInput): Promise<PlayerProfileDoc>;
+  /**
+   * Atomically records a completed Daily Shift: advances the player's streak, keeps the best
+   * score of the day in `daily/{dayKey}/entries/{clientId}`, and writes `daily/{dayKey}` once.
+   */
+  recordDailyResult(input: DailyResultInput): Promise<DailyResultRecord>;
+  /** 1-based rank of `pts` among the day's entries (ties share a rank) and the entrant count. */
+  getDailyRank(dayKey: string, pts: number): Promise<{ rank: number; of: number }>;
   appendDecisionJournal(siteId: SiteId, entry: DecisionJournalEntry): Promise<void>;
   appendArmorJournal(siteId: SiteId, entry: ArmorJournalEntry): Promise<void>;
   getJournal(
@@ -257,6 +409,7 @@ export class InMemoryPersistenceStore implements PersistenceStore {
   private readonly snapshots = new Map<SiteId, { snapshot: WorldSnapshot; updatedAt: number }>();
   private readonly hallOfFame: HallOfFameEntry[] = [];
   private readonly players = new Map<string, PlayerProfileDoc>();
+  private readonly dailyEntries = new Map<string, Map<string, DailyEntryDoc>>();
   private readonly decisionJournals = new Map<SiteId, DecisionJournalEntry[]>();
   private readonly armorJournals = new Map<SiteId, ArmorJournalEntry[]>();
   private readonly budgets = new Map<string, BudgetDayDoc>();
@@ -341,6 +494,48 @@ export class InMemoryPersistenceStore implements PersistenceStore {
   async getPlayerStats(clientId: string): Promise<PlayerProfileDoc | null> {
     const doc = this.players.get(clientId);
     return doc ? { ...doc } : null;
+  }
+
+  async recordRunStats(input: RunStatsInput): Promise<PlayerProfileDoc> {
+    const next = applyRunStats(this.players.get(input.clientId) ?? null, input);
+    this.players.set(input.clientId, next);
+    return { ...next };
+  }
+
+  async recordDailyResult(input: DailyResultInput): Promise<DailyResultRecord> {
+    let day = this.dailyEntries.get(input.dayKey);
+    if (!day) {
+      day = new Map();
+      this.dailyEntries.set(input.dayKey, day);
+    }
+    const player = this.players.get(input.clientId) ?? null;
+    const out = applyDailyResult(player, day.get(input.clientId) ?? null, input);
+    day.set(input.clientId, out.entry);
+    if (player) this.players.set(input.clientId, { ...player, ...out.streak, lastDailyKey: input.dayKey });
+    else
+      this.players.set(input.clientId, {
+        clientId: input.clientId,
+        name: input.name,
+        isBot: false,
+        totalDeliveries: 0,
+        totalScore: 0,
+        shiftsPlayed: 0,
+        lastSiteId: input.siteId,
+        updatedAt: input.nowMs,
+        ...out.streak,
+        lastDailyKey: input.dayKey,
+      });
+    return out.result;
+  }
+
+  async getDailyRank(dayKey: string, pts: number): Promise<{ rank: number; of: number }> {
+    const entries = [...(this.dailyEntries.get(dayKey)?.values() ?? [])];
+    return { rank: entries.filter((e) => e.bestPts > pts).length + 1, of: entries.length };
+  }
+
+  /** A day's entries (tests / diagnostics). */
+  getDailyEntriesForTesting(dayKey: string): DailyEntryDoc[] {
+    return [...(this.dailyEntries.get(dayKey)?.values() ?? [])].map((e) => ({ ...e }));
   }
 
   async appendDecisionJournal(siteId: SiteId, entry: DecisionJournalEntry): Promise<void> {
@@ -577,6 +772,64 @@ export class CloudPersistenceStore implements PersistenceStore {
     const doc = await this.db.collection(this.colName('players')).doc(clientId).get();
     if (!doc.exists) return null;
     return doc.data() as PlayerProfileDoc;
+  }
+
+  async recordRunStats(input: RunStatsInput): Promise<PlayerProfileDoc> {
+    const ref = this.db.collection(this.colName('players')).doc(input.clientId);
+    return this.db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const next = applyRunStats(snap.exists ? (snap.data() as PlayerProfileDoc) : null, input);
+      tx.set(ref, next, { merge: true });
+      return next;
+    });
+  }
+
+  private dailyDoc(dayKey: string) {
+    return this.db.collection(this.colName('daily')).doc(dayKey);
+  }
+
+  async recordDailyResult(input: DailyResultInput): Promise<DailyResultRecord> {
+    const playerRef = this.db.collection(this.colName('players')).doc(input.clientId);
+    const dayRef = this.dailyDoc(input.dayKey);
+    const entryRef = dayRef.collection('entries').doc(input.clientId);
+    return this.db.runTransaction(async (tx) => {
+      // Firestore transactions require every read before the first write.
+      const [playerSnap, entrySnap, daySnap] = await Promise.all([tx.get(playerRef), tx.get(entryRef), tx.get(dayRef)]);
+      const player = playerSnap.exists ? (playerSnap.data() as PlayerProfileDoc) : null;
+      const prevEntry = entrySnap.exists ? fromEntryData(entrySnap.data()) : null;
+      const out = applyDailyResult(player, prevEntry, input);
+      if (!daySnap.exists) {
+        const info = dailyInfoFor(input.dayKey);
+        tx.set(dayRef, {
+          dayKey: input.dayKey,
+          number: info.number,
+          modifier: info.modifier.id,
+          cards: info.cards,
+          createdAt: input.nowMs,
+        });
+      }
+      tx.set(
+        playerRef,
+        {
+          clientId: input.clientId,
+          ...(player ? {} : { name: input.name, isBot: false, lastSiteId: input.siteId, updatedAt: input.nowMs }),
+          ...out.streak,
+          lastDailyKey: input.dayKey,
+        },
+        { merge: true },
+      );
+      tx.set(entryRef, { ...out.entry, expireAt: Timestamp.fromMillis(out.entry.expireAt) });
+      return out.result;
+    });
+  }
+
+  async getDailyRank(dayKey: string, pts: number): Promise<{ rank: number; of: number }> {
+    const entries = this.dailyDoc(dayKey).collection('entries');
+    const [above, all] = await Promise.all([
+      entries.where('bestPts', '>', pts).count().get(),
+      entries.count().get(),
+    ]);
+    return { rank: above.data().count + 1, of: all.data().count };
   }
 
   async appendDecisionJournal(siteId: SiteId, entry: DecisionJournalEntry): Promise<void> {
@@ -922,5 +1175,15 @@ function addDelta(doc: BudgetDayDoc, d: UsageDelta): BudgetDayDoc {
     nlTokensIn: (doc.nlTokensIn ?? 0) + d.nlTokensIn,
     nlTokensOut: (doc.nlTokensOut ?? 0) + d.nlTokensOut,
     nlCalls: (doc.nlCalls ?? 0) + d.nlCalls,
+  };
+}
+
+/** Reads a Firestore entry doc back into `DailyEntryDoc` (`expireAt` is a Timestamp there). */
+function fromEntryData(data: FirebaseFirestore.DocumentData | undefined): DailyEntryDoc | null {
+  if (!data || typeof data.bestPts !== 'number') return null;
+  const exp = data.expireAt as { toMillis?: () => number } | number | undefined;
+  return {
+    ...(data as DailyEntryDoc),
+    expireAt: typeof exp === 'number' ? exp : typeof exp?.toMillis === 'function' ? exp.toMillis() : 0,
   };
 }

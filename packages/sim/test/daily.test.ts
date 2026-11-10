@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   addDays,
+  DAILY_DEAL_SIZE,
+  DAILY_DECK,
   DAILY_EPOCH_DAY,
   dailyModifierFor,
   dayKeyToMs,
   type DailyModifierId,
 } from '@warehouse/protocol';
 import {
+  BLITZ_DEAL_SIZE,
   BLITZ_DECK,
   BLITZ_DURATION_MIN,
   COMBO_STEPS,
@@ -381,5 +384,10 @@ describe('Daily Shift: personal modifiers (daily driver only)', () => {
     const sb = s.v.runPts!;
     finishRun(s.w, s.v);
     expect(s.v.runPts!).toBeCloseTo(sb, 4);
+  });
+
+  it('protocol DAILY_DECK mirrors BLITZ_DECK so the lobby deals the same hand', () => {
+    expect([...DAILY_DECK]).toEqual([...BLITZ_DECK]);
+    expect(DAILY_DEAL_SIZE).toBe(BLITZ_DEAL_SIZE);
   });
 });

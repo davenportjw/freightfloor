@@ -76,7 +76,7 @@ This provisions:
 - **Pub/Sub**: `site-transfers` topic, `site-transfers-dlq`, and 4 filtered **pull** subscriptions (`attributes.toSite = "<siteId>"`, 7-day retention, no expiry) with `roles/pubsub.subscriber` for `warehouse-site@` on each.
 - **Cost visibility (prod only)**: the `google_billing_budget` "freightfloor monthly" budget (`monthly_budget_usd`, default \$400; emails billing admins at 50/90/100% actual and 100% forecast). Created only when `billing_account_id` is set; see [§7](#7-cloud-billing-export--cost-review).
 - **Secret Manager**: `ticket-hmac-key` with a generated 64-character secret version used for both join tickets and `x-warehouse-proxy` headers.
-- **Firestore**: 7-day TTL policy on `journal.expireAt`.
+- **Firestore**: 7-day TTL policy on `journal.expireAt`; 120-day TTL policy on the `entries` collection group's `expireAt` (Daily Shift board entries, `google_firestore_field.daily_entries_ttl`).
 
 ### Step 3: Live Verification Probes
 After deploying, verify the live stack before marking any deployment complete. Cloud Run's

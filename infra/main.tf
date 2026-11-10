@@ -262,6 +262,21 @@ resource "google_firestore_field" "journal_ttl" {
   depends_on = [google_firestore_database.default]
 }
 
+# Daily Shift entries (`daily{suffix}/{dayKey}/entries/{clientId}`) expire 120 days after their day
+# (DAILY_ENTRY_TTL_DAYS). `collection` names the collection group, so one policy covers every day
+# doc across all suffixed environments.
+resource "google_firestore_field" "daily_entries_ttl" {
+  count      = var.suffix == "" ? 1 : 0
+  project    = var.project_id
+  database   = google_firestore_database.default[0].name
+  collection = "entries"
+  field      = "expireAt"
+
+  ttl_config {}
+
+  depends_on = [google_firestore_database.default]
+}
+
 # 6. Pub/Sub Topics, Subscriptions & Resource-Scoped IAM for Cross-Site Transfers
 resource "google_pubsub_topic" "site_transfers_dlq" {
   project    = var.project_id

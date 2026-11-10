@@ -16,7 +16,7 @@ Authenticates display name hygiene, enforces per-IP connection rate limits, sele
 | `name` | `string` | No | Optional retry run callsign (`2..20` chars after NFKC normalization). For human drivers, the lobby assigns or preserves an official `Adjective-Noun-NN` callsign (`generateDriverCallsign`) and never adds custom user-defined names. |
 | `resume` | `string` | No | Optional **resume code** (`wr1_` + 32 base64url chars, the `resumeToken` returned by a previous join) or **existing driver callsign** to find and switch to an existing driver identity in the game. Unknown callsigns, raw `clientId`s, and invalid resume codes are rejected (`404 invalid_resume_code`) and never create a new name. |
 | `prefer` | `SiteId` (`^(den\|slc\|phx\|abq)-[1-9]\d*$`) | No | Optional preferred canonical or overflow regional site ID (used when reconnecting or transferring sites). |
-| `mode` | `RunMode` (`'blitz' \| 'freerange' \| 'daily'`) | No | Optional driver run mode (`'blitz'` for 3-Minute Blitz scored runs; `'freerange'` for open-ended continuous runs routed below the 26-driver soft cap; `'daily'` for the Daily Shift, a timed run like Blitz). The lobby join schema accepts `'daily'` once `/api/daily` ships; the shared `RunModeSchema` and the site already accept it. |
+| `mode` | `RunMode` (`'blitz' \| 'freerange' \| 'daily'`) | No | Optional driver run mode (`'blitz'` for 3-Minute Blitz scored runs; `'freerange'` for open-ended continuous runs routed below the 26-driver soft cap; `'daily'` for the Daily Shift, a timed run like Blitz). The lobby join schema, the shared `RunModeSchema` and the site all accept `'daily'`. |
 | `runMode` | `RunMode` (`'blitz' \| 'freerange' \| 'daily'`) | No | Alias for `mode` accepted on both Lobby and Site `POST /api/join` endpoints and embedded into the signed HMAC ticket. |
 | `requeue` | `boolean` | No | Optional flag requesting re-entry into the FIFO driver seat queue after a completed or evicted run. |
 | `seatLeaseId` | `string` | No | Optional active or promoted seat lease ID (`4..64` chars) when claiming a reserved driver seat. |
@@ -67,6 +67,38 @@ Returns aggregated live status for all warehouse shards (from Firestore heartbea
 | `queueSize` | `number?` | Current number of players waiting in the global FIFO driver seat queue. |
 | `maxTotalDrivers` | `number?` | Network-wide human driver cap across all active shards. |
 | `maxWarehouses` | `number?` | Maximum number of active warehouse shards in the network. |
+
+---
+
+### `GET /api/config`
+Public, non-secret client config: `{ gaMeasurementId: string | null, daily: DailyInfo }`. `daily` is today's (UTC) `dailyInfoFor(dayKey(now))`: `{ dayKey, number, modifier, cards, resetsAt }`. `Cache-Control: public, max-age=min(300, seconds until resetsAt)`, so a cached copy never outlives the UTC midnight that rolls the Daily.
+
+---
+
+### `GET /api/daily`
+The Daily Shift board for one UTC day. Entries are written only by the site (human finishers with at least one delivery; see `dailyResult`).
+
+**Query**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `date` | `DayKey` (`YYYY-MM-DD`) | No | Defaults to today (UTC). Must be a real calendar day and not in the future. |
+| `publicId` | `string` (`PUBLIC_ID_PATTERN`) | No | The caller's own **publicId** (from `welcome.you.clientId` or the join response). Raw clientIds are rejected. |
+
+**Response Body (`DailyBoardResponseSchema`)**
+| Field | Type | Description |
+|---|---|---|
+| `info` | `DailyInfo` | `dailyInfoFor(date)`. |
+| `top` | `DailyBoardRow[]` (≤ `DAILY_BOARD_SIZE` = 20) | `{ publicId, name, pts, streak, siteId }` sorted by best points, descending. `pts` is the player's best score that day; `streak` is their Daily streak as of their latest completion that day. Reserved bot names are filtered out. |
+| `entrants` | `number` | Players with an entry for that day. |
+| `you` | `{ rank, bestPts, attempts }?` | Present when `publicId` has an entry. `rank` = 1 + entries with strictly more points (ties share a rank). |
+
+The board (`top` + `entrants`) is cached per instance per day for 30 s (`DAILY_BOARD_CACHE_TTL_MS`); failed reads are never cached. `you` is read fresh. The response is `Cache-Control: no-store`. No raw clientId or entry doc ID is ever returned.
+
+**Errors**
+| Status | `error` | When |
+|---|---|---|
+| `400` | `invalid_request` | Malformed `date`, impossible date (`2026-02-30`), a future date, or `publicId` that is not a public id. |
+| `503` | `daily_unavailable` | The board read failed (or the store has no Daily support). Surfaced directly; retry shortly. |
 
 ---
 
@@ -125,7 +157,7 @@ All WebSocket frames sent from the site server to connected clients match the di
 
 ```ts
 type ServerMessage =
-  | { type: 'welcome'; you: PlayerSessionInfo; snapshot: WorldSnapshot; limits?: SiteLimits; floorOrders?: FloorOrdersStatus }
+  | { type: 'welcome'; you: PlayerSessionInfo; snapshot: WorldSnapshot; limits?: SiteLimits; floorOrders?: FloorOrdersStatus; daily?: DailyInfo }
   | { type: 'delta'; t: number; vehicles: QuantisedVehicleDelta[]; orders?: OrderDelta[]; hazards?: HazardDelta[]; events: SimEvent[]; stats?: DeltaStats; hands?: Record<string, CardHand>; floorOrders?: FloorOrdersStatus }
   | { type: 'ack'; seq: number; t?: number; x?: number; y?: number; vx?: number; vy?: number; angle?: number; speedNow?: number }
   | { type: 'presence'; players: PresenceEntry[] }
@@ -138,12 +170,13 @@ type ServerMessage =
   | { type: 'dispatchersCallReveal'; id: string; playerIdx: number | null; geminiIdx: number; geminiLabel: string; geminiReason: string; agreed: boolean; timedOut: boolean; summary: string | null; orderIds: number[]; evalUntil: number | null }
   | { type: 'relocationOffer'; fromSite: SiteId; targetSite: SiteId; targetDrivers: number; bonusPts: number; expiresAt: number; reason: string }
   | { type: 'relocateShard'; siteId: SiteId; wsUrl: string; ticket: string; expiresAt: number; bonusPts: number }
-  | { type: 'runEvicted'; vid: number; reason: EvictionReason; pts: number; shipped: number; incidents: number; bestStreak: number; runMode: RunMode };
+  | { type: 'runEvicted'; vid: number; reason: EvictionReason; pts: number; shipped: number; incidents: number; bestStreak: number; runMode: RunMode }
+  | { type: 'dailyResult'; dailyKey: string; pts: number; dailyBest: number; improved: boolean; dailyRank: number; dailyOf: number; attempts: number; streak: number; streakDelta: number };
 ```
 
 | `type` | Fields | Description |
 |---|---|---|
-| `welcome` | `you: { clientId, playerId?, name, vid, siteId, isBot? }`, `snapshot: WorldSnapshot`, `limits?: SiteLimits`, `floorOrders?: FloorOrdersStatus` | Sent immediately after a valid `hello`. Contains the player's assigned opaque ID (`P1`, etc.), leased vehicle ID, full v5 world snapshot, the real server/sim caps (§3.1), and the recipient's own Floor-order state (§3.2). `snapshot.cards` contains only agent hands (`ai: true`) plus the recipient's own hand. |
+| `welcome` | `you: { clientId, playerId?, name, vid, siteId, isBot? }`, `snapshot: WorldSnapshot`, `limits?: SiteLimits`, `floorOrders?: FloorOrdersStatus`, `daily?: DailyInfo` | Sent immediately after a valid `hello`. Contains the player's assigned opaque ID (`P1`, etc.), leased vehicle ID, full v5 world snapshot, the real server/sim caps (§3.1), and the recipient's own Floor-order state (§3.2), plus today's Daily Shift (`daily`, §3a). `snapshot.cards` contains only agent hands (`ai: true`) plus the recipient's own hand. |
 | `delta` | `t: number`, `vehicles: QuantisedVehicleDelta[]`, `orders?: OrderDelta[]`, `hazards?: HazardDelta[]`, `events: SimEvent[]; stats?: DeltaStats; hands?: Record<string, CardHand>; floorOrders?: FloorOrdersStatus` | Broadcast at 10 Hz. Vehicle coordinates are quantized to `1/32` of a tile. Light deltas (9 of every 10 background ticks) carry only pose/cargo fields; full deltas (1 Hz) add orders, stats, hands, the recipient's changed `floorOrders` and inspector detail (§3.2). |
 | `ack` | `seq: number`, `t?: number`, `x?: number`, `y?: number`, `vx?: number`, `vy?: number`, `angle?: number`, `speedNow?: number` | Acknowledges the latest processed `input.seq` with the vehicle pose **after** that input's `dt` slice was applied, plus `world.t` as `t`. For client-timed streams, ack N therefore means "every input slice with seq <= N applied": the client rebases on the pose and replays only newer slices with the same sub-step partition, so steady driving reconciles to ~0 correction (no heading wobble). Legacy clients without `dt` also get a post-tick ack. |
 | `presence` | `players: Array<{ clientId?: string; playerId?: string; name: string; vid: string \| null; points?: number; score?: number; role?: 'driver' \| 'spectator'; isBot?: boolean }>` | Broadcast when players join, leave, rename, change vehicle leases, or when any active driver's current shift points (`sPts`) change. |
@@ -157,6 +190,7 @@ type ServerMessage =
 | `relocationOffer` | `fromSite: SiteId`, `targetSite: SiteId`, `targetDrivers: number`, `bonusPts: number`, `expiresAt: number`, `reason: string` | Sent to eligible Free Range drivers when a shard reaches the 26-driver soft cap, offering `+75` bonus points and full score/streak/card carry-over to relocate to a lighter shard. |
 | `relocateShard` | `siteId: SiteId`, `wsUrl: string`, `ticket: string`, `expiresAt: number` (epoch ms, the ticket's `exp`), `bonusPts: number` | Sent after `acceptRelocation`, containing a pre-signed carry-over `ticket` and `wsUrl` so the client can seamlessly reconnect to `siteId` without losing progress. |
 | `runEvicted` | `vid: number`, `reason: 'run_complete' \| 'idle_timeout' \| 'session_lease_expired' \| 'hard_cap_timeout' \| 'zero_deliveries_timeout'`, `pts: number`, `shipped: number`, `incidents: number`, `bestStreak: number`, `runMode: RunMode` | Sent to a driver when their seat lease is reclaimed upon run completion, idle timeout, session lease expiry, zero-delivery timeout, or Free Range hard-cap timeout, transitioning the connection to spectator mode with final run stats. |
+| `dailyResult` | `dailyKey`, `pts`, `dailyBest`, `improved`, `dailyRank`, `dailyOf`, `attempts`, `streak`, `streakDelta` | Private: sent only to the finishing driver's own sockets after a **completed** Daily Shift (clock reached 00:00 with ≥ 1 delivery; humans only) is recorded. `dailyBest` is the player's best score today (best of unlimited attempts), `dailyRank`/`dailyOf` their 1-based standing among today's entrants, `streak` the updated daily streak and `streakDelta` `1` on the day's first completion, else `0`. Not sent when the write fails. |
 
 **Opaque player ids on the wire**: every `clientId` the site sends (`welcome.you.clientId`, `presence.players[].clientId`, `snapshot.vehicles[].ownerClientId`/`controlledByClientId`, `snapshot.players`, `snapshot.difficultyVotes` / `delta.votes` keys, `snapshot.cards` / `delta.hands` keys, `completedRuns[].clientId`, and event `clientId` / `owner` / `player` fields) is the player's **publicId** (`p1_…`, same derivation as the lobby), never the raw clientId. The mapping is uniform, so the recipient's own id is also its publicId and client-side equality checks work unchanged. The sim, Firestore snapshots, and heartbeats keep raw clientIds internally.
 
@@ -341,7 +375,13 @@ Shared by the sim, site, lobby and client so every shard agrees on the day's Dai
 | `DAILY_MODIFIER_IDS` / `DailyModifierIdSchema` | `cold_chain`, `long_haul`, `express`, `clean_shift`, `heavy_load`, `combo_day`, `eco_run`. |
 | `DAILY_MODIFIERS` / `DailyModifierSchema` | `{ id, label, blurb }` player-facing copy per modifier. Effects live in `@warehouse/sim` `DAILY_EFFECTS`. |
 | `dailyModifierFor(dayKey)` | The day's modifier: a seeded permutation per 7-day block from the epoch, never the same modifier two days running. |
-| `DailyInfoSchema` | `{ dayKey, number, modifier: DailyModifier, cards: string[], resetsAt }`. `cards` are the opening-hand titles in deal order; `resetsAt` is the next UTC midnight (epoch ms). Built by `@warehouse/sim` `dailyInfo(dayKey)`. |
+| `DailyInfoSchema` | `{ dayKey, number, modifier: DailyModifier, cards: string[], resetsAt }`. `cards` are the opening-hand titles in deal order; `resetsAt` is the next UTC midnight (epoch ms). Built by `dailyInfoFor(dayKey)` (sim `dailyInfo` delegates to it). |
+| `DAILY_DECK` / `DAILY_DEAL_SIZE` / `dailyCardsFor(dayKey)` | Opening-hand pool (must equal sim `BLITZ_DECK`, parity-tested), hand size (3), and the day's hand in deal order. Lives in protocol so the lobby can describe a day without the sim. |
+| `nextDailyStreak(prev, today)` | Pure streak step for a completed Daily: same day → unchanged (`streakDelta 0`); previous day → `+1`; gap, no history, or malformed/future key → `1`. Also tracks `bestDailyStreak` and `dailiesCompleted` (first completion per day only). |
+| `displayStreak(lastDailyKey, streak, today)` | Read-time decay: the stored streak while `lastDailyKey >= yesterday`, else `0`. |
+| `DAILY_ENTRY_TTL_DAYS` / `DAILY_BOARD_SIZE` | `120` (board entries expire 120 days after their day) / `20` (rows in `GET /api/daily`). |
+| `DailyBoardRowSchema` / `DailyBoardResponseSchema` | `GET /api/daily` row `{ publicId, name, pts, streak, siteId }` and response `{ info, top, entrants, you? }`. |
+| `DailyResultMessageSchema` | The private `dailyResult` server message (§3). |
 
 `CompletedRunRecord` (sim, persisted with completed runs) gains `dailyKey?: string \| null` on daily runs and `tape?: string` on every run (`O` on-time, `L` late, `X` incident; max `RUN_TAPE_MAX = 40`).
 

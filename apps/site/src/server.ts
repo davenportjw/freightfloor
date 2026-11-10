@@ -60,6 +60,8 @@ import {
   keepCards,
   chooseOrder,
   computeDriverPpm,
+  dailyInfo,
+  worldDayKey,
   receiveTransfer,
   setPhase,
   compactFacilityIfNeeded,
@@ -838,35 +840,95 @@ export async function createSiteServer(
     nowMs: number = Date.now(),
   ): Promise<void> {
     const runKey = `${cid}:${v.runStartedAt ?? 0}`;
-    if (persistedFinishedRuns.has(runKey) && extraPts === 0) {
+    const alreadyPersisted = persistedFinishedRuns.has(runKey);
+    if (alreadyPersisted && extraPts === 0) {
       return;
     }
     if (v.runFinished) {
       persistedFinishedRuns.add(runKey);
     }
+    // Snapshot everything synchronously: the vehicle may be evicted before the writes land.
     const score = Math.round(v.sPts) + extraPts;
     const runPts = Math.round(v.runPts ?? v.sPts) + extraPts;
-    const existing = await persistence.getPlayerStats(cid);
-    const prevBestBlitz = existing?.bestBlitzPts ?? 0;
-    const nextBestBlitz =
-      (v.runMode ?? 'blitz') === 'blitz'
-        ? Math.max(prevBestBlitz, runPts)
-        : prevBestBlitz;
+    const runMode = v.runMode ?? 'blitz';
+    const runDeliveries = v.runDeliveries ?? 0;
+    const human = Boolean(v.human) && !isBotFlag;
     // Best pallets per real minute over this player's runs (AI/bots never stored).
-    const runPpm = v.human && !isBotFlag && (v.runDeliveries ?? 0) > 0 ? computeDriverPpm(world, v) : 0;
-    const nextPpm = Math.max(existing?.ppm ?? 0, Number.isFinite(runPpm) ? runPpm : 0);
-    await persistence.upsertPlayerStats({
+    const runPpm = human && runDeliveries > 0 ? computeDriverPpm(world, v) : 0;
+    // Daily Shift completion gate: clock reached 00:00 (runFinished) with ≥ 1 delivery, humans
+    // only, once per run. Evicted / disconnected mid-run never reaches runFinished.
+    const daily =
+      !alreadyPersisted &&
+      v.runFinished &&
+      runMode === 'daily' &&
+      human &&
+      runDeliveries >= 1 &&
+      typeof v.dailyKey === 'string'
+        ? { dayKey: v.dailyKey, pts: runPts, tape: v.runTape ?? '' }
+        : null;
+    await persistence.recordRunStats({
       clientId: cid,
       name: playerName,
       isBot: isBotFlag,
-      totalDeliveries: (existing?.totalDeliveries ?? 0) + v.deliveries,
-      totalScore: (existing?.totalScore ?? 0) + score,
-      ...(nextBestBlitz > 0 ? { bestBlitzPts: nextBestBlitz } : {}),
-      ...(nextPpm > 0 ? { ppm: nextPpm } : {}),
-      shiftsPlayed: (existing?.shiftsPlayed ?? 0) + 1,
-      lastSiteId: siteId,
-      updatedAt: nowMs,
+      siteId,
+      deliveries: v.deliveries,
+      score,
+      ...(runMode === 'blitz' ? { blitzPts: runPts } : {}),
+      ppm: Number.isFinite(runPpm) ? runPpm : 0,
+      nowMs,
     });
+    if (daily) await recordDailyCompletion(cid, playerName, daily, nowMs);
+  }
+
+  /**
+   * Records a completed Daily Shift and privately tells the finishing driver their best, rank
+   * and streak. A failed write is logged and reported to that driver as an `error` message;
+   * no result is ever invented.
+   */
+  async function recordDailyCompletion(
+    cid: string,
+    playerName: string,
+    daily: { dayKey: string; pts: number; tape: string },
+    nowMs: number,
+  ): Promise<void> {
+    const sendToOwner = (msg: ServerMessage): void => {
+      for (const c of clients) {
+        if (c.authenticated && c.clientId === cid) sendTo(c.socket, msg);
+      }
+    };
+    try {
+      const rec = await persistence.recordDailyResult({
+        clientId: cid,
+        publicId: toPublicId(cid),
+        name: playerName,
+        siteId,
+        dayKey: daily.dayKey,
+        pts: daily.pts,
+        tape: daily.tape,
+        nowMs,
+      });
+      const { rank, of } = await persistence.getDailyRank(daily.dayKey, rec.bestPts);
+      sendToOwner({
+        type: 'dailyResult',
+        dailyKey: daily.dayKey,
+        pts: Math.round(daily.pts),
+        dailyBest: rec.bestPts,
+        improved: rec.improved,
+        dailyRank: rank,
+        dailyOf: Math.max(of, rank),
+        attempts: rec.attempts,
+        streak: rec.streak,
+        streakDelta: rec.streakDelta,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[${siteId}] daily result write failed for ${daily.dayKey}: ${message}`);
+      sendToOwner({
+        type: 'error',
+        code: 'daily_record_failed',
+        message: 'Your Daily Shift score could not be saved. Please try again.',
+      });
+    }
   }
 
   const gcpProjectId =
@@ -1355,6 +1417,7 @@ export async function createSiteServer(
         dispatchersCall: enableDispatchersCall,
       },
       floorOrders,
+      daily: dailyInfo(worldDayKey(world)),
     };
   }
 

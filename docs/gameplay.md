@@ -166,7 +166,7 @@ Once per **Blitz** run, near the midpoint, Gemini spots a real floor situation a
 
 ## 3d. Daily Shift (`'daily'`)
 
-One shared Daily Shift per UTC day (reset at 00:00 UTC). It is a third run mode next to Blitz and Free Range, and plays exactly like a 3-Minute Blitz: same 180 game-min clock (`isTimedRun(mode)` is true for `'blitz'` and `'daily'`), drive-first start, single opening deal with no redraws, idle-eviction suppression and run-end release. Attempts are unlimited; the best score of the day counts (persistence lands with `/api/daily`).
+One shared Daily Shift per UTC day (reset at 00:00 UTC). It is a third run mode next to Blitz and Free Range, and plays exactly like a 3-Minute Blitz: same 180 game-min clock (`isTimedRun(mode)` is true for `'blitz'` and `'daily'`), drive-first start, single opening deal with no redraws, idle-eviction suppression and run-end release. Attempts are unlimited; the best score of the day counts.
 
 - **Same hand for everyone**: `dailyFor(dayKey)` deals `BLITZ_DEAL_SIZE` distinct Blitz-deck titles from its own `mulberry32(dailySeed(dayKey))` stream. It never reads or advances `w.rngState`, so every shard and every world seed deals the same three cards. `dailyInfo(dayKey)` returns the public `DailyInfo` (`dayKey`, `number`, `modifier`, `cards`, `resetsAt`).
 - **Day attribution**: `startDriverRun` stamps `v.dailyKey` / `v.dailyMod` from the host wall clock (`World.wallMs`, set by the site server each tick; `Date.now()` otherwise). A Daily belongs to the UTC day its clock starts on: if midnight passes between the deal and the first input, `startBlitzClock` re-stamps the new day and re-deals its hand. Once the clock runs the day never changes. `CompletedRunRecord.dailyKey` carries the day.
@@ -184,7 +184,9 @@ One shared Daily Shift per UTC day (reset at 00:00 UTC). It is a third run mode 
 
   Run-end bonuses (Clean Shift, Eco Run) need at least one delivery.
 - **Run tape**: every human run (Blitz and Daily) records `runTape`, one character per event in order: `O` on-time delivery, `L` late delivery, `X` incident. It is capped at `RUN_TAPE_MAX = 40` characters (later events are dropped), resets on a new run, and is stored as `CompletedRunRecord.tape` for the share card.
-- Free Range is not affected; the `bestBlitzPts` lifetime stat stays Blitz-only.
+- **Completion & board**: a Daily counts when a human finishes the run (`runFinished`) with at least one delivery. The site records it once per run (`recordDailyResult`): the day's entry keeps the best score across unlimited attempts and counts `attempts`. It then sends the owner a private `dailyResult` (`pts`, `dailyBest`, `improved`, `dailyRank` of `dailyOf`, `attempts`, `streak`, `streakDelta`). A failed write is surfaced as `{ type: 'error', code: 'daily_record_failed' }`, never silently dropped. Bots never write Daily entries. `GET /api/daily` serves the board.
+- **Daily streak**: consecutive UTC days with a completed Daily (`nextDailyStreak`). The first completion of a day adds 1 if the previous completion was yesterday and otherwise resets to 1; more completions the same day leave it unchanged (`streakDelta = 0`). A displayed streak decays to 0 once a full day is missed (`displayStreak`). `bestDailyStreak` keeps the record.
+- Free Range is not affected; the `bestBlitzPts` lifetime stat stays Blitz-only (Daily runs do not update it).
 
 ## 4. Facility Tiers & Expansion (Up to Tier 6 / 60 Vehicles)
 

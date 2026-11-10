@@ -987,7 +987,19 @@ describe('@warehouse/lobby — M6 placement, ticket signing, and network directo
 
     await app.close();
   });
+
+  it('19. POST /api/join with runMode: "daily" mints a ticket carrying runMode === "daily"', async () => {
+    const store = new InMemoryLobbyStore([makeSite('den-1', { drivers: 2 })]);
+    const app = await buildLobbyServer({ store, ticketSecret: TEST_SECRET, now: () => NOW });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'client-daily-runmode', name: 'Daily Runner', runMode: 'daily', requeue: true },
+    });
+    expect(res.statusCode).toBe(200);
+    const verified = verifyTicket(res.json().ticket, TEST_SECRET, NOW);
+    expect(verified.ok).toBe(true);
+    if (verified.ok) expect(verified.payload.runMode).toBe('daily');
+    await app.close();
+  });
 });
-
-
-

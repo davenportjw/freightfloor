@@ -985,6 +985,8 @@ export const WelcomeMessageSchema = z.object({
   limits: SiteLimitsSchema.optional(),
   /** Recipient's own Floor-order state at join time. */
   floorOrders: FloorOrdersStatusSchema.optional(),
+  /** Today's Daily Shift (section 9; lazy because it is declared later in this module). */
+  daily: z.lazy(() => DailyInfoSchema).optional(),
 });
 export type WelcomeMessage = z.infer<typeof WelcomeMessageSchema>;
 
@@ -1482,6 +1484,28 @@ export const RunEvictedMessageSchema = z.object({
 });
 export type RunEvictedMessage = z.infer<typeof RunEvictedMessageSchema>;
 
+/**
+ * Private result of a completed Daily Shift, sent only to the finishing driver's sockets after
+ * the server records it (section 9). `dailyBest` is the player's best score today (the board
+ * keeps the best of unlimited attempts); `dailyRank` is 1-based among today's entrants.
+ */
+export const DailyResultMessageSchema = z.object({
+  type: z.literal('dailyResult'),
+  dailyKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  /** Score of the run that just finished. */
+  pts: z.number().int(),
+  dailyBest: z.number().int(),
+  /** True when this run set (or first created) today's best. */
+  improved: z.boolean(),
+  dailyRank: z.number().int().positive(),
+  dailyOf: z.number().int().positive(),
+  attempts: z.number().int().positive(),
+  streak: z.number().int().nonnegative(),
+  /** +1 on the first completion of a day (streak extended or restarted), 0 on later attempts. */
+  streakDelta: z.number().int(),
+});
+export type DailyResultMessage = z.infer<typeof DailyResultMessageSchema>;
+
 export const ServerMessageSchema = z.discriminatedUnion('type', [
   WelcomeMessageSchema,
   DeltaMessageSchema,
@@ -1497,6 +1521,7 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
   RunEvictedMessageSchema,
   BrainDecisionMessageSchema,
   DispatchersCallRevealMessageSchema,
+  DailyResultMessageSchema,
 ]);
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;
 
@@ -1515,6 +1540,7 @@ export const SERVER_MESSAGE_TYPES = [
   'runEvicted',
   'brainDecision',
   'dispatchersCallReveal',
+  'dailyResult',
 ] as const;
 
 // ============================================================================
@@ -2058,3 +2084,134 @@ export const DailyInfoSchema = z.object({
   resetsAt: z.number().int(),
 });
 export type DailyInfo = z.infer<typeof DailyInfoSchema>;
+
+
+/**
+ * Opening-hand pool for the Daily Shift. Must stay identical to `@warehouse/sim` `BLITZ_DECK`
+ * (parity-tested in sim); it lives here so the lobby can describe a day without the sim.
+ */
+export const DAILY_DECK = [
+  'Speed Demon',
+  'Overdrive',
+  'Long Reach',
+  'Eco Cell',
+  'Trailer Closer',
+  'Clean Shift',
+] as const;
+/** Cards in the Daily opening hand (= sim `BLITZ_DEAL_SIZE`). */
+export const DAILY_DEAL_SIZE = 3;
+
+/** The day's opening-hand titles in deal order, from a mulberry32 stream on `dailySeed(key)`. */
+export function dailyCardsFor(key: string): string[] {
+  const next = mulberry32(dailySeed(key));
+  const pool: string[] = [...DAILY_DECK];
+  const cards: string[] = [];
+  while (cards.length < DAILY_DEAL_SIZE && pool.length) {
+    cards.push(pool.splice(Math.floor(next() * pool.length), 1)[0]);
+  }
+  return cards;
+}
+
+/** Public `DailyInfo` for a day key. Pure; every shard and the lobby agree. */
+export function dailyInfoFor(key: string): DailyInfo {
+  return {
+    dayKey: key,
+    number: dailyNumber(key),
+    modifier: dailyModifierFor(key),
+    cards: dailyCardsFor(key),
+    resetsAt: dayKeyToMs(addDays(key, 1)),
+  };
+}
+
+/** Daily board entries expire (Firestore TTL on `expireAt`) this many days after their day. */
+export const DAILY_ENTRY_TTL_DAYS = 120;
+/** Rows in the public Daily board (`GET /api/daily`). */
+export const DAILY_BOARD_SIZE = 20;
+
+/** Daily streak fields kept on `players/{clientId}`. */
+export interface DailyStreakState {
+  dailyStreak: number;
+  bestDailyStreak: number;
+  lastDailyKey: string | null;
+  dailiesCompleted: number;
+}
+
+const nonNegInt = (n: unknown): number =>
+  typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+
+/**
+ * Streak as shown at read time on `today`: the stored streak while it is still alive (last
+ * completion today or yesterday), else 0. Streaks are never decayed by a write.
+ */
+export function displayStreak(lastDailyKey: string | null | undefined, streak: number, today: string): number {
+  if (typeof lastDailyKey !== 'string' || !DAY_KEY_PATTERN.test(lastDailyKey)) return 0;
+  return lastDailyKey >= addDays(today, -1) ? nonNegInt(streak) : 0;
+}
+
+export interface DailyStreakUpdate {
+  next: DailyStreakState;
+  /** +1 on the first completion of `today`, 0 on a repeat. */
+  streakDelta: number;
+  /** True when this is the player's first completed Daily of `today`. */
+  firstToday: boolean;
+}
+
+/**
+ * Advances a player's streak for a completed Daily on `today`. Same day: unchanged. Previous
+ * day: +1. Any gap (or no history, or a malformed/future key): restarts at 1. Pure.
+ */
+export function nextDailyStreak(prev: Partial<DailyStreakState> | null | undefined, today: string): DailyStreakUpdate {
+  dayKeyToMs(today);
+  const last =
+    typeof prev?.lastDailyKey === 'string' && DAY_KEY_PATTERN.test(prev.lastDailyKey) && prev.lastDailyKey <= today
+      ? prev.lastDailyKey
+      : null;
+  const streak = nonNegInt(prev?.dailyStreak);
+  const best = nonNegInt(prev?.bestDailyStreak);
+  const completed = nonNegInt(prev?.dailiesCompleted);
+  if (last === today) {
+    return {
+      next: { dailyStreak: Math.max(1, streak), bestDailyStreak: Math.max(best, streak, 1), lastDailyKey: today, dailiesCompleted: Math.max(1, completed) },
+      streakDelta: 0,
+      firstToday: false,
+    };
+  }
+  const nextStreak = last === addDays(today, -1) ? streak + 1 : 1;
+  return {
+    next: {
+      dailyStreak: nextStreak,
+      bestDailyStreak: Math.max(best, nextStreak),
+      lastDailyKey: today,
+      dailiesCompleted: completed + 1,
+    },
+    streakDelta: 1,
+    firstToday: true,
+  };
+}
+
+/** One public Daily board row. Never carries a raw clientId. */
+export const DailyBoardRowSchema = z.object({
+  publicId: z.string().min(1),
+  name: z.string(),
+  pts: z.number().int(),
+  streak: z.number().int().nonnegative(),
+  siteId: z.string(),
+});
+export type DailyBoardRow = z.infer<typeof DailyBoardRowSchema>;
+
+/** `GET /api/daily?date=<dayKey>[&clientId=…]` response. */
+export const DailyBoardResponseSchema = z.object({
+  info: DailyInfoSchema,
+  top: z.array(DailyBoardRowSchema).max(DAILY_BOARD_SIZE),
+  /** Human entrants on the board for the day. */
+  entrants: z.number().int().nonnegative(),
+  /** The caller's own standing, when they identified themselves and have an entry. */
+  you: z
+    .object({
+      rank: z.number().int().positive(),
+      bestPts: z.number().int(),
+      attempts: z.number().int().positive(),
+    })
+    .optional(),
+});
+export type DailyBoardResponse = z.infer<typeof DailyBoardResponseSchema>;

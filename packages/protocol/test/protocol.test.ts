@@ -396,6 +396,18 @@ describe('@warehouse/protocol', () => {
         runMode: 'blitz' as const,
       },
       {
+        type: 'dailyResult' as const,
+        dailyKey: '2026-12-03',
+        pts: 320,
+        dailyBest: 410,
+        improved: false,
+        dailyRank: 4,
+        dailyOf: 31,
+        attempts: 3,
+        streak: 5,
+        streakDelta: 0,
+      },
+      {
         type: 'brainDecision' as const,
         reqId: 41,
         agentId: 3,

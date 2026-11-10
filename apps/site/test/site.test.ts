@@ -5,6 +5,7 @@ import {
   type ServerMessage,
   type SiteId,
   type Transfer,
+  dayKey as dayKeyOf,
 } from '@warehouse/protocol';
 import {
   createWorld,
@@ -1983,6 +1984,69 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     expect(evicted.shipped).toBe(6);
     expect(evicted.runMode).toBe('blitz');
   });
-});
 
+  it('34. records completed Daily Shifts (finished, ≥1 delivery, humans only) and privately sends dailyResult', async () => {
+    const { server, wsUrl } = await bootServer();
+    const store = server.persistence;
+    const dayKey = '2026-12-03';
+    const join = async (cid: string, name: string, isBot = false) => {
+      const client = await connectWsClient(
+        `${wsUrl}?ticket=${encodeURIComponent(makeTicket(cid, name, { isBot }))}`,
+      );
+      activeClients.push(client);
+      const welcome = await client.waitForType('welcome');
+      return { client, welcome, v: server.world.vehicles.find((x) => x.id === welcome.you.vid)! };
+    };
+    const daily = (v: (typeof server.world.vehicles)[number], deliveries: number, pts: number, finished = true) => {
+      v.runMode = 'daily';
+      v.dailyKey = dayKey;
+      v.runStartedAt = server.world.t - (finished ? 180 : 60);
+      // An unfinished run still has clock left, so the tick cannot complete it.
+      v.runEndsAt = server.world.t + (finished ? 0 : 120);
+      v.runFinished = finished;
+      v.runDeliveries = deliveries;
+      v.deliveries = deliveries;
+      v.runPts = pts;
+      v.sPts = pts;
+      v.runTape = 'O'.repeat(deliveries);
+    };
+
+    const ok = await join('daily-ok', 'Finisher');
+    // Every welcome carries today's Daily Shift.
+    expect(ok.welcome.daily?.dayKey).toBe(dayKeyOf(Date.now()));
+    expect(ok.welcome.daily?.cards).toHaveLength(3);
+    const zero = await join('daily-zero', 'Zero');
+    const running = await join('daily-running', 'Running');
+    const bot = await join('daily-bot-1', 'BotDriver', true);
+    daily(ok.v, 3, 240);
+    daily(zero.v, 0, 0);
+    daily(running.v, 2, 120, false);
+    daily(bot.v, 9, 900);
+
+    await server.stepTick(Date.now());
+    const result = await ok.client.waitForType('dailyResult');
+    expect(result).toMatchObject({
+      dailyKey: dayKey,
+      pts: 240,
+      dailyBest: 240,
+      improved: true,
+      dailyRank: 1,
+      dailyOf: 1,
+      attempts: 1,
+      streak: 1,
+      streakDelta: 1,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    // Only the finisher's own socket hears about it; zero-delivery, unfinished and bot runs never enter.
+    for (const other of [zero, running, bot]) {
+      expect(other.client.messages.some((m) => m.type === 'dailyResult')).toBe(false);
+    }
+    expect(await store.getDailyRank(dayKey, 0)).toEqual({ rank: 2, of: 1 });
+    const profile = await store.getPlayerStats('daily-ok');
+    expect(profile).toMatchObject({ dailyStreak: 1, bestDailyStreak: 1, lastDailyKey: dayKey, dailiesCompleted: 1 });
+    // Daily runs are not Blitz runs: they never touch bestBlitzPts.
+    expect(profile?.bestBlitzPts).toBeUndefined();
+    expect(profile?.totalDeliveries).toBe(3);
+  });
+});
 

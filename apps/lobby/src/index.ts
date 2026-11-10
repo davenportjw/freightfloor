@@ -28,8 +28,15 @@ import {
   verifyProxyHeader,
   verifyTicket,
   WS_PER_MESSAGE_DEFLATE,
+  DAILY_BOARD_SIZE,
+  DailyBoardResponseSchema,
+  DayKeySchema,
+  RunModeSchema,
+  dailyInfoFor,
   dayKey,
+  dayKeyToMs,
   nextVisitLedger,
+  type DailyBoardResponse,
   type LeaderboardEntry,
   type Phase,
   type QueueStatus,
@@ -54,6 +61,12 @@ export const MAX_DRIVERS_PER_SITE = 32;
 export const TICKET_TTL_MS = 60_000;
 /** `/api/network` leaderboard cache TTL; the board only changes when a run ends. */
 export const TOP_PLAYERS_CACHE_TTL_MS = 30_000;
+/** `/api/daily` board cache TTL (per instance, per day key). */
+export const DAILY_BOARD_CACHE_TTL_MS = 30_000;
+/** Max day keys held in the `/api/daily` board cache before it is cleared wholesale. */
+const DAILY_BOARD_CACHE_MAX_KEYS = 16;
+/** Extra rows fetched so dropping reserved bot names still fills the Daily board. */
+const DAILY_BOARD_OVERFETCH = 10;
 /** Extra ranked docs fetched so bot / reserved-prefix filtering still fills the board. */
 const TOP_PLAYERS_OVERFETCH = 10;
 /** Candidate callsigns probed with point lookups before falling back to a bounded scan. */
@@ -182,6 +195,20 @@ export interface StoredPlayerDoc {
   activeDays?: number;
 }
 
+/**
+ * Public view of a `daily/{dayKey}/entries/{clientId}` doc (written by the site). The lobby
+ * never reads or returns the doc id (the raw clientId); rows are keyed by `publicId`.
+ */
+export interface StoredDailyEntry {
+  publicId: string;
+  name: string;
+  bestPts: number;
+  attempts: number;
+  siteId: string;
+  /** Player's daily streak as of their latest completion that day. */
+  streak: number;
+}
+
 export interface QueueEntry {
   clientId: string;
   name: string;
@@ -259,6 +286,23 @@ export interface LobbyStore {
    * must be atomic across lobby instances (Firestore: `runTransaction`).
    */
   recordVisit?(clientId: string, nowMs: number): Promise<VisitUpdate>;
+  /** Top `limit` Daily Shift entries for a day by best score, plus the day's entrant count. */
+  getDailyBoard?(dayKey: string, limit: number): Promise<{ top: StoredDailyEntry[]; entrants: number }>;
+  /** One player's entry for a day (by publicId) and how many entries scored strictly higher. */
+  getDailyStanding?(dayKey: string, publicId: string): Promise<{ entry: StoredDailyEntry; above: number } | null>;
+}
+
+/** Normalizes a stored Daily entry; returns null for malformed docs. */
+function toStoredDailyEntry(data: Record<string, unknown> | undefined): StoredDailyEntry | null {
+  if (!data || typeof data.publicId !== 'string' || typeof data.bestPts !== 'number') return null;
+  return {
+    publicId: data.publicId,
+    name: typeof data.name === 'string' && data.name ? data.name : 'Driver',
+    bestPts: Math.round(data.bestPts),
+    attempts: typeof data.attempts === 'number' && data.attempts > 0 ? Math.floor(data.attempts) : 1,
+    siteId: typeof data.siteId === 'string' ? data.siteId : '',
+    streak: typeof data.streak === 'number' && data.streak > 0 ? Math.floor(data.streak) : 0,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -748,6 +792,33 @@ export class FirestoreLobbyStore implements LobbyStore {
     });
   }
 
+  private dailyEntries(day: string) {
+    return this.db.collection(this.colName('daily')).doc(day).collection('entries');
+  }
+
+  async getDailyBoard(day: string, limit: number): Promise<{ top: StoredDailyEntry[]; entrants: number }> {
+    const entries = this.dailyEntries(day);
+    const [snap, count] = await Promise.all([
+      entries.orderBy('bestPts', 'desc').limit(Math.max(1, limit) + DAILY_BOARD_OVERFETCH).get(),
+      entries.count().get(),
+    ]);
+    const top: StoredDailyEntry[] = [];
+    snap.forEach((doc) => {
+      const e = toStoredDailyEntry(doc.data());
+      if (e && !isReservedBotPrefix(e.name)) top.push(e);
+    });
+    return { top: top.slice(0, limit), entrants: count.data().count };
+  }
+
+  async getDailyStanding(day: string, publicId: string): Promise<{ entry: StoredDailyEntry; above: number } | null> {
+    const entries = this.dailyEntries(day);
+    const snap = await entries.where('publicId', '==', publicId).limit(1).get();
+    const entry = snap.empty ? null : toStoredDailyEntry(snap.docs[0].data());
+    if (!entry) return null;
+    const above = await entries.where('bestPts', '>', entry.bestPts).count().get();
+    return { entry, above: above.data().count };
+  }
+
   async resolvePlayerIdentity(params: ResolvePlayerIdentityParams): Promise<PlayerIdentityResult> {
     const col = this.db.collection(this.colName('players'));
     const normalizeBaseName = (name: string) => name.replace(/\s+Run\s+\d+$/i, '').trim().toLowerCase();
@@ -1052,6 +1123,7 @@ export class InMemoryLobbyStore implements LobbyStore {
   private sites = new Map<SiteId, StoredSiteDoc>();
   private players = new Map<string, StoredPlayerDoc>();
   private queue = new Map<string, QueueEntry>();
+  private daily = new Map<string, Map<string, StoredDailyEntry>>();
   public wokenSites: SiteId[] = [];
 
   constructor(initialSites?: StoredSiteDoc[], initialPlayers?: StoredPlayerDoc[]) {
@@ -1115,6 +1187,33 @@ export class InMemoryLobbyStore implements LobbyStore {
   getPlayer(clientId: string): StoredPlayerDoc | undefined {
     const p = this.players.get(clientId);
     return p ? { ...p } : undefined;
+  }
+
+  /** Seeds a Daily entry (tests); the site owns these writes in production. */
+  setDailyEntry(day: string, clientId: string, entry: StoredDailyEntry): void {
+    let m = this.daily.get(day);
+    if (!m) {
+      m = new Map();
+      this.daily.set(day, m);
+    }
+    m.set(clientId, { ...entry });
+  }
+
+  async getDailyBoard(day: string, limit: number): Promise<{ top: StoredDailyEntry[]; entrants: number }> {
+    const all = [...(this.daily.get(day)?.values() ?? [])];
+    const top = all
+      .filter((e) => !isReservedBotPrefix(e.name))
+      .sort((a, b) => b.bestPts - a.bestPts)
+      .slice(0, limit)
+      .map((e) => ({ ...e }));
+    return { top, entrants: all.length };
+  }
+
+  async getDailyStanding(day: string, publicId: string): Promise<{ entry: StoredDailyEntry; above: number } | null> {
+    const all = [...(this.daily.get(day)?.values() ?? [])];
+    const entry = all.find((e) => e.publicId === publicId);
+    if (!entry) return null;
+    return { entry: { ...entry }, above: all.filter((e) => e.bestPts > entry.bestPts).length };
   }
 
   async resolvePlayerIdentity(params: ResolvePlayerIdentityParams): Promise<PlayerIdentityResult> {
@@ -1555,7 +1654,7 @@ type LobbyQueueStatus = z.infer<typeof LobbyQueueStatusSchema>;
 
 const ExtendedJoinRequestSchema = JoinRequestSchema.extend({
   preferredSite: SiteIdSchema.optional(),
-  runMode: z.enum(['blitz', 'freerange']).optional(),
+  runMode: RunModeSchema.optional(),
 });
 
 const ExtendedJoinResponseSchema = JoinResponseSchema.extend({
@@ -2151,8 +2250,79 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
 
   // Public, non-secret client config (GA4 web measurement IDs ship in every page that uses them).
   app.get('/api/config', async (_req, reply) => {
-    reply.header('Cache-Control', 'public, max-age=300');
-    return { gaMeasurementId };
+    const nowMs = nowFn();
+    const daily = dailyInfoFor(dayKey(nowMs));
+    // Never cache today's Daily past the UTC midnight that replaces it.
+    const maxAge = Math.max(0, Math.min(300, Math.floor((daily.resetsAt - nowMs) / 1000)));
+    reply.header('Cache-Control', `public, max-age=${maxAge}`);
+    return { gaMeasurementId, daily };
+  });
+
+  // Daily Shift board. Rows are keyed by publicId only (entries are written by the site, humans
+  // only). Row `streak` is the player's streak as of their latest completion that day. `you` is looked up by the caller's own publicId (from `welcome.you.clientId` or the
+  // join response), never by a raw clientId.
+  const dailyBoardCache = new Map<string, { atMs: number; value: Promise<{ top: StoredDailyEntry[]; entrants: number }> }>();
+  function getCachedDailyBoard(day: string, nowMs: number) {
+    const hit = dailyBoardCache.get(day);
+    if (hit && nowMs - hit.atMs < DAILY_BOARD_CACHE_TTL_MS) return hit.value;
+    if (!store.getDailyBoard) throw new Error('daily board is not supported by this store');
+    if (dailyBoardCache.size >= DAILY_BOARD_CACHE_MAX_KEYS) dailyBoardCache.clear();
+    const value = store.getDailyBoard(day, DAILY_BOARD_SIZE);
+    const entry = { atMs: nowMs, value };
+    dailyBoardCache.set(day, entry);
+    value.catch(() => {
+      if (dailyBoardCache.get(day) === entry) dailyBoardCache.delete(day); // never cache a failure
+    });
+    return value;
+  }
+
+  const DailyQuerySchema = z.object({
+    date: DayKeySchema.optional(),
+    publicId: z.string().regex(PUBLIC_ID_PATTERN).optional(),
+  });
+
+  app.get('/api/daily', async (req, reply) => {
+    const nowMs = nowFn();
+    const parsed = DailyQuerySchema.safeParse(req.query ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_request', message: 'date must be YYYY-MM-DD; publicId must be a public player id.' });
+    }
+    const today = dayKey(nowMs);
+    const day = parsed.data.date ?? today;
+    try {
+      dayKeyToMs(day);
+    } catch {
+      return reply.code(400).send({ error: 'invalid_request', message: 'date is not a real calendar day.' });
+    }
+    if (day > today) {
+      return reply.code(400).send({ error: 'invalid_request', message: 'That Daily Shift has not started yet.' });
+    }
+    if (!store.getDailyBoard) {
+      return reply.code(503).send({ error: 'daily_unavailable', message: 'The Daily board is unavailable.' });
+    }
+    let board: { top: StoredDailyEntry[]; entrants: number };
+    let standing: { entry: StoredDailyEntry; above: number } | null = null;
+    try {
+      [board, standing] = await Promise.all([
+        getCachedDailyBoard(day, nowMs),
+        parsed.data.publicId && store.getDailyStanding
+          ? store.getDailyStanding(day, parsed.data.publicId)
+          : Promise.resolve(null),
+      ]);
+    } catch (err) {
+      req.log.error({ err }, 'daily board read failed');
+      return reply.code(503).send({ error: 'daily_unavailable', message: 'The Daily board is unavailable. Try again shortly.' });
+    }
+    const body: DailyBoardResponse = {
+      info: dailyInfoFor(day),
+      top: board.top.map((e) => ({ publicId: e.publicId, name: e.name, pts: e.bestPts, streak: e.streak, siteId: e.siteId })),
+      entrants: board.entrants,
+      ...(standing
+        ? { you: { rank: standing.above + 1, bestPts: standing.entry.bestPts, attempts: standing.entry.attempts } }
+        : {}),
+    };
+    reply.header('Cache-Control', 'no-store');
+    return reply.code(200).send(DailyBoardResponseSchema.parse(body));
   });
 
   // Crawlers: a real robots.txt and a one-page sitemap (the game is a single-page app at `/`),
