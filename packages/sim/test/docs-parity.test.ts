@@ -50,6 +50,7 @@ const NUMERIC: Record<string, number> = {
   VICTIM_STUN_MIN: sim.VICTIM_STUN_MIN,
   RIVAL_SNIPE_COOLDOWN_MIN: sim.RIVAL_SNIPE_COOLDOWN_MIN,
   BLITZ_DEAL_SIZE: sim.BLITZ_DEAL_SIZE,
+  RUN_TAPE_MAX: sim.RUN_TAPE_MAX,
   DISPATCHERS_CALL_OPEN_MIN: sim.DISPATCHERS_CALL_OPEN_MIN,
   DISPATCHERS_CALL_CLOSE_MIN: sim.DISPATCHERS_CALL_CLOSE_MIN,
   DISPATCHERS_CALL_PICK_MIN: sim.DISPATCHERS_CALL_PICK_MIN,
@@ -147,6 +148,14 @@ describe('docs/gameplay.md §1–6 parity with @warehouse/sim', () => {
     }
     for (const name of ['ENABLE_DISPATCHERS_CALL', 'enable_dispatchers_call', '?dispatch=1|0', 'warehouse.feature.dispatchersCall']) {
       expect(ops, name).toContain(name);
+    }
+  });
+
+  it('Daily Shift modifier table matches DAILY_EFFECTS', () => {
+    for (const [id, fx] of Object.entries(sim.DAILY_EFFECTS)) {
+      const row = doc.split('\n').find((l) => l.startsWith(`| \`${id}\``));
+      expect(row, `${id} row missing from the Daily Shift table`).toBeDefined();
+      for (const v of Object.values(fx)) expect(row, `${id}: ${v}`).toContain(String(v));
     }
   });
 });

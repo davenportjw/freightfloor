@@ -221,9 +221,17 @@ export const dequantizeCoord = dequantiseCoord;
 // 3. Lobby HTTP Schemas & HMAC Ticket Helpers
 // ============================================================================
 
-export const RUN_MODES = ['blitz', 'freerange'] as const;
+export const RUN_MODES = ['blitz', 'freerange', 'daily'] as const;
 export const RunModeSchema = z.enum(RUN_MODES);
 export type RunMode = z.infer<typeof RunModeSchema>;
+
+/**
+ * Runs on the 3-minute clock: Blitz and the Daily Shift (a Blitz with a seeded hand and a
+ * personal modifier). Use this instead of `mode === 'blitz'` for timer semantics.
+ */
+export function isTimedRun(mode: RunMode | null | undefined): boolean {
+  return mode === 'blitz' || mode === 'daily';
+}
 
 export const FREE_RANGE_SOFT_CAP = 26;
 export const FREE_RANGE_HARD_CAP = 30;
@@ -1073,7 +1081,7 @@ export const CompletedRunRecordSchema = z
       'forklift',
       'agv',
     ]),
-    runMode: z.enum(['blitz', 'freerange']),
+    runMode: RunModeSchema,
     pts: z.number(),
     shipped: z.number(),
     onTime: z.number(),
@@ -1923,3 +1931,130 @@ export function nextVisitLedger(prev: Partial<VisitLedger> | null | undefined, t
     daysSinceLast: daysBetween(p.lastDay, today),
   };
 }
+
+// ============================================================================
+// 9. Daily Shift (seed, number, personal modifier)
+// ============================================================================
+//
+// One Daily Shift per UTC day: everyone gets the same opening hand (dealt in @warehouse/sim
+// from `dailySeed(dayKey)`) and the same personal modifier. Modifiers affect only the daily
+// driver, never the shared floor. Effects live in @warehouse/sim; this is the metadata.
+
+/** Day key of Daily #1. */
+export const DAILY_EPOCH_DAY = '2026-11-10';
+
+/** 1-based Daily number for a day key (≤ 0 before the epoch). */
+export function dailyNumber(key: string): number {
+  return daysBetween(DAILY_EPOCH_DAY, key) + 1;
+}
+
+/** 32-bit FNV-1a hash of a string. */
+export function fnv1a(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+/** mulberry32 stream in [0, 1) seeded by a 32-bit integer (independent of any world RNG). */
+export function mulberry32(seed: number): () => number {
+  let a = seed | 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Seed shared by every shard for a day's Daily Shift. Throws on a malformed key. */
+export function dailySeed(key: string): number {
+  dayKeyToMs(key);
+  return fnv1a(`ff-daily:${key}`);
+}
+
+export const DAILY_MODIFIER_IDS = [
+  'cold_chain',
+  'long_haul',
+  'express',
+  'clean_shift',
+  'heavy_load',
+  'combo_day',
+  'eco_run',
+] as const;
+export const DailyModifierIdSchema = z.enum(DAILY_MODIFIER_IDS);
+export type DailyModifierId = z.infer<typeof DailyModifierIdSchema>;
+
+export const DailyModifierSchema = z.object({
+  id: DailyModifierIdSchema,
+  label: z.string(),
+  blurb: z.string(),
+});
+export type DailyModifier = z.infer<typeof DailyModifierSchema>;
+
+/** Player-facing modifier copy, in rotation-table order. Effects: `@warehouse/sim` `DAILY_EFFECTS`. */
+export const DAILY_MODIFIERS: Readonly<Record<DailyModifierId, DailyModifier>> = {
+  cold_chain: { id: 'cold_chain', label: 'Cold Chain Day', blurb: 'Cold Storage (W) pallets pay double.' },
+  long_haul: { id: 'long_haul', label: 'Long Haul', blurb: 'Long-haul deliveries pay 1.5×.' },
+  express: {
+    id: 'express',
+    label: 'Express Freight',
+    blurb: 'Deadlines are 25% tighter, but Speedy deliveries pay 2× instead of 1.5×.',
+  },
+  clean_shift: {
+    id: 'clean_shift',
+    label: 'Clean Shift',
+    blurb: 'Finish with zero incidents for +150. Each incident costs an extra 50.',
+  },
+  heavy_load: { id: 'heavy_load', label: 'Heavy Load', blurb: 'Top speed −15%, every delivery pays +25%.' },
+  combo_day: { id: 'combo_day', label: 'Combo Day', blurb: 'Combo climbs one step higher, to ×2.5.' },
+  eco_run: {
+    id: 'eco_run',
+    label: 'Eco Run',
+    blurb: 'Battery drains 1.5× faster. Finish without charging for +100.',
+  },
+};
+
+const MOD_COUNT = DAILY_MODIFIER_IDS.length;
+
+/** Raw seeded permutation of the modifier table for a 7-day rotation block. */
+function modifierBlock(block: number): DailyModifierId[] {
+  const next = mulberry32(fnv1a(`ff-daily-mods:${block}`));
+  const ids = [...DAILY_MODIFIER_IDS];
+  for (let i = ids.length - 1; i > 0; i--) {
+    const j = Math.floor(next() * (i + 1));
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+  }
+  return ids;
+}
+
+/**
+ * The day's modifier. Days are grouped into blocks of `DAILY_MODIFIER_IDS.length` (counted
+ * from the epoch); each block is a seeded shuffle, so every modifier appears once per block.
+ * If a block would open with the previous block's last modifier, its first two entries swap,
+ * so the same modifier never runs two days in a row (the swap never touches a block's last
+ * entry, so the check needs no recursion).
+ */
+export function dailyModifierFor(key: string): DailyModifier {
+  const n = daysBetween(DAILY_EPOCH_DAY, key);
+  const block = Math.floor(n / MOD_COUNT);
+  const idx = n - block * MOD_COUNT;
+  const ids = modifierBlock(block);
+  if (ids[0] === modifierBlock(block - 1)[MOD_COUNT - 1]) [ids[0], ids[1]] = [ids[1], ids[0]];
+  return DAILY_MODIFIERS[ids[idx]];
+}
+
+/** Public description of a day's Daily Shift (welcome message, lobby config, `/api/daily`). */
+export const DailyInfoSchema = z.object({
+  dayKey: DayKeySchema,
+  number: z.number().int(),
+  modifier: DailyModifierSchema,
+  /** Opening-hand card titles, in deal order. */
+  cards: z.array(z.string()),
+  /** Epoch ms of the next UTC midnight, when the next Daily starts. */
+  resetsAt: z.number().int(),
+});
+export type DailyInfo = z.infer<typeof DailyInfoSchema>;
