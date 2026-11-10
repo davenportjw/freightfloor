@@ -11,7 +11,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import { WebSocket, WebSocketServer } from 'ws';
-import { MAX_WS_FRAME_BYTES, verifyProxyHeader } from '@warehouse/protocol';
+import { MAX_WS_FRAME_BYTES, previousWeekKey, verifyProxyHeader, weekKey } from '@warehouse/protocol';
 import {
   buildLobbyServer,
   CLIENT_IP_HEADER_NAME,
@@ -394,6 +394,25 @@ describe('public player ids (clientId exposure regression)', () => {
     expect(own.json().publicId).toBe(rows[0].publicId);
     expect(own.json().clientId).toBe('victim-secret-client');
 
+    await app.close();
+  });
+
+  it('/api/league never exposes raw clientIds, rejects them as publicId, and finalizes without leaking them', async () => {
+    const week = weekKey(NOW);
+    const prev = previousWeekKey(NOW);
+    const store = new InMemoryLobbyStore([makeSite('den-1')]);
+    const pub = publicIdFor('victim-secret-client', SECRET);
+    for (const w of [week, prev]) {
+      store.setLeagueEntry(w, 'victim-secret-client', { publicId: pub, name: 'Turbo-Badger', weekPts: 900, runs: 4, runsCounted: 4, siteId: 'den-1' });
+    }
+    const app = await buildLobbyServer({ store, ticketSecret: SECRET, now: () => NOW });
+    for (const qs of ['', '?week=previous', `?publicId=${pub}`]) {
+      const res = await app.inject({ method: 'GET', url: `/api/league${qs}` });
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain('victim-secret-client');
+    }
+    const raw = await app.inject({ method: 'GET', url: '/api/league?publicId=victim-secret-client' });
+    expect(raw.statusCode).toBe(400);
     await app.close();
   });
 });

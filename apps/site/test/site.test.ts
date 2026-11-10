@@ -6,6 +6,7 @@ import {
   type SiteId,
   type Transfer,
   dayKey as dayKeyOf,
+  weekKey as weekKeyOf,
 } from '@warehouse/protocol';
 import {
   createWorld,
@@ -2087,5 +2088,58 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     expect(await statusFor('streak-live')).toEqual({ type: 'dailyStatus', dailyKey: today, streak: 2, bestStreak: 2, playedToday: false });
     expect(await statusFor('streak-today')).toMatchObject({ streak: 1, playedToday: true });
     expect(await statusFor('streak-lapsed')).toMatchObject({ streak: 0, bestStreak: 1, playedToday: false });
+  });
+
+  it('36. folds finished timed runs (Blitz + Daily, ≥1 delivery, humans only) into the Weekly League and privately sends leagueResult', async () => {
+    const { server, wsUrl } = await bootServer();
+    const store = server.persistence;
+    const join = async (cid: string, name: string, isBot = false) => {
+      const client = await connectWsClient(
+        `${wsUrl}?ticket=${encodeURIComponent(makeTicket(cid, name, { isBot }))}`,
+      );
+      activeClients.push(client);
+      const welcome = await client.waitForType('welcome');
+      return { client, v: server.world.vehicles.find((x) => x.id === welcome.you.vid)! };
+    };
+    const finish = (v: (typeof server.world.vehicles)[number], mode: 'blitz' | 'daily' | 'freerange', deliveries: number, pts: number) => {
+      v.runMode = mode;
+      if (mode === 'daily') v.dailyKey = dayKeyOf(Date.now());
+      v.runStartedAt = server.world.t - 180;
+      v.runEndsAt = server.world.t;
+      v.runFinished = true;
+      v.runDeliveries = deliveries;
+      v.deliveries = deliveries;
+      v.runPts = pts;
+      v.sPts = pts;
+      v.runTape = 'O'.repeat(deliveries);
+    };
+    const blitz = await join('league-blitz', 'Blitzer');
+    const daily = await join('league-daily', 'Dailyer');
+    const free = await join('league-free', 'Roamer');
+    const zero = await join('league-zero', 'Zero');
+    const bot = await join('league-bot-1', 'BotDriver', true);
+    finish(blitz.v, 'blitz', 4, 300);
+    finish(daily.v, 'daily', 2, 180);
+    finish(free.v, 'freerange', 6, 900);
+    finish(zero.v, 'blitz', 0, 0);
+    finish(bot.v, 'blitz', 9, 999);
+
+    const nowMs = Date.now();
+    await server.stepTick(nowMs);
+    const week = weekKeyOf(nowMs);
+    const b = await blitz.client.waitForType('leagueResult');
+    const d = await daily.client.waitForType('leagueResult');
+    expect(b).toMatchObject({ weekKey: week, pts: 300, weekPts: 300, delta: 300, counted: true, runsCounted: 1, rank: 1 });
+    expect(d).toMatchObject({ weekKey: week, pts: 180, weekPts: 180, counted: true, rank: 2 });
+    await new Promise((r) => setTimeout(r, 50));
+    // Free Range, zero-delivery and bot runs never enter the league; nobody hears another's result.
+    for (const other of [free, zero, bot]) {
+      expect(other.client.messages.some((m) => m.type === 'leagueResult')).toBe(false);
+    }
+    // Exactly one run per driver was folded in (the result is sent once per run).
+    const entries = (store as InMemoryPersistenceStore).getLeagueEntriesForTesting(week);
+    expect(entries.map((e) => [e.name, e.runs, e.weekPts]).sort()).toEqual([['Blitzer', 1, 300], ['Dailyer', 1, 180]]);
+    expect(JSON.stringify(entries)).not.toContain('league-blitz');
+    expect(await store.getLeagueRank(week, 0)).toEqual({ rank: 3, of: 2 });
   });
 });

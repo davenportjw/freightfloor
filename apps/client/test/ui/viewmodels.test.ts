@@ -888,6 +888,7 @@ describe('Shift Briefing / Help modal (mountHelp, How to Play + "How the AI work
       const ctx = {
         store,
         actions: {
+          refreshLeaguePrevious: () => {},
           showHelp: (open: boolean) => {
             store.ui.helpOpen = open;
           },
@@ -1029,6 +1030,7 @@ describe('Shift Briefing / Help modal (mountHelp, How to Play + "How the AI work
       const ctx = {
         store,
         actions: {
+          refreshLeaguePrevious: () => {},
           showHelp: (open: boolean) => {
             store.ui.helpOpen = open;
           },

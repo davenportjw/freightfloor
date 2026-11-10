@@ -14,6 +14,8 @@ import type { UiCtx, UiModule } from './context.js';
 import { button, el, KeyedView, swatch, type Child } from './dom.js';
 import { difficultyLabel, shiftLeft, teamColor } from './format.js';
 import { createFocusTrap, type TrapContainer } from './focusTrap.js';
+import { leagueEndsInText } from './league.js';
+import { LEAGUE_TOP_RUNS } from '@warehouse/protocol';
 
 export interface SillyAward {
   id: 'crashes' | 'palletDrops' | 'skids' | 'nearMisses' | 'lowBattery' | 'parkingBrake';
@@ -301,12 +303,13 @@ export function computeSillyAwards(
 }
 
 const MODAL_TABS: ReadonlyArray<{ id: LeaderboardModalTab; label: string }> = [
-  { id: 'all', label: 'All (Dashboard)' },
+  { id: 'week', label: '🗓 This Week' },
   { id: 'today', label: '📅 Today' },
+  { id: 'all', label: 'All (Dashboard)' },
   { id: 'standings', label: '🏁 Shift Standings' },
   { id: 'silly', label: '🤪 Silly Superlatives' },
   { id: 'hall', label: '🏛️ Hall of Fame' },
-  { id: 'network', label: '🌐 Network Lifetime' },
+  { id: 'network', label: '🌐 All-time' },
 ];
 
 export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModule {
@@ -753,11 +756,87 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
     );
   }
 
+  function renderWeekPane(): HTMLElement {
+    const board = store.leagueBoard;
+    const data = board.data;
+    const me = store.selfPublicId();
+    const refresh = button(
+      board.status === 'loading' ? 'Loading…' : '↻ Refresh',
+      'btn small',
+      () => actions.refreshLeagueBoard(),
+      "Refresh this week's league board",
+    );
+    refresh.dataset.role = 'league-board-refresh';
+    if (board.status === 'loading') refresh.setAttribute('disabled', '');
+    const summary: string[] = [];
+    if (data) {
+      summary.push(leagueEndsInText(data.endsAt, Date.now()));
+      summary.push(`${data.entrants} ${data.entrants === 1 ? 'driver' : 'drivers'} this week`);
+      if (data.you) {
+        summary.push(
+          `you: #${data.you.rank} · ${data.you.weekPts.toLocaleString('en-US')} pts · ${data.you.runsCounted}/${LEAGUE_TOP_RUNS} runs counted`,
+        );
+      }
+    }
+    let body: HTMLElement;
+    if (data && data.top.length) {
+      body = el(
+        'div',
+        { class: 'lb-hall-list', attrs: { 'data-role': 'league-board' } },
+        data.top.map((r, i) => {
+          const mine = me !== null && r.publicId === me;
+          return el('div', { class: `lb-row num${mine ? ' row-hl b' : ''}`, attrs: { 'data-public-id': r.publicId } }, [
+            el('span', { class: 'rank muted', text: `#${i + 1}` }),
+            swatch(teamColor('Human')),
+            el('span', {
+              class: 'grow ellipsis',
+              text: `${r.name}${r.siteId ? ` · ${r.siteId.toUpperCase()}` : ''}${mine ? ' ★ you' : ''}`,
+            }),
+            el('span', { class: 'muted small', text: `${r.runs} ${r.runs === 1 ? 'run' : 'runs'}` }),
+            el('span', { class: 'pts b', text: `${r.weekPts.toLocaleString('en-US')} pts` }),
+          ]);
+        }),
+      );
+    } else {
+      body = el('div', {
+        class: 'empty',
+        attrs: { 'data-role': 'league-board-empty' },
+        text:
+          board.status === 'error'
+            ? `Could not load this week's board: ${board.error ?? 'unknown error'}`
+            : board.status === 'ready'
+              ? 'No league points yet this week. Finish a Blitz or Daily to get on the board.'
+              : 'Loading this week’s board…',
+      });
+    }
+    return el(
+      'section',
+      { class: 'intro-pane lb-modal-pane', attrs: { 'data-pane': 'week', 'aria-label': 'Weekly League board' } },
+      [
+        el('div', { class: 'lb-pane-head' }, [
+          el('h3', { class: 'intro-pane__title', text: `🗓 Weekly League${data ? ` · ${data.weekKey}` : ''}` }),
+          refresh,
+        ]),
+        el('p', {
+          class: 'hint',
+          text: `Your top ${LEAGUE_TOP_RUNS} Blitz and Daily runs this week add up. Free Range doesn't count. Resets Monday 00:00 UTC.`,
+        }),
+        summary.length ? el('p', { class: 'hint', attrs: { 'data-role': 'league-board-summary' }, text: summary.join(' · ') }) : null,
+        board.status === 'error' && data && data.top.length
+          ? el('p', { class: 'hint', attrs: { role: 'status' }, text: `Refresh failed: ${board.error ?? 'unknown error'}` })
+          : null,
+        body,
+      ],
+    );
+  }
+
   function renderModalContent(tab: LeaderboardModalTab): Child[] {
     if (!store.welcomed) {
       return [el('div', { class: 'empty', text: 'Waiting for live warehouse telemetry…' })];
     }
     switch (tab) {
+      case 'week':
+        return [el('div', { class: 'lb-modal-single' }, [renderWeekPane()])];
       case 'today':
         return [el('div', { class: 'lb-modal-single' }, [renderTodayPane()])];
       case 'standings':
@@ -797,6 +876,10 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
         // Deferred: store listeners run synchronously and this is inside a UI update pass.
         queueMicrotask(() => actions.refreshDailyBoard());
       }
+      // This Week tab: fetch on first open and after a counted run (updatedAt cleared).
+      if (tab === 'week' && (store.leagueBoard.status === 'idle' || (store.leagueBoard.status === 'ready' && store.leagueBoard.updatedAt === null))) {
+        queueMicrotask(() => actions.refreshLeagueBoard());
+      }
       for (const t of tabButtons) {
         const on = t.id === tab;
         t.b.classList.toggle('on', on);
@@ -813,7 +896,7 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
             `${v.id}:${Math.round(v.sPts)}:${v.sShipped}:${v.incidents}:${v.palletDrops ?? 0}:${v.skids ?? 0}:${v.nearMisses}:${Math.round(v.battery)}:${v.state}`,
         )
         .join(',');
-      const key = `${store.welcomed}|${tab}|${Math.floor(w.t)}|${vKey}|${w.hallOfFame.length}|${store.network.updatedAt}|${store.you?.name ?? ''}|${tab === 'today' ? `${store.dailyBoard.status}:${store.dailyBoard.updatedAt}:${store.daily?.dayKey ?? ''}` : ''}`;
+      const key = `${store.welcomed}|${tab}|${Math.floor(w.t)}|${vKey}|${w.hallOfFame.length}|${store.network.updatedAt}|${store.you?.name ?? ''}|${tab === 'today' ? `${store.dailyBoard.status}:${store.dailyBoard.updatedAt}:${store.daily?.dayKey ?? ''}` : ''}|${tab === 'week' ? `${store.leagueBoard.status}:${store.leagueBoard.updatedAt}` : ''}`;
       bodyView.render(key, () => renderModalContent(tab));
       if (wasHidden) focusTrap.activate(closeBtn);
     },

@@ -197,6 +197,18 @@ One shared Daily Shift per UTC day (reset at 00:00 UTC). It is a third run mode 
 - **Today tab**: the leaderboard modal has a `📅 Today` tab that fetches `GET /api/daily?publicId=<mine>` when opened, and again after my Daily improves. It lists rank, name · site, 🔥streak and points, highlights my row, and shows the entrant count and my standing. There is a ↻ Refresh button. Loading, empty and error states show the real lobby error; nothing is ever filled in.
 - Free Range is not affected; the `bestBlitzPts` lifetime stat stays Blitz-only (Daily runs do not update it).
 
+## 3e. Weekly League
+
+One league per ISO week (`weekKey`, e.g. `2026-W46`), starting Monday 00:00 UTC. No signup: every human's timed runs count automatically.
+
+- **Week points**: a player's `weekPts` is the sum of their best `LEAGUE_TOP_RUNS = 10` Blitz and Daily run scores that week (`nextLeagueRuns`). Free Range never counts. A run counts when a human finishes it (`runFinished`) with at least one delivery, and it belongs to the week it finishes in. Bots never write league entries.
+- **Recording**: the site folds each qualifying run into `league/{weekKey}/entries/{clientId}` once per run (`recordLeagueRun`, transactional), then sends the owner a private `leagueResult` (`weekPts`, `delta`, `counted`, `runsCounted`, `rank` of `of`). `counted` is false when the run did not beat the player's 10th-best run. A failed write comes back as `{ type: 'error', code: 'league_record_failed' }`.
+- **Finalization**: there is no week-end job. The first `GET /api/league` of a new week finalizes the previous week in one transaction: the top 3 become the `podium`, the champion gets `leagueWins += 1`, and each podium player's `bestLeagueRank` is lowered when improved. It is idempotent, so concurrent readers never double-count.
+- **Client**:
+  - The leaderboard modal opens on **🗓 This Week** (`GET /api/league?week=current&publicId=<mine>`): rank, name · site, runs, week points, my row highlighted, the countdown to reset (`ends in 3d 4h`), the entrant count and my standing (`n/10 runs counted`). It refetches after a counted run and has a ↻ Refresh button. The other tabs are 📅 Today, Dashboard, Shift Standings, Silly Superlatives, Hall of Fame and **🌐 All-time** (lifetime `GET /api/network`).
+  - The results sheet of a Blitz or Daily run shows a league pill (`[data-role="league-rank"]`): `League: #14 this week (+212)`, `League: #14 this week · didn't beat your 10th-best run`, or `League not saved: <error>`. It appears only once the server answered.
+  - The intro card shows last week's podium as a compact pill (`[data-role="intro-podium-pill"]`, `🏆 Last week: 1. Ada 1,900 · 2. …`) once that week is finalized. Clicking it opens This Week; ✕ dismisses it for that week (`localStorage['ff-league-podium-dismissed:<weekKey>']`).
+
 ## 4. Facility Tiers & Expansion (Up to Tier 6 / 60 Vehicles)
 
 Each warehouse site dynamically expands its floor plan as the active vehicle count grows:

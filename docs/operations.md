@@ -76,7 +76,8 @@ This provisions:
 - **Pub/Sub**: `site-transfers` topic, `site-transfers-dlq`, and 4 filtered **pull** subscriptions (`attributes.toSite = "<siteId>"`, 7-day retention, no expiry) with `roles/pubsub.subscriber` for `warehouse-site@` on each.
 - **Cost visibility (prod only)**: the `google_billing_budget` "freightfloor monthly" budget (`monthly_budget_usd`, default \$400; emails billing admins at 50/90/100% actual and 100% forecast). Created only when `billing_account_id` is set; see [§7](#7-cloud-billing-export--cost-review).
 - **Secret Manager**: `ticket-hmac-key` with a generated 64-character secret version used for both join tickets and `x-warehouse-proxy` headers.
-- **Firestore**: 7-day TTL policy on `journal.expireAt`; 120-day TTL policy on the `entries` collection group's `expireAt` (Daily Shift board entries, `google_firestore_field.daily_entries_ttl`).
+- **Firestore**: 7-day TTL policy on `journal.expireAt`; TTL policy on the `entries` collection group's `expireAt` (`google_firestore_field.daily_entries_ttl`): Daily Shift entries expire 120 days after their day, Weekly League entries 400 days after their week ends.
+- **Weekly League**: no scheduler. The first `GET /api/league` of a new week finalizes the previous week (podium, `leagueWins`, `bestLeagueRank`) in an idempotent transaction; a failure is logged as `league week finalization failed` and retried on the next read without failing the board. A board read failure returns `503 league_unavailable`. A site write failure is logged and sent to the driver as `error` `league_record_failed`.
 
 ### Step 3: Live Verification Probes
 After deploying, verify the live stack before marking any deployment complete. Cloud Run's

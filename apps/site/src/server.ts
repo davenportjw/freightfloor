@@ -34,6 +34,7 @@ import {
   type Transfer,
   type WelcomeMessage,
   dayKey,
+  weekKey,
   displayStreak,
 } from '@warehouse/protocol';
 import {
@@ -901,6 +902,12 @@ export async function createSiteServer(
       typeof v.dailyKey === 'string'
         ? { dayKey: v.dailyKey, pts: runPts, tape: v.runTape ?? '' }
         : null;
+    // Weekly League gate: any finished timed run (Blitz or Daily) with ≥ 1 delivery, humans
+    // only, once per run. Free Range never counts. The run counts for the ISO week it finishes in.
+    const league =
+      !alreadyPersisted && v.runFinished && isTimedRun(runMode) && human && runDeliveries >= 1
+        ? { weekKey: weekKey(nowMs), pts: runPts }
+        : null;
     // Private run summary (exact server tape) for the share card, once per finished human run.
     if (!alreadyPersisted && v.runFinished && human) {
       sendToOwner(cid, {
@@ -924,6 +931,51 @@ export async function createSiteServer(
       nowMs,
     });
     if (daily) await recordDailyCompletion(cid, playerName, daily, nowMs);
+    if (league) await recordLeagueCompletion(cid, playerName, league, nowMs);
+  }
+
+  /**
+   * Folds a finished timed run into the driver's Weekly League entry and privately tells them
+   * their week points and rank. A failed write is logged and reported to that driver as an
+   * `error` message; no standing is ever invented.
+   */
+  async function recordLeagueCompletion(
+    cid: string,
+    playerName: string,
+    league: { weekKey: string; pts: number },
+    nowMs: number,
+  ): Promise<void> {
+    try {
+      const rec = await persistence.recordLeagueRun({
+        clientId: cid,
+        publicId: toPublicId(cid),
+        name: playerName,
+        siteId,
+        weekKey: league.weekKey,
+        pts: league.pts,
+        nowMs,
+      });
+      const { rank, of } = await persistence.getLeagueRank(league.weekKey, rec.weekPts);
+      sendToOwner(cid, {
+        type: 'leagueResult',
+        weekKey: league.weekKey,
+        pts: Math.round(league.pts),
+        weekPts: rec.weekPts,
+        delta: rec.delta,
+        counted: rec.counted,
+        runsCounted: rec.runsCounted,
+        rank,
+        of: Math.max(of, rank),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[${siteId}] league run write failed for ${league.weekKey}: ${message}`);
+      sendToOwner(cid, {
+        type: 'error',
+        code: 'league_record_failed',
+        message: 'Your Weekly League points could not be saved. Please try again.',
+      });
+    }
   }
 
   /**

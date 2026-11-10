@@ -423,6 +423,17 @@ describe('@warehouse/protocol', () => {
         playedToday: false,
       },
       {
+        type: 'leagueResult' as const,
+        weekKey: '2026-W49',
+        pts: 320,
+        weekPts: 2140,
+        delta: 212,
+        counted: true,
+        runsCounted: 10,
+        rank: 14,
+        of: 88,
+      },
+      {
         type: 'brainDecision' as const,
         reqId: 41,
         agentId: 3,

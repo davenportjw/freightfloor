@@ -102,6 +102,38 @@ The board (`top` + `entrants`) is cached per instance per day for 30 s (`DAILY_B
 
 ---
 
+### `GET /api/league`
+The Weekly League board for one ISO week (Monday 00:00 UTC start). Entries are written only by the site (human finishers of timed runs, Blitz and Daily, with at least one delivery; see `leagueResult`). A player's `weekPts` is the sum of their best `LEAGUE_TOP_RUNS` (10) runs that week; Free Range never counts. `GET /api/network` remains the lifetime board ("All-time" in the client).
+
+**Query**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `week` | `'current' \| 'previous' \| WeekKey` (`YYYY-Www`) | No | Defaults to `current`. An explicit key must be a real ISO week and not in the future. |
+| `publicId` | `string` (`PUBLIC_ID_PATTERN`) | No | The caller's own **publicId**. Raw clientIds are rejected. |
+
+**Response Body (`LeagueResponseSchema`)**
+| Field | Type | Description |
+|---|---|---|
+| `weekKey` | `WeekKey` | The resolved week. |
+| `endsAt` | `number` | Epoch ms of the next Monday 00:00 UTC (`weekEndMs`). |
+| `top` | `LeagueRow[]` (≤ `LEAGUE_BOARD_SIZE` = 20) | `{ publicId, name, weekPts, runs, siteId }` sorted by `weekPts`, descending. `runs` counts every timed run finished that week. Reserved bot names are filtered out. |
+| `entrants` | `number` | Players with an entry for that week. |
+| `you` | `{ rank, weekPts, runsCounted }?` | Present when `publicId` has an entry. `rank` = 1 + entries with strictly more week points (ties share a rank). |
+| `finalized` | `boolean` | `true` once the week has closed and its podium has been recorded. |
+| `podium` | `LeaguePodiumEntry[]?` (≤ 3) | `{ rank, publicId, name, weekPts }` for finalized weeks. |
+
+**Lazy finalization.** No scheduler runs at week end. The first `/api/league` read in a new week finalizes the previous week in one Firestore transaction on `league/{weekKey}`: if `finalized` is not yet `true`, it reads the top 3 entries, adds `leagueWins += 1` to the champion's `players/{clientId}`, lowers `bestLeagueRank` for each podium player, and writes `finalized: true` and `podium`. A second (or concurrent) finalizer sees `finalized: true` and does nothing, so wins are never double-counted. Finalization failures are logged and retried on the next read; they do not fail the board read.
+
+The board (`top` + `entrants`, plus `finalized`/`podium`) is cached per instance per week for 30 s (`LEAGUE_BOARD_CACHE_TTL_MS`); failed reads are never cached. `you` is read fresh. The response is `Cache-Control: no-store`. No raw clientId or entry doc ID is ever returned.
+
+**Errors**
+| Status | `error` | When |
+|---|---|---|
+| `400` | `invalid_request` | Malformed or nonexistent `week` (`2026-W60`), a future week, or `publicId` that is not a public id. |
+| `503` | `league_unavailable` | The board read failed (or the store has no league support). Surfaced directly; retry shortly. |
+
+---
+
 ## 2. Client-to-Site WebSocket Messages (`ClientMessageSchema`)
 
 > **Transport compression**: both WebSocket hops (browser ↔ lobby, lobby ↔ site) negotiate `permessage-deflate` (RFC 7692) with `WS_PER_MESSAGE_DEFLATE` (zlib level 1, context takeover, frames under 256 bytes uncompressed). Message schemas are unchanged; clients that do not offer the extension get uncompressed frames.
@@ -173,7 +205,8 @@ type ServerMessage =
   | { type: 'runEvicted'; vid: number; reason: EvictionReason; pts: number; shipped: number; incidents: number; bestStreak: number; runMode: RunMode }
   | { type: 'dailyResult'; dailyKey: string; pts: number; dailyBest: number; improved: boolean; dailyRank: number; dailyOf: number; attempts: number; streak: number; streakDelta: number }
   | { type: 'runSummary'; runMode: RunMode; pts: number; deliveries: number; tape: string; dailyKey?: string }
-  | { type: 'dailyStatus'; dailyKey: string; streak: number; bestStreak: number; playedToday: boolean };
+  | { type: 'dailyStatus'; dailyKey: string; streak: number; bestStreak: number; playedToday: boolean }
+  | { type: 'leagueResult'; weekKey: string; pts: number; weekPts: number; delta: number; counted: boolean; runsCounted: number; rank: number; of: number };
 ```
 
 | `type` | Fields | Description |
@@ -195,6 +228,7 @@ type ServerMessage =
 | `dailyResult` | `dailyKey`, `pts`, `dailyBest`, `improved`, `dailyRank`, `dailyOf`, `attempts`, `streak`, `streakDelta` | Private: sent only to the finishing driver's own sockets after a **completed** Daily Shift (clock reached 00:00 with ≥ 1 delivery; humans only) is recorded. `dailyBest` is the player's best score today (best of unlimited attempts), `dailyRank`/`dailyOf` their 1-based standing among today's entrants, `streak` the updated daily streak and `streakDelta` `1` on the day's first completion, else `0`. Not sent when the write fails. |
 | `runSummary` | `runMode`, `pts`, `deliveries`, `tape`, `dailyKey?` | Private: sent to a human driver's own sockets once, the moment their run finishes (clock reached 00:00). `tape` is the exact server `runTape` (`RunTapeSchema`: `O` on-time, `L` late, `X` incident, ≤ 40 chars) for the share card; it is never broadcast in `delta`. `dailyKey` is set for Daily runs. |
 | `dailyStatus` | `dailyKey`, `streak`, `bestStreak`, `playedToday` | Private: sent once after `welcome` to human drivers from their stored profile. `streak` is the read-decayed Daily streak (`displayStreak`, 0 after a missed day); `playedToday` is true when the player already completed today's Daily. Not sent when the profile read fails (the failure is logged). |
+| `leagueResult` | `weekKey`, `pts`, `weekPts`, `delta`, `counted`, `runsCounted`, `rank`, `of` | Private: sent only to the finishing human driver's sockets after a timed run (Blitz or Daily) is folded into their Weekly League entry. `counted` is false (and `delta` 0) when the run did not beat their 10th-best run of the week; `rank`/`of` are their league standing among the week's entrants. Bots never write. On a store failure the driver gets `error` `league_record_failed` instead. |
 
 **Opaque player ids on the wire**: every `clientId` the site sends (`welcome.you.clientId`, `presence.players[].clientId`, `snapshot.vehicles[].ownerClientId`/`controlledByClientId`, `snapshot.players`, `snapshot.difficultyVotes` / `delta.votes` keys, `snapshot.cards` / `delta.hands` keys, `completedRuns[].clientId`, and event `clientId` / `owner` / `player` fields) is the player's **publicId** (`p1_…`, same derivation as the lobby), never the raw clientId. The mapping is uniform, so the recipient's own id is also its publicId and client-side equality checks work unchanged. The sim, Firestore snapshots, and heartbeats keep raw clientIds internally.
 
@@ -387,6 +421,11 @@ Shared by the sim, site, lobby and client so every shard agrees on the day's Dai
 | `DailyBoardRowSchema` / `DailyBoardResponseSchema` | `GET /api/daily` row `{ publicId, name, pts, streak, siteId }` and response `{ info, top, entrants, you? }`. |
 | `DailyResultMessageSchema` | The private `dailyResult` server message (§3). |
 | `RunSummaryMessageSchema` / `DailyStatusMessageSchema` / `RunTapeSchema` | The private `runSummary` and `dailyStatus` server messages (§3) and the run-tape string rule. |
+| `weekKeyToStartMs(key)` / `weekEndMs(key)` / `addWeeks(key, n)` / `previousWeekKey(ms)` | ISO-week helpers (UTC, Monday start; ISO week 53 years handled). `weekKeyToStartMs` throws on a malformed or nonexistent key. |
+| `LEAGUE_TOP_RUNS` / `LEAGUE_BOARD_SIZE` / `LEAGUE_ENTRY_TTL_DAYS` / `LEAGUE_PODIUM_SIZE` | `10` (runs summed into week points) / `20` (rows in `GET /api/league`) / `400` (entry TTL after week end) / `3`. |
+| `nextLeagueRuns(topRuns, pts)` | Pure fold of one run into a player's week: counts while fewer than 10 runs or when `pts` beats the 10th best (which is evicted). Returns `{ topRuns (desc), weekPts, delta, counted }`. |
+| `LeagueRowSchema` / `LeaguePodiumEntrySchema` / `LeagueResponseSchema` | `GET /api/league` row, podium place, and response `{ weekKey, endsAt, top, entrants, you?, finalized, podium? }`. |
+| `LeagueResultMessageSchema` | The private `leagueResult` server message (§3). |
 
 `CompletedRunRecord` (sim, persisted with completed runs) gains `dailyKey?: string \| null` on daily runs and `tape?: string` on every run (`O` on-time, `L` late, `X` incident; max `RUN_TAPE_MAX = 40`).
 

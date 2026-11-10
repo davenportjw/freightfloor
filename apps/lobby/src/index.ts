@@ -30,6 +30,16 @@ import {
   WS_PER_MESSAGE_DEFLATE,
   DAILY_BOARD_SIZE,
   DailyBoardResponseSchema,
+  LEAGUE_BOARD_SIZE,
+  LEAGUE_PODIUM_SIZE,
+  LeagueResponseSchema,
+  WeekKeySchema,
+  previousWeekKey,
+  weekEndMs,
+  weekKey,
+  weekKeyToStartMs,
+  type LeaguePodiumEntry,
+  type LeagueResponse,
   DayKeySchema,
   RunModeSchema,
   dailyInfoFor,
@@ -67,6 +77,12 @@ export const DAILY_BOARD_CACHE_TTL_MS = 30_000;
 const DAILY_BOARD_CACHE_MAX_KEYS = 16;
 /** Extra rows fetched so dropping reserved bot names still fills the Daily board. */
 const DAILY_BOARD_OVERFETCH = 10;
+/** `/api/league` board cache TTL (per instance, per week key). */
+export const LEAGUE_BOARD_CACHE_TTL_MS = 30_000;
+/** Max week keys held in the `/api/league` board cache before it is cleared wholesale. */
+const LEAGUE_BOARD_CACHE_MAX_KEYS = 16;
+/** Extra rows fetched so dropping reserved bot names still fills the league board / podium. */
+const LEAGUE_BOARD_OVERFETCH = 10;
 /** Extra ranked docs fetched so bot / reserved-prefix filtering still fills the board. */
 const TOP_PLAYERS_OVERFETCH = 10;
 /** Candidate callsigns probed with point lookups before falling back to a bounded scan. */
@@ -193,6 +209,33 @@ export interface StoredPlayerDoc {
   firstSeenDay?: string;
   lastSeenDay?: string;
   activeDays?: number;
+  /** Weekly League championships (written by `finalizeLeagueWeek`). */
+  leagueWins?: number;
+  /** Best finalized weekly podium place, 1–3 (written by `finalizeLeagueWeek`). */
+  bestLeagueRank?: number;
+}
+
+/**
+ * Public view of a `league/{weekKey}/entries/{clientId}` doc (written by the site). The lobby
+ * never returns the doc id (the raw clientId); rows are keyed by `publicId`.
+ */
+export interface StoredLeagueEntry {
+  publicId: string;
+  name: string;
+  weekPts: number;
+  /** Timed runs finished that week. */
+  runs: number;
+  /** Runs currently summed into `weekPts` (≤ 10). */
+  runsCounted: number;
+  siteId: string;
+}
+
+/** A week's public league board as read from the store. */
+export interface StoredLeagueBoard {
+  top: StoredLeagueEntry[];
+  entrants: number;
+  finalized: boolean;
+  podium?: LeaguePodiumEntry[];
 }
 
 /**
@@ -290,6 +333,59 @@ export interface LobbyStore {
   getDailyBoard?(dayKey: string, limit: number): Promise<{ top: StoredDailyEntry[]; entrants: number }>;
   /** One player's entry for a day (by publicId) and how many entries scored strictly higher. */
   getDailyStanding?(dayKey: string, publicId: string): Promise<{ entry: StoredDailyEntry; above: number } | null>;
+  /** Top `limit` league entries for a week by week points, the entrant count, and the week's finalization state. */
+  getLeagueBoard?(weekKey: string, limit: number): Promise<StoredLeagueBoard>;
+  /** One player's league entry for a week (by publicId) and how many entries have strictly more week points. */
+  getLeagueStanding?(weekKey: string, publicId: string): Promise<{ entry: StoredLeagueEntry; above: number } | null>;
+  /**
+   * Closes a finished week exactly once: when `league/{weekKey}` is not yet `finalized`, records
+   * the top-3 podium, adds `leagueWins += 1` to the champion and lowers `bestLeagueRank` for each
+   * podium player, then sets `finalized: true`. Must be atomic and idempotent across concurrent
+   * callers and lobby instances (Firestore: `runTransaction`). Returns the podium.
+   */
+  finalizeLeagueWeek?(weekKey: string, nowMs: number): Promise<LeaguePodiumEntry[]>;
+}
+
+const nonNegInt = (n: unknown): number => (typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
+
+/** Normalizes a stored league entry; returns null for malformed docs. */
+function toStoredLeagueEntry(data: Record<string, unknown> | undefined): StoredLeagueEntry | null {
+  if (!data || typeof data.publicId !== 'string' || typeof data.weekPts !== 'number') return null;
+  return {
+    publicId: data.publicId,
+    name: typeof data.name === 'string' && data.name ? data.name : 'Driver',
+    weekPts: nonNegInt(data.weekPts),
+    runs: nonNegInt(data.runs),
+    runsCounted: Array.isArray(data.topRuns) ? data.topRuns.length : 0,
+    siteId: typeof data.siteId === 'string' ? data.siteId : '',
+  };
+}
+
+/** Normalizes a stored podium array; malformed places are dropped. */
+function toPodium(raw: unknown): LeaguePodiumEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((r) => {
+    const o = r as Record<string, unknown> | null;
+    if (!o || typeof o.publicId !== 'string' || typeof o.rank !== 'number') return [];
+    return [{ rank: o.rank, publicId: o.publicId, name: typeof o.name === 'string' ? o.name : 'Driver', weekPts: nonNegInt(o.weekPts) }];
+  });
+}
+
+/** Picks the podium (top 3 humans with points) from entries already sorted by week points, desc. */
+function pickPodium<T extends { entry: StoredLeagueEntry | null }>(rows: T[]): Array<T & { entry: StoredLeagueEntry; rank: number }> {
+  return rows
+    .filter((r): r is T & { entry: StoredLeagueEntry } => Boolean(r.entry) && !isReservedBotPrefix(r.entry!.name) && r.entry!.weekPts > 0)
+    .slice(0, LEAGUE_PODIUM_SIZE)
+    .map((r, i) => ({ ...r, rank: i + 1 }));
+}
+
+/** Player fields a podium place changes (pure; shared by both stores). */
+function podiumPlayerUpdate(prev: { leagueWins?: unknown; bestLeagueRank?: unknown } | undefined, rank: number): { leagueWins?: number; bestLeagueRank: number } {
+  const best = nonNegInt(prev?.bestLeagueRank);
+  return {
+    ...(rank === 1 ? { leagueWins: nonNegInt(prev?.leagueWins) + 1 } : {}),
+    bestLeagueRank: best > 0 ? Math.min(best, rank) : rank,
+  };
 }
 
 /** Normalizes a stored Daily entry; returns null for malformed docs. */
@@ -819,6 +915,65 @@ export class FirestoreLobbyStore implements LobbyStore {
     return { entry, above: above.data().count };
   }
 
+  private leagueWeekDoc(week: string) {
+    return this.db.collection(this.colName('league')).doc(week);
+  }
+
+  async getLeagueBoard(week: string, limit: number): Promise<StoredLeagueBoard> {
+    const weekRef = this.leagueWeekDoc(week);
+    const entries = weekRef.collection('entries');
+    const [snap, count, weekSnap] = await Promise.all([
+      entries.orderBy('weekPts', 'desc').limit(Math.max(1, limit) + LEAGUE_BOARD_OVERFETCH).get(),
+      entries.count().get(),
+      weekRef.get(),
+    ]);
+    const top: StoredLeagueEntry[] = [];
+    snap.forEach((doc) => {
+      const e = toStoredLeagueEntry(doc.data());
+      if (e && !isReservedBotPrefix(e.name)) top.push(e);
+    });
+    const meta = weekSnap.exists ? (weekSnap.data() as Record<string, unknown>) : undefined;
+    const finalized = meta?.finalized === true;
+    return {
+      top: top.slice(0, limit),
+      entrants: count.data().count,
+      finalized,
+      ...(finalized ? { podium: toPodium(meta?.podium) } : {}),
+    };
+  }
+
+  async getLeagueStanding(week: string, publicId: string): Promise<{ entry: StoredLeagueEntry; above: number } | null> {
+    const entries = this.leagueWeekDoc(week).collection('entries');
+    const snap = await entries.where('publicId', '==', publicId).limit(1).get();
+    const entry = snap.empty ? null : toStoredLeagueEntry(snap.docs[0].data());
+    if (!entry) return null;
+    const above = await entries.where('weekPts', '>', entry.weekPts).count().get();
+    return { entry, above: above.data().count };
+  }
+
+  async finalizeLeagueWeek(week: string, nowMs: number): Promise<LeaguePodiumEntry[]> {
+    const weekRef = this.leagueWeekDoc(week);
+    const players = this.db.collection(this.colName('players'));
+    return this.db.runTransaction(async (tx) => {
+      // Every read happens before the first write (Firestore transaction rule).
+      const weekSnap = await tx.get(weekRef);
+      const meta = weekSnap.exists ? (weekSnap.data() as Record<string, unknown>) : undefined;
+      if (meta?.finalized === true) return toPodium(meta.podium);
+      const topSnap = await tx.get(
+        weekRef.collection('entries').orderBy('weekPts', 'desc').limit(LEAGUE_PODIUM_SIZE + LEAGUE_BOARD_OVERFETCH),
+      );
+      const places = pickPodium(topSnap.docs.map((d) => ({ docId: d.id, entry: toStoredLeagueEntry(d.data()) })));
+      const playerSnaps = await Promise.all(places.map((p) => tx.get(players.doc(p.docId))));
+      places.forEach((p, i) => {
+        const prev = playerSnaps[i].exists ? (playerSnaps[i].data() as StoredPlayerDoc) : undefined;
+        tx.set(players.doc(p.docId), podiumPlayerUpdate(prev, p.rank), { merge: true });
+      });
+      const podium = places.map((p) => ({ rank: p.rank, publicId: p.entry.publicId, name: p.entry.name, weekPts: p.entry.weekPts }));
+      tx.set(weekRef, { weekKey: week, finalized: true, podium, finalizedAt: nowMs }, { merge: true });
+      return podium;
+    });
+  }
+
   async resolvePlayerIdentity(params: ResolvePlayerIdentityParams): Promise<PlayerIdentityResult> {
     const col = this.db.collection(this.colName('players'));
     const normalizeBaseName = (name: string) => name.replace(/\s+Run\s+\d+$/i, '').trim().toLowerCase();
@@ -1124,6 +1279,10 @@ export class InMemoryLobbyStore implements LobbyStore {
   private players = new Map<string, StoredPlayerDoc>();
   private queue = new Map<string, QueueEntry>();
   private daily = new Map<string, Map<string, StoredDailyEntry>>();
+  private league = new Map<string, Map<string, StoredLeagueEntry>>();
+  private leagueWeeks = new Map<string, { finalized: boolean; podium: LeaguePodiumEntry[] }>();
+  /** Finalization transactions that committed (tests / diagnostics). */
+  public leagueFinalizations = 0;
   public wokenSites: SiteId[] = [];
 
   constructor(initialSites?: StoredSiteDoc[], initialPlayers?: StoredPlayerDoc[]) {
@@ -1214,6 +1373,62 @@ export class InMemoryLobbyStore implements LobbyStore {
     const entry = all.find((e) => e.publicId === publicId);
     if (!entry) return null;
     return { entry: { ...entry }, above: all.filter((e) => e.bestPts > entry.bestPts).length };
+  }
+
+  /** Seeds a league entry (tests); the site owns these writes in production. */
+  setLeagueEntry(week: string, clientId: string, entry: StoredLeagueEntry): void {
+    let m = this.league.get(week);
+    if (!m) {
+      m = new Map();
+      this.league.set(week, m);
+    }
+    m.set(clientId, { ...entry });
+  }
+
+  private sortedLeague(week: string): Array<[string, StoredLeagueEntry]> {
+    return [...(this.league.get(week)?.entries() ?? [])].sort((a, b) => b[1].weekPts - a[1].weekPts);
+  }
+
+  async getLeagueBoard(week: string, limit: number): Promise<StoredLeagueBoard> {
+    const all = this.sortedLeague(week);
+    const meta = this.leagueWeeks.get(week);
+    return {
+      top: all
+        .map(([, e]) => e)
+        .filter((e) => !isReservedBotPrefix(e.name))
+        .slice(0, limit)
+        .map((e) => ({ ...e })),
+      entrants: all.length,
+      finalized: meta?.finalized === true,
+      ...(meta?.finalized ? { podium: meta.podium.map((p) => ({ ...p })) } : {}),
+    };
+  }
+
+  async getLeagueStanding(week: string, publicId: string): Promise<{ entry: StoredLeagueEntry; above: number } | null> {
+    const all = [...(this.league.get(week)?.values() ?? [])];
+    const entry = all.find((e) => e.publicId === publicId);
+    if (!entry) return null;
+    return { entry: { ...entry }, above: all.filter((e) => e.weekPts > entry.weekPts).length };
+  }
+
+  async finalizeLeagueWeek(week: string, nowMs: number): Promise<LeaguePodiumEntry[]> {
+    // Yield first so concurrent callers genuinely interleave; the check-and-set below runs with
+    // no await in between, which is the in-memory equivalent of the Firestore transaction.
+    await Promise.resolve();
+    const meta = this.leagueWeeks.get(week);
+    if (meta?.finalized) return meta.podium.map((p) => ({ ...p }));
+    const places = pickPodium(this.sortedLeague(week).map(([docId, entry]) => ({ docId, entry })));
+    for (const p of places) {
+      const prev = this.players.get(p.docId);
+      const doc: StoredPlayerDoc = prev ?? { clientId: p.docId, name: p.entry.name, deliveries: 0 };
+      Object.assign(doc, podiumPlayerUpdate(prev, p.rank));
+      this.players.set(p.docId, doc);
+    }
+    const podium = places.map((p) => ({ rank: p.rank, publicId: p.entry.publicId, name: p.entry.name, weekPts: p.entry.weekPts }));
+    this.leagueWeeks.set(week, { finalized: true, podium });
+    this.leagueFinalizations += 1;
+    void nowMs;
+    return podium.map((p) => ({ ...p }));
   }
 
   async resolvePlayerIdentity(params: ResolvePlayerIdentityParams): Promise<PlayerIdentityResult> {
@@ -2323,6 +2538,104 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
     };
     reply.header('Cache-Control', 'no-store');
     return reply.code(200).send(DailyBoardResponseSchema.parse(body));
+  });
+
+  // Weekly League board (ISO week, Monday 00:00 UTC). Entries are written by the site (humans
+  // only, Blitz + Daily). Rows are keyed by publicId only; `you` is looked up by the caller's own
+  // publicId. There is no scheduler: the first read in a new week finalizes the previous one.
+  const leagueBoardCache = new Map<string, { atMs: number; value: Promise<StoredLeagueBoard> }>();
+  function getCachedLeagueBoard(week: string, nowMs: number) {
+    const hit = leagueBoardCache.get(week);
+    if (hit && nowMs - hit.atMs < LEAGUE_BOARD_CACHE_TTL_MS) return hit.value;
+    if (!store.getLeagueBoard) throw new Error('league board is not supported by this store');
+    if (leagueBoardCache.size >= LEAGUE_BOARD_CACHE_MAX_KEYS) leagueBoardCache.clear();
+    const value = store.getLeagueBoard(week, LEAGUE_BOARD_SIZE);
+    const entry = { atMs: nowMs, value };
+    leagueBoardCache.set(week, entry);
+    value.catch(() => {
+      if (leagueBoardCache.get(week) === entry) leagueBoardCache.delete(week); // never cache a failure
+    });
+    return value;
+  }
+
+  // Weeks this instance has already seen finalized, plus in-flight finalizations (deduped).
+  const finalizedLeagueWeeks = new Set<string>();
+  const leagueFinalizing = new Map<string, Promise<void>>();
+  function ensureLeagueWeekFinalized(week: string, nowMs: number, log: FastifyRequest['log']): Promise<void> {
+    if (finalizedLeagueWeeks.has(week) || !store.finalizeLeagueWeek) return Promise.resolve();
+    const inflight = leagueFinalizing.get(week);
+    if (inflight) return inflight;
+    const run = store
+      .finalizeLeagueWeek(week, nowMs)
+      .then(() => {
+        finalizedLeagueWeeks.add(week);
+        leagueBoardCache.delete(week);
+      })
+      .catch((err: unknown) => {
+        // Logged and retried on the next read; the board itself is still served.
+        log.error({ err, weekKey: week }, 'league week finalization failed');
+      })
+      .finally(() => leagueFinalizing.delete(week));
+    leagueFinalizing.set(week, run);
+    return run;
+  }
+
+  const LeagueQuerySchema = z.object({
+    week: z.union([z.literal('current'), z.literal('previous'), WeekKeySchema]).optional(),
+    publicId: z.string().regex(PUBLIC_ID_PATTERN).optional(),
+  });
+
+  app.get('/api/league', async (req, reply) => {
+    const nowMs = nowFn();
+    const parsed = LeagueQuerySchema.safeParse(req.query ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_request', message: 'week must be current, previous, or YYYY-Www; publicId must be a public player id.' });
+    }
+    const current = weekKey(nowMs);
+    const requested = parsed.data.week ?? 'current';
+    const week = requested === 'current' ? current : requested === 'previous' ? previousWeekKey(nowMs) : requested;
+    let startMs: number;
+    try {
+      startMs = weekKeyToStartMs(week);
+    } catch {
+      return reply.code(400).send({ error: 'invalid_request', message: 'week is not a real ISO week.' });
+    }
+    if (startMs > weekKeyToStartMs(current)) {
+      return reply.code(400).send({ error: 'invalid_request', message: 'That league week has not started yet.' });
+    }
+    if (!store.getLeagueBoard) {
+      return reply.code(503).send({ error: 'league_unavailable', message: 'The league board is unavailable.' });
+    }
+    // Lazy finalization: last week on any read, plus the requested week when it is already over.
+    const toFinalize = new Set([previousWeekKey(nowMs)]);
+    if (week !== current) toFinalize.add(week);
+    await Promise.all([...toFinalize].map((w) => ensureLeagueWeekFinalized(w, nowMs, req.log)));
+    let board: StoredLeagueBoard;
+    let standing: { entry: StoredLeagueEntry; above: number } | null = null;
+    try {
+      [board, standing] = await Promise.all([
+        getCachedLeagueBoard(week, nowMs),
+        parsed.data.publicId && store.getLeagueStanding
+          ? store.getLeagueStanding(week, parsed.data.publicId)
+          : Promise.resolve(null),
+      ]);
+    } catch (err) {
+      req.log.error({ err }, 'league board read failed');
+      return reply.code(503).send({ error: 'league_unavailable', message: 'The league board is unavailable. Try again shortly.' });
+    }
+    const body: LeagueResponse = {
+      weekKey: week,
+      endsAt: weekEndMs(week),
+      top: board.top.map((e) => ({ publicId: e.publicId, name: e.name, weekPts: e.weekPts, runs: e.runs, siteId: e.siteId })),
+      entrants: board.entrants,
+      ...(standing
+        ? { you: { rank: standing.above + 1, weekPts: standing.entry.weekPts, runsCounted: standing.entry.runsCounted } }
+        : {}),
+      finalized: board.finalized,
+      ...(board.finalized && board.podium ? { podium: board.podium } : {}),
+    };
+    reply.header('Cache-Control', 'no-store');
+    return reply.code(200).send(LeagueResponseSchema.parse(body));
   });
 
   // Crawlers: a real robots.txt and a one-page sitemap (the game is a single-page app at `/`),

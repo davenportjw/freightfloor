@@ -13,7 +13,12 @@ import type {
   ServerMessage,
   SiteId,
 } from '@warehouse/protocol';
-import { DailyBoardResponseSchema, type DailyBoardResponse } from '@warehouse/protocol';
+import {
+  DailyBoardResponseSchema,
+  LeagueResponseSchema,
+  type DailyBoardResponse,
+  type LeagueResponse,
+} from '@warehouse/protocol';
 import { lobbyErrorMessage } from './resumeCode.js';
 
 export const RECONNECT_BASE_MS = 500;
@@ -578,6 +583,28 @@ export async function fetchDailyBoard(
     if (!res.ok) return { ok: false, error: `/api/daily ${await readError(res)}` };
     const parsed = DailyBoardResponseSchema.safeParse(await res.json());
     if (!parsed.success) return { ok: false, error: '/api/daily returned an unexpected payload' };
+    return { ok: true, data: parsed.data };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export type LeagueBoardFetch =
+  | { ok: true; data: LeagueResponse }
+  | { ok: false; error: string };
+
+/** Weekly League board (`GET /api/league`) for this or last week, with my standing when `publicId` is known. */
+export async function fetchLeagueBoard(
+  week: 'current' | 'previous',
+  publicId: string | null,
+  fetchFn: typeof fetch = fetch,
+): Promise<LeagueBoardFetch> {
+  try {
+    const qs = `?week=${week}${publicId ? `&publicId=${encodeURIComponent(publicId)}` : ''}`;
+    const res = await fetchFn(`/api/league${qs}`);
+    if (!res.ok) return { ok: false, error: `/api/league ${await readError(res)}` };
+    const parsed = LeagueResponseSchema.safeParse(await res.json());
+    if (!parsed.success) return { ok: false, error: '/api/league returned an unexpected payload' };
     return { ok: true, data: parsed.data };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };

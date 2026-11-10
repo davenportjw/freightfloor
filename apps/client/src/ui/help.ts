@@ -9,6 +9,7 @@ import { HOTKEYS } from './hotkeys.js';
 import { createFocusTrap, type TrapContainer } from './focusTrap.js';
 import type { StorageLike } from './panel.js';
 import type { DailyInfo, DailyStatusMessage } from '@warehouse/protocol';
+import { dismissPodium, isPodiumDismissed, podiumPillText } from './league.js';
 
 export const HELP_SEEN_KEY = 'warehouse.help.seen';
 
@@ -96,6 +97,8 @@ export interface HelpMountOptions {
   getCallsign?: () => string;
   /** Optional override for whether mobile/touch joystick controls are active. */
   isMobile?: boolean | (() => boolean);
+  /** Storage for the dismissed "last week's podium" pill (`ff-league-podium-dismissed:<week>`). */
+  storage?: StorageLike | null;
 }
 
 /** Touch / mobile controls shown in "All controls" when on a mobile / coarse-pointer viewport. */
@@ -235,6 +238,46 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     if (dailyPill.title !== tip) dailyPill.title = tip;
     dailyPill.classList.toggle('on', ctx.store.ui.runMode === 'daily');
     dailyPill.setAttribute('aria-pressed', String(ctx.store.ui.runMode === 'daily'));
+  }
+
+  // ---- Weekly League: last week's podium pill (dismissible per week; finalized weeks only) ----
+  const podiumText = el('span', { class: 'intro-podium-text', attrs: { 'data-role': 'intro-podium-text' } });
+  const podiumPill = el('button', {
+    class: 'btn intent-pill intro-podium-pill',
+    attrs: { type: 'button', 'data-role': 'intro-podium-pill', title: "Last week's Weekly League podium" },
+    onClick: (ev) => {
+      ev.preventDefault();
+      ctx.actions.showLeaderboardModal(true, 'week');
+    },
+  }, [podiumText]);
+  const podiumDismiss = el('button', {
+    class: 'btn intent-pill intro-podium-dismiss',
+    attrs: { type: 'button', 'data-role': 'intro-podium-dismiss', 'aria-label': "Dismiss last week's podium" },
+    text: '✕',
+    onClick: (ev) => {
+      ev.preventDefault();
+      const week = ctx.store.leaguePrevious.data?.weekKey;
+      if (!week) return;
+      dismissPodium(opts.storage, week);
+      podiumDismissedWeek = week;
+      syncPodiumPill();
+    },
+  });
+  const podiumRow = el('div', { class: 'intent-pills intro-podium', attrs: { 'data-role': 'intro-podium' } }, [
+    podiumPill,
+    podiumDismiss,
+  ]);
+  podiumRow.hidden = true;
+  let podiumDismissedWeek: string | null = null;
+  function syncPodiumPill(): void {
+    const prev = ctx.store.leaguePrevious;
+    // Fetch last week's board once (deferred: store listeners run synchronously inside update).
+    if (prev.status === 'idle') queueMicrotask(() => ctx.actions.refreshLeaguePrevious());
+    const text = podiumPillText(prev.data);
+    const week = prev.data?.weekKey ?? null;
+    const dismissed = week !== null && (podiumDismissedWeek === week || isPodiumDismissed(opts.storage, week));
+    podiumRow.hidden = !text || dismissed;
+    if (text && podiumText.textContent !== text) podiumText.textContent = text;
   }
 
   // ---- view switch: one secondary pill button to the AI explainer, one back ----
@@ -1346,6 +1389,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       lifecyclePane,
       spinupBox,
       dailyRow,
+      podiumRow,
       footer,
     ],
   );
@@ -1366,6 +1410,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       syncCabViewHelp();
       syncSpinup();
       syncDailyPill();
+      syncPodiumPill();
       const pending = Boolean(ctx.store.ui.pendingDrive);
       const label = introStartLabel(pending);
       if (startBtn.textContent !== label) startBtn.textContent = label;

@@ -263,8 +263,9 @@ resource "google_firestore_field" "journal_ttl" {
 }
 
 # Daily Shift entries (`daily{suffix}/{dayKey}/entries/{clientId}`) expire 120 days after their day
-# (DAILY_ENTRY_TTL_DAYS). `collection` names the collection group, so one policy covers every day
-# doc across all suffixed environments.
+# (DAILY_ENTRY_TTL_DAYS); Weekly League entries (`league{suffix}/{weekKey}/entries/{clientId}`)
+# expire 400 days after their week ends (LEAGUE_ENTRY_TTL_DAYS). `collection` names the collection
+# group, so one policy covers both boards across all suffixed environments.
 resource "google_firestore_field" "daily_entries_ttl" {
   count      = var.suffix == "" ? 1 : 0
   project    = var.project_id

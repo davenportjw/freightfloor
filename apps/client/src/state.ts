@@ -36,6 +36,8 @@ import {
   type VehicleDecision,
   type WelcomeMessage,
   type DailyBoardResponse,
+  type LeagueResponse,
+  type LeagueResultMessage,
   type DailyInfo,
   type DailyResultMessage,
   type DailyStatusMessage,
@@ -541,7 +543,7 @@ export interface PhaseInfo {
 export type DrawerTab = 'leaderboard' | 'value' | 'days' | 'events' | 'brain';
 export const DRAWER_TABS: DrawerTab[] = ['leaderboard', 'value', 'days', 'events', 'brain'];
 
-export type LeaderboardModalTab = 'all' | 'today' | 'standings' | 'hall' | 'network' | 'silly';
+export type LeaderboardModalTab = 'week' | 'all' | 'today' | 'standings' | 'hall' | 'network' | 'silly';
 
 export interface RunEndLeaderboardRow {
   rank: number;
@@ -621,6 +623,14 @@ export interface RunEndSummary {
 export interface DailyBoardState {
   status: 'idle' | 'loading' | 'ready' | 'error';
   data: DailyBoardResponse | null;
+  error: string | null;
+  updatedAt: number | null;
+}
+
+/** `GET /api/league` fetch state (real response or the real error; never invented rows). */
+export interface LeagueBoardState {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  data: LeagueResponse | null;
   error: string | null;
   updatedAt: number | null;
 }
@@ -954,6 +964,14 @@ export class ClientStore {
   dailyResultError: string | null = null;
   /** Today board (`GET /api/daily`) for the leaderboard modal's Today tab. */
   dailyBoard: DailyBoardState = { status: 'idle', data: null, error: null, updatedAt: null };
+  /** My last finished timed run's league standing (private `leagueResult`); cleared on a new run. */
+  leagueResult: LeagueResultMessage | null = null;
+  /** League save failure for the last run (`error` `league_record_failed`); cleared on a new run. */
+  leagueResultError: string | null = null;
+  /** This Week board (`GET /api/league`) for the leaderboard modal's default tab. */
+  leagueBoard: LeagueBoardState = { status: 'idle', data: null, error: null, updatedAt: null };
+  /** Last week's finalized board (`GET /api/league?week=previous`) for the intro podium pill. */
+  leaguePrevious: LeagueBoardState = { status: 'idle', data: null, error: null, updatedAt: null };
 
   /** Bumped when the floor map is rebuilt (welcome / tier change) so the renderer can re-fit. */
   mapVersion = 0;
@@ -966,7 +984,7 @@ export class ClientStore {
     drawerTab: 'leaderboard',
     helpOpen: false,
     leaderboardModalOpen: false,
-    leaderboardModalTab: 'all',
+    leaderboardModalTab: 'week',
     agentDesignerOpen: false,
     agentCommandPending: false,
     lastAgentEcho: null,
@@ -1402,11 +1420,21 @@ export class ClientStore {
     this.changed();
   }
 
+  /** Private league result; marks the This Week board stale so it refetches when shown. */
+  applyLeagueResult(msg: LeagueResultMessage): void {
+    this.leagueResult = msg;
+    this.leagueResultError = null;
+    if (msg.counted) this.leagueBoard = { ...this.leagueBoard, updatedAt: null };
+    this.changed();
+  }
+
   /** Forget the previous run's private results (a new run is starting). */
   clearRunResults(): void {
     this.runSummary = null;
     this.dailyResult = null;
     this.dailyResultError = null;
+    this.leagueResult = null;
+    this.leagueResultError = null;
   }
 
   applyWelcome(msg: WelcomeMessage): string | null {

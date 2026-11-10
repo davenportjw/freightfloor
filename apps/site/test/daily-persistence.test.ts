@@ -1,11 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import type { Firestore } from '@google-cloud/firestore';
-import { addDays, dayKeyToMs, DAILY_ENTRY_TTL_DAYS, dailyInfoFor } from '@warehouse/protocol';
+import { Timestamp, type Firestore } from '@google-cloud/firestore';
+import {
+  addDays,
+  addWeeks,
+  dayKeyToMs,
+  DAILY_ENTRY_TTL_DAYS,
+  dailyInfoFor,
+  LEAGUE_ENTRY_TTL_DAYS,
+  LEAGUE_TOP_RUNS,
+  weekKeyToStartMs,
+} from '@warehouse/protocol';
 import {
   CloudPersistenceStore,
   InMemoryPersistenceStore,
   applyDailyResult,
+  applyLeagueRun,
   dailyEntryExpireAt,
+  leagueEntryExpireAt,
+  type LeagueRunInput,
   type DailyResultInput,
   type PersistenceStore,
 } from '../src/persistence.js';
@@ -247,3 +259,66 @@ describe('applyDailyResult / dailyEntryExpireAt', () => {
     expect(worse.entry).toMatchObject({ bestPts: 400, tape: 'OO', siteId: 'den-1', attempts: 2 });
   });
 });
+
+const W1 = '2026-W49';
+const leagueInput = (over: Partial<LeagueRunInput> = {}): LeagueRunInput => ({
+  clientId: 'cid-ada',
+  publicId: 'p1_AAAAAAAAAAAAAAAAAAAAAA',
+  name: 'Ada',
+  siteId: 'den-1',
+  weekKey: W1,
+  pts: 100,
+  nowMs: weekKeyToStartMs(W1) + 3_600_000,
+  ...over,
+});
+
+describe.each(stores)('%s weekly league', (_name, make) => {
+  it('sums the top 10 runs and evicts the 10th best only when beaten', async () => {
+    const store = make();
+    for (let i = 1; i <= LEAGUE_TOP_RUNS; i += 1) {
+      const r = await store.recordLeagueRun(leagueInput({ pts: i * 10 }));
+      expect(r).toEqual({ weekPts: (i * (i + 1) * 10) / 2, delta: i * 10, counted: true, runsCounted: i });
+    }
+    expect(await store.recordLeagueRun(leagueInput({ pts: 10 }))).toEqual({ weekPts: 550, delta: 0, counted: false, runsCounted: 10 });
+    expect(await store.recordLeagueRun(leagueInput({ pts: 75 }))).toEqual({ weekPts: 615, delta: 65, counted: true, runsCounted: 10 });
+  });
+
+  it('ranks by week points per week (ties share a rank)', async () => {
+    const store = make();
+    await store.recordLeagueRun(leagueInput({ pts: 500 }));
+    await store.recordLeagueRun(leagueInput({ clientId: 'cid-bo', publicId: 'p1_BBBBBBBBBBBBBBBBBBBBBB', pts: 300 }));
+    await store.recordLeagueRun(leagueInput({ clientId: 'cid-cy', publicId: 'p1_CCCCCCCCCCCCCCCCCCCCCC', pts: 300 }));
+    expect(await store.getLeagueRank(W1, 500)).toEqual({ rank: 1, of: 3 });
+    expect(await store.getLeagueRank(W1, 300)).toEqual({ rank: 2, of: 3 });
+    expect(await store.getLeagueRank(addWeeks(W1, 1), 300)).toEqual({ rank: 1, of: 0 });
+  });
+
+  it('concurrent runs from two shards never lose a run', async () => {
+    const store = make();
+    await Promise.all([100, 200, 300, 400].map((pts) => store.recordLeagueRun(leagueInput({ pts }))));
+    expect(await store.recordLeagueRun(leagueInput({ pts: 1 }))).toMatchObject({ weekPts: 1001, runsCounted: 5 });
+  });
+});
+
+describe('CloudPersistenceStore league documents', () => {
+  it('writes league/{weekKey}/entries/{clientId} with a TTL Timestamp and publicId only', async () => {
+    const { db, store } = cloudStore();
+    await store.recordLeagueRun(leagueInput({ pts: 250 }));
+    const doc = db.docs.get(`league/${W1}/entries/cid-ada`)?.data as Record<string, unknown>;
+    expect(doc).toMatchObject({ weekKey: W1, publicId: 'p1_AAAAAAAAAAAAAAAAAAAAAA', weekPts: 250, topRuns: [250], runs: 1 });
+    expect(JSON.stringify(doc)).not.toContain('cid-ada');
+    expect((doc.expireAt as Timestamp).toMillis()).toBe(leagueEntryExpireAt(W1));
+  });
+});
+
+describe('applyLeagueRun / leagueEntryExpireAt', () => {
+  it('stamps expireAt LEAGUE_ENTRY_TTL_DAYS after the week ends and counts every run', () => {
+    expect(leagueEntryExpireAt(W1)).toBe(weekKeyToStartMs(W1) + (7 + LEAGUE_ENTRY_TTL_DAYS) * 86_400_000);
+    const first = applyLeagueRun(null, leagueInput({ pts: 0 }));
+    expect(first.result).toEqual({ weekPts: 0, delta: 0, counted: false, runsCounted: 0 });
+    expect(first.entry.runs).toBe(1);
+    const second = applyLeagueRun(first.entry, leagueInput({ pts: 40, siteId: 'slc-2' }));
+    expect(second.entry).toMatchObject({ runs: 2, topRuns: [40], weekPts: 40, siteId: 'slc-2' });
+  });
+});
+

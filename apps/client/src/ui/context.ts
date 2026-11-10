@@ -104,6 +104,10 @@ export interface Actions {
   refreshNetwork(): void;
   /** Re-fetch today's Daily board (`store.dailyBoard`). */
   refreshDailyBoard(): void;
+  /** Re-fetch this week's league board (`store.leagueBoard`). */
+  refreshLeagueBoard(): void;
+  /** Fetch last week's league board (`store.leaguePrevious`) for the podium pill. */
+  refreshLeaguePrevious(): void;
   /**
    * Find and switch to an existing callsign or resume code (`wr1_…`) via the lobby.
    * Returns null on success or an error string (new names are rejected).

@@ -7,6 +7,7 @@
  * - Compact embedded leaderboard table with filter tabs (All: Humans + AI vs Human Runs Only)
  * - AI telemetry coach line and contracts outcome line
  * - Daily runs: today's rank (`#7 of 213`), the streak line, and a Share button (share card)
+ * - Timed runs (Blitz/Daily): the Weekly League pill (`League: #14 this week (+212)`) once recorded
  * - Footer actions: Full Standings, Watch the floor, Play again ↵ (Daily again on Daily runs)
  * Every number comes from `ui.runEnd` (built from the live vehicle and world in main.ts checkRunEnd).
  */
@@ -18,6 +19,7 @@ import { createFocusTrap, type TrapContainer } from './focusTrap.js';
 import { recapDecisionText, recapDirectiveText } from './aiInsight.js';
 import { runDeltaHeadline } from './runOne.js';
 import { buildShareText, shareResult, type ShareNavigator, type ShareOutcome } from './shareCard.js';
+import { leagueLineText } from './league.js';
 import type { DailyResultMessage, DailyStatusMessage } from '@warehouse/protocol';
 
 export type RunEndFilterTab = 'all' | 'humans';
@@ -571,6 +573,20 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
       ]);
     }
 
+    // Weekly League pill: only once the server answered (runs with no deliveries never count).
+    let leagueEl: HTMLElement | null = null;
+    const leagueText = s.runMode === 'freerange' ? '' : leagueLineText(store.leagueResult, store.leagueResultError);
+    if (leagueText) {
+      const ok = store.leagueResult !== null;
+      leagueEl = el('div', { class: 'results-context-bar', attrs: { 'data-role': 'league-result' } }, [
+        el('span', {
+          class: `results-pill ${ok && store.leagueResult?.counted ? 'good' : 'warn'}`,
+          attrs: { 'data-role': 'league-rank' },
+          text: leagueText,
+        }),
+      ]);
+    }
+
     const card = el(
       'div',
       {
@@ -592,6 +608,7 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
           box(`×${(s.comboBest ?? 1).toFixed(1)}`, `best combo · ${s.onTimePct}% on-time`),
         ]),
         ...(dailyEl ? [dailyEl] : []),
+        ...(leagueEl ? [leagueEl] : []),
         el('div', { class: 'results-context-bar', attrs: { 'data-role': 'results-context' } }, contextPills),
         el('div', { class: 'results-lb' }, [
           el('div', { class: 'results-lb-head' }, [
@@ -655,6 +672,10 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
         ctx.store.dailyResult?.dailyRank ?? null,
         ctx.store.dailyResult?.dailyOf ?? null,
         ctx.store.dailyResultError,
+        ctx.store.leagueResult?.rank ?? null,
+        ctx.store.leagueResult?.delta ?? null,
+        ctx.store.leagueResult?.counted ?? null,
+        ctx.store.leagueResultError,
         shareState.status,
       ]);
       if (summary !== lastRenderedSummary || renderKey !== lastRenderKey) {

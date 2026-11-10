@@ -47,7 +47,7 @@ export function mountDrawer(drawer: HTMLElement, ctx: UiCtx): UiModule {
         const openFullBtn = button(
           '🏆 Full Leaderboard & Silly Awards [L]',
           'btn small lb-open-modal-btn',
-          () => actions.showLeaderboardModal(true, 'all'),
+          () => actions.showLeaderboardModal(true, 'week'),
           'Open the full-screen Leaderboard & Silly Superlatives modal [L]',
         );
         return [

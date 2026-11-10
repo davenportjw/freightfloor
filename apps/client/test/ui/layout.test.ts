@@ -529,6 +529,7 @@ describe('GitHub repository and Powered by Davenporter links (Intro modal, HUD, 
       const ctx = {
         store,
         actions: {
+          refreshLeaguePrevious: () => {},
           showHelp: (open: boolean) => {
             store.ui.helpOpen = open;
           },

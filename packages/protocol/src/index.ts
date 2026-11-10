@@ -1539,6 +1539,27 @@ export const DailyStatusMessageSchema = z.object({
 });
 export type DailyStatusMessage = z.infer<typeof DailyStatusMessageSchema>;
 
+/**
+ * Private Weekly League result of a finished timed run (Blitz or Daily), sent only to the
+ * finishing driver's sockets after the server folds it into their week. `counted` is false when
+ * the run did not beat the player's worst counted run (the 10th best) this week.
+ */
+export const LeagueResultMessageSchema = z.object({
+  type: z.literal('leagueResult'),
+  weekKey: z.string().regex(/^\d{4}-W\d{2}$/),
+  /** Score of the run that just finished. */
+  pts: z.number().int(),
+  weekPts: z.number().int().nonnegative(),
+  /** Week points gained from this run (0 when not counted). */
+  delta: z.number().int().nonnegative(),
+  counted: z.boolean(),
+  /** Runs currently making up `weekPts` (≤ 10). */
+  runsCounted: z.number().int().nonnegative(),
+  rank: z.number().int().positive(),
+  of: z.number().int().positive(),
+});
+export type LeagueResultMessage = z.infer<typeof LeagueResultMessageSchema>;
+
 export const ServerMessageSchema = z.discriminatedUnion('type', [
   WelcomeMessageSchema,
   DeltaMessageSchema,
@@ -1557,6 +1578,7 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
   DailyResultMessageSchema,
   RunSummaryMessageSchema,
   DailyStatusMessageSchema,
+  LeagueResultMessageSchema,
 ]);
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;
 
@@ -1578,6 +1600,7 @@ export const SERVER_MESSAGE_TYPES = [
   'dailyResult',
   'runSummary',
   'dailyStatus',
+  'leagueResult',
 ] as const;
 
 // ============================================================================
@@ -2252,3 +2275,118 @@ export const DailyBoardResponseSchema = z.object({
     .optional(),
 });
 export type DailyBoardResponse = z.infer<typeof DailyBoardResponseSchema>;
+
+// ----------------------------------------------------------------------------
+// Weekly League (ISO week, Monday 00:00 UTC). Week points are the sum of a player's
+// best `LEAGUE_TOP_RUNS` timed runs (Blitz + Daily) of the week; Free Range never counts.
+// ----------------------------------------------------------------------------
+
+/** Best runs per player that make up their week points. */
+export const LEAGUE_TOP_RUNS = 10;
+/** Rows in the public league board (`GET /api/league`). */
+export const LEAGUE_BOARD_SIZE = 20;
+/** League entries expire (Firestore TTL on `expireAt`) this many days after their week ends. */
+export const LEAGUE_ENTRY_TTL_DAYS = 400;
+/** Podium size recorded when a week is finalized. */
+export const LEAGUE_PODIUM_SIZE = 3;
+const WEEK_MS = 7 * DAY_MS;
+
+/** Epoch ms of Monday 00:00 UTC starting ISO week `key`. Throws on a malformed or nonexistent key. */
+export function weekKeyToStartMs(key: string): number {
+  if (!WEEK_KEY_PATTERN.test(key)) throw new Error(`invalid week key: ${key}`);
+  const [y, w] = key.split('-W').map(Number);
+  const jan4 = Date.UTC(y, 0, 4); // Jan 4 always falls in ISO week 1
+  const ms = weekStartMs(jan4) + (w - 1) * WEEK_MS;
+  if (w < 1 || weekKey(ms) !== key) throw new Error(`invalid week key: ${key}`);
+  return ms;
+}
+
+/** Epoch ms when ISO week `key` ends (the next Monday 00:00 UTC). */
+export function weekEndMs(key: string): number {
+  return weekKeyToStartMs(key) + WEEK_MS;
+}
+
+/** Week key `n` whole weeks after `key` (negative for earlier). */
+export function addWeeks(key: string, n: number): string {
+  return weekKey(weekKeyToStartMs(key) + n * WEEK_MS);
+}
+
+/** Week key of the ISO week before the one containing `ms`. */
+export function previousWeekKey(ms: number): string {
+  return weekKey(weekStartMs(ms) - DAY_MS);
+}
+
+export interface LeagueRunUpdate {
+  /** Best runs this week, descending, at most `LEAGUE_TOP_RUNS`. */
+  topRuns: number[];
+  weekPts: number;
+  /** Change in week points caused by this run (0 when it did not count). */
+  delta: number;
+  /** True when the run entered the top runs. */
+  counted: boolean;
+}
+
+/**
+ * Folds one finished run into a player's top runs for the week. The run counts while the
+ * player has fewer than `LEAGUE_TOP_RUNS` runs, or when it beats their current worst counted
+ * run (which it then evicts). Non-positive and non-finite scores never count. Pure.
+ */
+export function nextLeagueRuns(prev: readonly unknown[] | null | undefined, pts: number): LeagueRunUpdate {
+  const clean = (Array.isArray(prev) ? prev : [])
+    .filter((n): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0)
+    .map((n) => Math.floor(n))
+    .sort((a, b) => b - a)
+    .slice(0, LEAGUE_TOP_RUNS);
+  const before = clean.reduce((s, n) => s + n, 0);
+  const run = Number.isFinite(pts) ? Math.floor(pts) : 0;
+  const full = clean.length >= LEAGUE_TOP_RUNS;
+  if (run <= 0 || (full && run <= clean[clean.length - 1])) {
+    return { topRuns: clean, weekPts: before, delta: 0, counted: false };
+  }
+  const topRuns = [...clean, run].sort((a, b) => b - a).slice(0, LEAGUE_TOP_RUNS);
+  const weekPts = topRuns.reduce((s, n) => s + n, 0);
+  return { topRuns, weekPts, delta: weekPts - before, counted: true };
+}
+
+/** One public league board row. Never carries a raw clientId. */
+export const LeagueRowSchema = z.object({
+  publicId: z.string().min(1),
+  name: z.string(),
+  weekPts: z.number().int().nonnegative(),
+  /** Timed runs finished this week (counted or not). */
+  runs: z.number().int().nonnegative(),
+  siteId: z.string(),
+});
+export type LeagueRow = z.infer<typeof LeagueRowSchema>;
+
+/** One podium place recorded when a week is finalized. */
+export const LeaguePodiumEntrySchema = z.object({
+  rank: z.number().int().min(1).max(LEAGUE_PODIUM_SIZE),
+  publicId: z.string().min(1),
+  name: z.string(),
+  weekPts: z.number().int().nonnegative(),
+});
+export type LeaguePodiumEntry = z.infer<typeof LeaguePodiumEntrySchema>;
+
+/** `GET /api/league?week=<current|previous|YYYY-Www>[&publicId=…]` response. */
+export const LeagueResponseSchema = z.object({
+  weekKey: WeekKeySchema,
+  /** Epoch ms when the week closes (next Monday 00:00 UTC). */
+  endsAt: z.number().int(),
+  top: z.array(LeagueRowSchema).max(LEAGUE_BOARD_SIZE),
+  /** Human entrants with a league entry for the week. */
+  entrants: z.number().int().nonnegative(),
+  /** The caller's own standing, when they identified themselves and have an entry. */
+  you: z
+    .object({
+      rank: z.number().int().positive(),
+      weekPts: z.number().int().nonnegative(),
+      runsCounted: z.number().int().nonnegative(),
+    })
+    .optional(),
+  /** True once the week has closed and its podium has been recorded. */
+  finalized: z.boolean(),
+  /** Final podium (finalized weeks only). */
+  podium: z.array(LeaguePodiumEntrySchema).max(LEAGUE_PODIUM_SIZE).optional(),
+});
+export type LeagueResponse = z.infer<typeof LeagueResponseSchema>;

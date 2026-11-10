@@ -3,11 +3,14 @@ import { PubSub, type Message, type Subscription } from '@google-cloud/pubsub';
 import type { ArmorReasonCode } from '@warehouse/armor';
 import {
   DAILY_ENTRY_TTL_DAYS,
+  LEAGUE_ENTRY_TTL_DAYS,
   GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS,
   addDays,
   dailyInfoFor,
   dayKeyToMs,
   nextDailyStreak,
+  nextLeagueRuns,
+  weekEndMs,
   type DailyStreakState,
   type DecisionKind,
   type Phase,
@@ -84,6 +87,10 @@ export interface PlayerProfileDoc {
   lastDailyKey?: string;
   /** Distinct days with a completed Daily Shift. */
   dailiesCompleted?: number;
+  /** Weekly League championships (rank 1 of a finalized week; written by the lobby finalizer). */
+  leagueWins?: number;
+  /** Best finalized weekly podium place (1–3; written by the lobby finalizer). */
+  bestLeagueRank?: number;
 }
 
 /** One finished (or abandoned) run's contribution to a player's lifetime totals. */
@@ -141,6 +148,68 @@ export interface DailyEntryDoc {
   bestAt: number;
   /** Epoch ms; stored as a Firestore Timestamp for the `entries` TTL policy. */
   expireAt: number;
+}
+
+/** A finished timed run (Blitz or Daily, ≥ 1 delivery; humans only) folded into the Weekly League. */
+export interface LeagueRunInput {
+  clientId: string;
+  /** Opaque public id stored on the entry (raw clientIds never leave the server). */
+  publicId: string;
+  name: string;
+  siteId: SiteId;
+  weekKey: string;
+  pts: number;
+  nowMs: number;
+}
+
+export interface LeagueRunRecord {
+  weekPts: number;
+  /** Week points gained from this run (0 when not counted). */
+  delta: number;
+  counted: boolean;
+  /** Runs currently summed into `weekPts`. */
+  runsCounted: number;
+}
+
+/** `league/{weekKey}/entries/{clientId}`: a player's Weekly League standing. */
+export interface LeagueEntryDoc {
+  weekKey: string;
+  publicId: string;
+  name: string;
+  weekPts: number;
+  /** Best run scores of the week, descending (≤ `LEAGUE_TOP_RUNS`). */
+  topRuns: number[];
+  /** Timed runs finished this week (counted or not). */
+  runs: number;
+  siteId: SiteId;
+  updatedAt: number;
+  /** Epoch ms; stored as a Firestore Timestamp for the `entries` TTL policy. */
+  expireAt: number;
+}
+
+/** Firestore TTL deadline for a week's league entries: `LEAGUE_ENTRY_TTL_DAYS` after the week ends. */
+export function leagueEntryExpireAt(weekKey: string): number {
+  return weekEndMs(weekKey) + LEAGUE_ENTRY_TTL_DAYS * 86_400_000;
+}
+
+/** Pure core of `recordLeagueRun`: folds one run into the player's existing entry for the week. */
+export function applyLeagueRun(entry: LeagueEntryDoc | null, input: LeagueRunInput): { entry: LeagueEntryDoc; result: LeagueRunRecord } {
+  const step = nextLeagueRuns(entry?.topRuns, input.pts);
+  const next: LeagueEntryDoc = {
+    weekKey: input.weekKey,
+    publicId: input.publicId,
+    name: input.name,
+    weekPts: step.weekPts,
+    topRuns: step.topRuns,
+    runs: (entry?.runs ?? 0) + 1,
+    siteId: input.siteId,
+    updatedAt: input.nowMs,
+    expireAt: leagueEntryExpireAt(input.weekKey),
+  };
+  return {
+    entry: next,
+    result: { weekPts: step.weekPts, delta: step.delta, counted: step.counted, runsCounted: step.topRuns.length },
+  };
 }
 
 /** Firestore TTL deadline for a day's board entries: `DAILY_ENTRY_TTL_DAYS` after the day. */
@@ -316,6 +385,10 @@ export interface PersistenceStore {
   recordDailyResult(input: DailyResultInput): Promise<DailyResultRecord>;
   /** 1-based rank of `pts` among the day's entries (ties share a rank) and the entrant count. */
   getDailyRank(dayKey: string, pts: number): Promise<{ rank: number; of: number }>;
+  /** Atomically folds a finished timed run into `league/{weekKey}/entries/{clientId}`. */
+  recordLeagueRun(input: LeagueRunInput): Promise<LeagueRunRecord>;
+  /** 1-based rank of `weekPts` among the week's entries (ties share a rank) and the entrant count. */
+  getLeagueRank(weekKey: string, weekPts: number): Promise<{ rank: number; of: number }>;
   appendDecisionJournal(siteId: SiteId, entry: DecisionJournalEntry): Promise<void>;
   appendArmorJournal(siteId: SiteId, entry: ArmorJournalEntry): Promise<void>;
   getJournal(
@@ -410,6 +483,7 @@ export class InMemoryPersistenceStore implements PersistenceStore {
   private readonly hallOfFame: HallOfFameEntry[] = [];
   private readonly players = new Map<string, PlayerProfileDoc>();
   private readonly dailyEntries = new Map<string, Map<string, DailyEntryDoc>>();
+  private readonly leagueEntries = new Map<string, Map<string, LeagueEntryDoc>>();
   private readonly decisionJournals = new Map<SiteId, DecisionJournalEntry[]>();
   private readonly armorJournals = new Map<SiteId, ArmorJournalEntry[]>();
   private readonly budgets = new Map<string, BudgetDayDoc>();
@@ -536,6 +610,27 @@ export class InMemoryPersistenceStore implements PersistenceStore {
   /** A day's entries (tests / diagnostics). */
   getDailyEntriesForTesting(dayKey: string): DailyEntryDoc[] {
     return [...(this.dailyEntries.get(dayKey)?.values() ?? [])].map((e) => ({ ...e }));
+  }
+
+  async recordLeagueRun(input: LeagueRunInput): Promise<LeagueRunRecord> {
+    let week = this.leagueEntries.get(input.weekKey);
+    if (!week) {
+      week = new Map();
+      this.leagueEntries.set(input.weekKey, week);
+    }
+    const out = applyLeagueRun(week.get(input.clientId) ?? null, input);
+    week.set(input.clientId, out.entry);
+    return out.result;
+  }
+
+  async getLeagueRank(weekKey: string, weekPts: number): Promise<{ rank: number; of: number }> {
+    const entries = [...(this.leagueEntries.get(weekKey)?.values() ?? [])];
+    return { rank: entries.filter((e) => e.weekPts > weekPts).length + 1, of: entries.length };
+  }
+
+  /** A week's league entries (tests / diagnostics). */
+  getLeagueEntriesForTesting(weekKey: string): LeagueEntryDoc[] {
+    return [...(this.leagueEntries.get(weekKey)?.values() ?? [])].map((e) => ({ ...e, topRuns: [...e.topRuns] }));
   }
 
   async appendDecisionJournal(siteId: SiteId, entry: DecisionJournalEntry): Promise<void> {
@@ -827,6 +922,29 @@ export class CloudPersistenceStore implements PersistenceStore {
     const entries = this.dailyDoc(dayKey).collection('entries');
     const [above, all] = await Promise.all([
       entries.where('bestPts', '>', pts).count().get(),
+      entries.count().get(),
+    ]);
+    return { rank: above.data().count + 1, of: all.data().count };
+  }
+
+  async recordLeagueRun(input: LeagueRunInput): Promise<LeagueRunRecord> {
+    const entryRef = this.db
+      .collection(this.colName('league'))
+      .doc(input.weekKey)
+      .collection('entries')
+      .doc(input.clientId);
+    return this.db.runTransaction(async (tx) => {
+      const snap = await tx.get(entryRef);
+      const out = applyLeagueRun(snap.exists ? fromLeagueEntryData(snap.data()) : null, input);
+      tx.set(entryRef, { ...out.entry, expireAt: Timestamp.fromMillis(out.entry.expireAt) });
+      return out.result;
+    });
+  }
+
+  async getLeagueRank(weekKey: string, weekPts: number): Promise<{ rank: number; of: number }> {
+    const entries = this.db.collection(this.colName('league')).doc(weekKey).collection('entries');
+    const [above, all] = await Promise.all([
+      entries.where('weekPts', '>', weekPts).count().get(),
       entries.count().get(),
     ]);
     return { rank: above.data().count + 1, of: all.data().count };
@@ -1184,6 +1302,17 @@ function fromEntryData(data: FirebaseFirestore.DocumentData | undefined): DailyE
   const exp = data.expireAt as { toMillis?: () => number } | number | undefined;
   return {
     ...(data as DailyEntryDoc),
+    expireAt: typeof exp === 'number' ? exp : typeof exp?.toMillis === 'function' ? exp.toMillis() : 0,
+  };
+}
+
+/** Reads a Firestore league entry back into `LeagueEntryDoc` (`expireAt` is a Timestamp there). */
+function fromLeagueEntryData(data: FirebaseFirestore.DocumentData | undefined): LeagueEntryDoc | null {
+  if (!data || typeof data.weekPts !== 'number') return null;
+  const exp = data.expireAt as { toMillis?: () => number } | number | undefined;
+  return {
+    ...(data as LeagueEntryDoc),
+    topRuns: Array.isArray(data.topRuns) ? (data.topRuns as number[]) : [],
     expireAt: typeof exp === 'number' ? exp : typeof exp?.toMillis === 'function' ? exp.toMillis() : 0,
   };
 }

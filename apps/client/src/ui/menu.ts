@@ -158,7 +158,7 @@ export function mountMenu(menuBtn: HTMLElement, root: HTMLElement, ctx: UiCtx): 
               key: 'L',
               onClick: () => {
                 actions.setOverlay(null);
-                actions.showLeaderboardModal(true, 'all');
+                actions.showLeaderboardModal(true, 'week');
               },
             },
             {

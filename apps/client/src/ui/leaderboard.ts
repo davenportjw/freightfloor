@@ -145,7 +145,7 @@ export function mountLeaderboard(zone: HTMLElement, ctx: UiCtx): UiModule & { pa
       const openModalBtn = button(
         '🏆 Full Leaderboard & Silly Awards [L]',
         'btn small lb-open-modal-btn',
-        () => actions.showLeaderboardModal(true, 'all'),
+        () => actions.showLeaderboardModal(true, 'week'),
         'Open the full-screen Leaderboard & Silly Superlatives modal [L]',
       );
       openModalBtn.dataset.action = 'open-leaderboard-modal';

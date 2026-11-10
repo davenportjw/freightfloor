@@ -16,7 +16,7 @@ import {
   type Vehicle,
 } from '@warehouse/sim';
 import { InputController } from './input.js';
-import { fetchDailyBoard, fetchNetwork, isStaleJoin, NetClient, type NetStatus } from './net.js';
+import { fetchDailyBoard, fetchLeagueBoard, fetchNetwork, isStaleJoin, NetClient, type NetStatus } from './net.js';
 import { guardedFrame } from './frameLoop.js';
 import { NetworkPoller } from './networkPoller.js';
 import { blocksDriving } from './ui/modal.js';
@@ -378,6 +378,23 @@ function boot(): void {
     store.changed();
   }
 
+  /** `/api/league` for the This Week tab (`current`) and the intro podium pill (`previous`). */
+  const leagueInFlight = { current: false, previous: false };
+  async function loadLeagueBoard(week: 'current' | 'previous'): Promise<void> {
+    if (leagueInFlight[week]) return;
+    leagueInFlight[week] = true;
+    const key = week === 'current' ? 'leagueBoard' : 'leaguePrevious';
+    const prev = store[key];
+    store[key] = { ...prev, status: 'loading', error: null };
+    store.changed();
+    const res = await fetchLeagueBoard(week, store.selfPublicId());
+    leagueInFlight[week] = false;
+    store[key] = res.ok
+      ? { status: 'ready', data: res.data, error: null, updatedAt: Date.now() }
+      : { status: 'error', data: prev.data, error: res.error, updatedAt: Date.now() };
+    store.changed();
+  }
+
   const rackLift = new RackLiftController();
 
   // ---- Cab View (first-person) ----------------------------------------------
@@ -706,6 +723,8 @@ function boot(): void {
     },
     refreshNetwork: () => void pollNetwork(),
     refreshDailyBoard: () => void loadDailyBoard(),
+    refreshLeagueBoard: () => void loadLeagueBoard('current'),
+    refreshLeaguePrevious: () => void loadLeagueBoard('previous'),
     async resumeCallsign(raw) {
       const trimmed = raw.trim();
       const inputErr = resumeInputError(trimmed);
@@ -879,6 +898,7 @@ function boot(): void {
   }
   modules.push(mountShieldCard(shieldEl, ctx));
   const help = mountHelp(byId('help'), ctx, {
+      storage: safeStorage(),
       getCallsign: () => store.you?.name || displayName || 'Assigning…',
   });
   modules.push(help);
@@ -1329,6 +1349,11 @@ function boot(): void {
           store.dailyResultError = msg.message || 'Your Daily Shift score could not be saved.';
           store.changed();
         }
+        if (msg.code === 'league_record_failed') {
+          // Shown on the results sheet in place of the league standing (never a guessed rank).
+          store.leagueResultError = msg.message || 'Your Weekly League points could not be saved.';
+          store.changed();
+        }
         notify(errorKind(store.hudMode(), Date.now(), lastOrderAt), serverErrorText(msg.code, msg.message));
         // Any server refusal (incl. internal_error / spectator_forbidden / vehicle_changed) answers
         // an in-flight Co-Pilot command: it will not echo.
@@ -1400,6 +1425,9 @@ function boot(): void {
         store.applyDailyResult(msg);
         // A new best moves the Today board: refetch next time it is shown.
         if (msg.improved) store.dailyBoard = { ...store.dailyBoard, updatedAt: null };
+        break;
+      case 'leagueResult':
+        store.applyLeagueResult(msg);
         break;
       case 'relocationOffer':
         store.ui.relocationOffer = msg;

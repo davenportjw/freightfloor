@@ -291,6 +291,7 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
       const ctx = {
         store,
         actions: {
+          refreshLeaguePrevious: () => {},
           enterFloorFromIntro: () => true,
         },
       } as unknown as import('../src/ui/context.js').UiCtx;
