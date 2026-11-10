@@ -13,6 +13,8 @@ import {
   weekEndMs,
   type DailyStreakState,
   type DecisionKind,
+  type LiveryId,
+  type LiveryProfile,
   type Phase,
   type SiteId,
   type Transfer,
@@ -91,6 +93,45 @@ export interface PlayerProfileDoc {
   leagueWins?: number;
   /** Best finalized weekly podium place (1–3; written by the lobby finalizer). */
   bestLeagueRank?: number;
+  /** Equipped cosmetic livery (validated against `unlockedLiveries` on every `setLivery`). */
+  livery?: LiveryId;
+  /** Distinct days the player finished a Daily Shift in that day's top 10. */
+  dailyTop10s?: number;
+  /** Day key last counted in `dailyTop10s` (once-per-day guard). */
+  lastDailyTop10Key?: string;
+  /** Sites the player completed a Daily Shift on (regional livery unlocks). */
+  dailySites?: string[];
+}
+
+/** The unlock-rule view of a stored profile (`unlockedLiveries`). */
+export function liveryProfileOf(doc: Partial<PlayerProfileDoc> | null | undefined): LiveryProfile {
+  return {
+    bestDailyStreak: doc?.bestDailyStreak ?? 0,
+    dailiesCompleted: doc?.dailiesCompleted ?? 0,
+    totalDeliveries: doc?.totalDeliveries ?? 0,
+    dailyTop10s: doc?.dailyTop10s ?? 0,
+    dailySites: Array.isArray(doc?.dailySites) ? doc.dailySites : [],
+    leagueWins: doc?.leagueWins ?? 0,
+  };
+}
+
+/**
+ * Pure core of `recordDailyTop10`: the fields to merge when `dayKey` hasn't been counted yet,
+ * or null when it already has (each day counts once, however many top-10 runs).
+ */
+export function applyDailyTop10(
+  player: Partial<PlayerProfileDoc> | null,
+  dayKey: string,
+): { dailyTop10s: number; lastDailyTop10Key: string } | null {
+  if (player?.lastDailyTop10Key === dayKey) return null;
+  return { dailyTop10s: (player?.dailyTop10s ?? 0) + 1, lastDailyTop10Key: dayKey };
+}
+
+/** Daily sites with `siteId` added (deduplicated, insertion order). */
+export function addDailySite(sites: readonly string[] | null | undefined, siteId: string): string[] {
+  const list = Array.isArray(sites) ? [...sites] : [];
+  if (!list.includes(siteId)) list.push(siteId);
+  return list;
 }
 
 /** One finished (or abandoned) run's contribution to a player's lifetime totals. */
@@ -256,7 +297,12 @@ export function applyDailyResult(
   player: Partial<PlayerProfileDoc> | null,
   entry: DailyEntryDoc | null,
   input: DailyResultInput,
-): { streak: DailyStreakState; entry: DailyEntryDoc; result: DailyResultRecord } {
+): {
+  streak: DailyStreakState;
+  dailySites: string[];
+  entry: DailyEntryDoc;
+  result: DailyResultRecord;
+} {
   const step = nextDailyStreak(streakStateOf(player), input.dayKey);
   const pts = Math.round(input.pts);
   const improved = !entry || pts > entry.bestPts;
@@ -274,6 +320,7 @@ export function applyDailyResult(
   };
   return {
     streak: step.next,
+    dailySites: addDailySite(player?.dailySites, input.siteId),
     entry: next,
     result: {
       bestPts: next.bestPts,
@@ -383,6 +430,10 @@ export interface PersistenceStore {
    * score of the day in `daily/{dayKey}/entries/{clientId}`, and writes `daily/{dayKey}` once.
    */
   recordDailyResult(input: DailyResultInput): Promise<DailyResultRecord>;
+  /** Counts a Daily top-10 finish once per day (`dailyTop10s`); returns true when it counted. */
+  recordDailyTop10(clientId: string, dayKey: string): Promise<boolean>;
+  /** Persists the equipped livery on `players/{clientId}` (merge). Callers validate unlocks. */
+  setPlayerLivery(clientId: string, livery: LiveryId, nowMs: number): Promise<void>;
   /** 1-based rank of `pts` among the day's entries (ties share a rank) and the entrant count. */
   getDailyRank(dayKey: string, pts: number): Promise<{ rank: number; of: number }>;
   /** Atomically folds a finished timed run into `league/{weekKey}/entries/{clientId}`. */
@@ -585,7 +636,13 @@ export class InMemoryPersistenceStore implements PersistenceStore {
     const player = this.players.get(input.clientId) ?? null;
     const out = applyDailyResult(player, day.get(input.clientId) ?? null, input);
     day.set(input.clientId, out.entry);
-    if (player) this.players.set(input.clientId, { ...player, ...out.streak, lastDailyKey: input.dayKey });
+    if (player)
+      this.players.set(input.clientId, {
+        ...player,
+        ...out.streak,
+        dailySites: out.dailySites,
+        lastDailyKey: input.dayKey,
+      });
     else
       this.players.set(input.clientId, {
         clientId: input.clientId,
@@ -597,9 +654,25 @@ export class InMemoryPersistenceStore implements PersistenceStore {
         lastSiteId: input.siteId,
         updatedAt: input.nowMs,
         ...out.streak,
+        dailySites: out.dailySites,
         lastDailyKey: input.dayKey,
       });
     return out.result;
+  }
+
+  async recordDailyTop10(clientId: string, dayKey: string): Promise<boolean> {
+    const player = this.players.get(clientId);
+    if (!player) return false;
+    const next = applyDailyTop10(player, dayKey);
+    if (!next) return false;
+    this.players.set(clientId, { ...player, ...next });
+    return true;
+  }
+
+  async setPlayerLivery(clientId: string, livery: LiveryId, nowMs: number): Promise<void> {
+    const player = this.players.get(clientId);
+    if (!player) throw new Error(`no player profile for livery write`);
+    this.players.set(clientId, { ...player, livery, updatedAt: nowMs });
   }
 
   async getDailyRank(dayKey: string, pts: number): Promise<{ rank: number; of: number }> {
@@ -909,6 +982,7 @@ export class CloudPersistenceStore implements PersistenceStore {
           clientId: input.clientId,
           ...(player ? {} : { name: input.name, isBot: false, lastSiteId: input.siteId, updatedAt: input.nowMs }),
           ...out.streak,
+          dailySites: out.dailySites,
           lastDailyKey: input.dayKey,
         },
         { merge: true },
@@ -916,6 +990,25 @@ export class CloudPersistenceStore implements PersistenceStore {
       tx.set(entryRef, { ...out.entry, expireAt: Timestamp.fromMillis(out.entry.expireAt) });
       return out.result;
     });
+  }
+
+  async recordDailyTop10(clientId: string, dayKey: string): Promise<boolean> {
+    const ref = this.db.collection(this.colName('players')).doc(clientId);
+    return this.db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) return false;
+      const next = applyDailyTop10(snap.data() as PlayerProfileDoc, dayKey);
+      if (!next) return false;
+      tx.set(ref, next, { merge: true });
+      return true;
+    });
+  }
+
+  async setPlayerLivery(clientId: string, livery: LiveryId, nowMs: number): Promise<void> {
+    await this.db
+      .collection(this.colName('players'))
+      .doc(clientId)
+      .set({ clientId, livery, updatedAt: nowMs }, { merge: true });
   }
 
   async getDailyRank(dayKey: string, pts: number): Promise<{ rank: number; of: number }> {

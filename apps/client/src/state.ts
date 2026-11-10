@@ -42,6 +42,9 @@ import {
   type DailyResultMessage,
   type DailyStatusMessage,
   type RunSummaryMessage,
+  type LiveryId,
+  type LiveryStatusMessage,
+  type LiveryUnlockedMessage,
   isTimedRun,
 } from '@warehouse/protocol';
 import {
@@ -327,6 +330,7 @@ export function makeClientVehicle(d: QuantisedVehicleDelta): Vehicle {
     comboBest: d.comboBest,
     fareTrips: d.fareTrips,
     speedyTrips: d.speedyTrips,
+    livery: d.livery,
   };
 }
 
@@ -450,6 +454,7 @@ export function applyQuantisedDelta(
     if (typeof d.fareTrips === 'number') v.fareTrips = d.fareTrips;
     if (typeof d.speedyTrips === 'number') v.speedyTrips = d.speedyTrips;
     if (typeof d.extra === 'boolean') v.extra = d.extra;
+    if (typeof d.livery === 'number') v.livery = d.livery;
     if (d.tactics && typeof d.tactics === 'object') v.tactics = { ...v.tactics, ...d.tactics };
     if (Array.isArray(d.path)) v.path = unflattenPath(d.path);
     if (d.brainError !== undefined) v.brainError = d.brainError;
@@ -722,8 +727,8 @@ export interface UiState {
 export type UiOverlay = 'chat' | 'standings' | 'menu';
 
 /** Menu flyouts: each hosts one existing panel module (or the Layers / Settings list). */
-export type FlyoutId = 'board' | 'fleet' | 'drivers' | 'value' | 'network' | 'layers' | 'settings';
-export const FLYOUT_IDS: FlyoutId[] = ['board', 'fleet', 'drivers', 'value', 'network', 'layers', 'settings'];
+export type FlyoutId = 'board' | 'fleet' | 'drivers' | 'value' | 'network' | 'layers' | 'garage' | 'settings';
+export const FLYOUT_IDS: FlyoutId[] = ['board', 'fleet', 'drivers', 'value', 'network', 'layers', 'garage', 'settings'];
 
 const HUD_MINIMAL_KEY = 'warehouse.hud.minimal';
 export const RACK_LIFT_KEY = 'warehouse.feature.rackLift';
@@ -972,6 +977,12 @@ export class ClientStore {
   leagueBoard: LeagueBoardState = { status: 'idle', data: null, error: null, updatedAt: null };
   /** Last week's finalized board (`GET /api/league?week=previous`) for the intro podium pill. */
   leaguePrevious: LeagueBoardState = { status: 'idle', data: null, error: null, updatedAt: null };
+  /** My equipped + unlocked liveries (private `liveryStatus`); null until the site sends it. */
+  livery: { equipped: LiveryId; unlocked: LiveryId[] } | null = null;
+  /** Livery I asked to equip (`setLivery` sent, no answer yet). */
+  liveryPending: LiveryId | null = null;
+  /** Last `livery_*` error from the site (locked, rate limited, save failed). */
+  liveryError: string | null = null;
 
   /** Bumped when the floor map is rebuilt (welcome / tier change) so the renderer can re-fit. */
   mapVersion = 0;
@@ -1425,6 +1436,30 @@ export class ClientStore {
     this.leagueResult = msg;
     this.leagueResultError = null;
     if (msg.counted) this.leagueBoard = { ...this.leagueBoard, updatedAt: null };
+    this.changed();
+  }
+
+  /** Private livery status: authoritative equipped + unlocked set; settles any pending equip. */
+  applyLiveryStatus(msg: LiveryStatusMessage): void {
+    this.livery = { equipped: msg.equipped, unlocked: [...msg.unlocked] };
+    this.liveryPending = null;
+    this.liveryError = null;
+    this.changed();
+  }
+
+  /** Private unlock notice after a run: merges new ids into the unlocked set (catalog order kept by UI). */
+  applyLiveryUnlocked(msg: LiveryUnlockedMessage): void {
+    const cur = this.livery ?? { equipped: 'standard' as LiveryId, unlocked: ['standard' as LiveryId] };
+    const unlocked = [...cur.unlocked];
+    for (const id of msg.ids) if (!unlocked.includes(id)) unlocked.push(id);
+    this.livery = { equipped: cur.equipped, unlocked };
+    this.changed();
+  }
+
+  /** A `livery_*` error answered my `setLivery`. */
+  applyLiveryError(message: string): void {
+    this.liveryError = message;
+    this.liveryPending = null;
     this.changed();
   }
 

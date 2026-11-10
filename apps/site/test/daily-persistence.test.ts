@@ -13,8 +13,11 @@ import {
 import {
   CloudPersistenceStore,
   InMemoryPersistenceStore,
+  addDailySite,
   applyDailyResult,
+  applyDailyTop10,
   applyLeagueRun,
+  liveryProfileOf,
   dailyEntryExpireAt,
   leagueEntryExpireAt,
   type LeagueRunInput,
@@ -322,3 +325,53 @@ describe('applyLeagueRun / leagueEntryExpireAt', () => {
   });
 });
 
+describe('livery profile fields', () => {
+  it('tracks daily sites (deduplicated) through applyDailyResult', () => {
+    expect(addDailySite(undefined, 'den-1')).toEqual(['den-1']);
+    expect(addDailySite(['den-1'], 'den-1')).toEqual(['den-1']);
+    const out = applyDailyResult({ dailySites: ['den-1'] }, null, input({ siteId: 'phx-3' }));
+    expect(out.dailySites).toEqual(['den-1', 'phx-3']);
+  });
+
+  it('counts a Daily top-10 once per day', () => {
+    expect(applyDailyTop10(null, D1)).toEqual({ dailyTop10s: 1, lastDailyTop10Key: D1 });
+    expect(applyDailyTop10({ dailyTop10s: 1, lastDailyTop10Key: D1 }, D1)).toBeNull();
+    expect(applyDailyTop10({ dailyTop10s: 1, lastDailyTop10Key: D1 }, addDays(D1, 1))).toEqual({
+      dailyTop10s: 2,
+      lastDailyTop10Key: addDays(D1, 1),
+    });
+  });
+
+  it('maps stored docs to the unlock profile with safe defaults', () => {
+    expect(liveryProfileOf(null)).toEqual({
+      bestDailyStreak: 0,
+      dailiesCompleted: 0,
+      totalDeliveries: 0,
+      dailyTop10s: 0,
+      dailySites: [],
+      leagueWins: 0,
+    });
+    expect(liveryProfileOf({ leagueWins: 2, dailySites: ['slc-2'] })).toMatchObject({ leagueWins: 2, dailySites: ['slc-2'] });
+  });
+
+  it('Cloud store persists dailySites, top-10s and the equipped livery on players/{clientId}', async () => {
+    const { db, store } = cloudStore();
+    await store.recordDailyResult(input({ siteId: 'slc-2' }));
+    expect(await store.recordDailyTop10('cid-ada', D1)).toBe(true);
+    expect(await store.recordDailyTop10('cid-ada', D1)).toBe(false);
+    expect(await store.recordDailyTop10('cid-nobody', D1)).toBe(false);
+    await store.setPlayerLivery('cid-ada', 'regional_slc', 1234);
+    expect(db.docs.get('players/cid-ada')!.data).toMatchObject({
+      dailySites: ['slc-2'],
+      dailyTop10s: 1,
+      lastDailyTop10Key: D1,
+      livery: 'regional_slc',
+      updatedAt: 1234,
+    });
+  });
+
+  it('InMemory store refuses a livery write without a profile', async () => {
+    const store = new InMemoryPersistenceStore();
+    await expect(store.setPlayerLivery('ghost', 'standard', 1)).rejects.toThrow('no player profile');
+  });
+});

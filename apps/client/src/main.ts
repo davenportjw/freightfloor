@@ -5,7 +5,7 @@
  * Everything shown comes from the live site. When a call fails the real error is surfaced
  * (alert line / floor feed / connection pill); nothing is simulated locally.
  */
-import { isTimedRun, type ClientMessage, type ServerMessage, type SiteId } from '@warehouse/protocol';
+import { isTimedRun, LIVERIES, type ClientMessage, type LiveryId, type ServerMessage, type SiteId } from '@warehouse/protocol';
 import {
   blitzLeaderboard,
   dayIndex,
@@ -101,8 +101,10 @@ import {
   returnVisitEvent,
   runEndEvents,
   runStartEvent,
+  unlockEvents,
 } from './analytics.js';
 import { recordLocalVisit } from './visits.js';
+import { diffSeenUnlocks } from './ui/liveries.js';
 
 // Re-exported for the existing test suite (test/client.test.ts).
 export { applyQuantisedDelta, formatRunDisplayName, nextRunDisplayName, parseRunDisplayName } from './state.js';
@@ -268,6 +270,29 @@ function boot(): void {
     if (ok) analytics.track(eventForClientMessage(msg));
     return ok;
   };
+
+  /** Toast + GA4 for liveries this device has not announced yet (first load marks all seen silently). */
+  const LIVERY_SEEN_KEY = 'ff.liveries.seen';
+  function announceUnlocks(unlocked: readonly LiveryId[]): void {
+    const ls = safeLocalStorage();
+    let stored: string | null = null;
+    try {
+      stored = ls?.getItem(LIVERY_SEEN_KEY) ?? null;
+    } catch {
+      stored = null;
+    }
+    const { fresh, next } = diffSeenUnlocks(stored, unlocked);
+    try {
+      ls?.setItem(LIVERY_SEEN_KEY, next);
+    } catch {
+      /* storage full / blocked: announce anyway */
+    }
+    for (const id of fresh) {
+      const d = LIVERIES[id];
+      notify('status', `🎨 Livery unlocked: ${d.name}`, `${d.rule} Equip it from the Garage.`);
+    }
+    for (const ev of unlockEvents(fresh)) analytics.track(ev);
+  }
 
   /** Deliver a client notice where ui/notify.ts routes it for the current HUD mode. */
   function notify(kind: NoticeKind, text: string, extra?: string): void {
@@ -725,6 +750,12 @@ function boot(): void {
     refreshDailyBoard: () => void loadDailyBoard(),
     refreshLeagueBoard: () => void loadLeagueBoard('current'),
     refreshLeaguePrevious: () => void loadLeagueBoard('previous'),
+    setLivery: (id: LiveryId) => {
+      if (store.liveryPending) return;
+      store.liveryError = null;
+      if (send({ type: 'setLivery', id })) store.liveryPending = id;
+      store.changed();
+    },
     async resumeCallsign(raw) {
       const trimmed = raw.trim();
       const inputErr = resumeInputError(trimmed);
@@ -1344,6 +1375,11 @@ function boot(): void {
           store.changed();
           break;
         }
+        if (msg.code.startsWith('livery_')) {
+          // Shown inline in the Garage next to the card the driver tried to equip.
+          store.applyLiveryError(serverErrorText(msg.code, msg.message));
+          break;
+        }
         if (msg.code === 'daily_record_failed') {
           // Shown on the results sheet in place of the Daily rank (never a guessed rank).
           store.dailyResultError = msg.message || 'Your Daily Shift score could not be saved.';
@@ -1428,6 +1464,15 @@ function boot(): void {
         break;
       case 'leagueResult':
         store.applyLeagueResult(msg);
+        break;
+      case 'liveryStatus':
+        store.applyLiveryStatus(msg);
+        // Unlocks that happened off-run (e.g. the weekly champion livery) surface here.
+        announceUnlocks(msg.unlocked);
+        break;
+      case 'liveryUnlocked':
+        store.applyLiveryUnlocked(msg);
+        announceUnlocks(store.livery?.unlocked ?? msg.ids);
         break;
       case 'relocationOffer':
         store.ui.relocationOffer = msg;

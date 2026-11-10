@@ -328,7 +328,9 @@ The client ships GA4 support, but it is off until you give the lobby a measureme
 3. The lobby serves the ID at `GET /api/config` and only then adds Google's tag hosts to its CSP.
    With no ID the CSP stays strict and no tag loads.
 4. Mark the key events in GA4 → Admin → Events: `site_join`, `level_start`, `level_end`,
-   `manager_command`, `agent_command`, `return_visit` (mapping in `apps/client/src/analytics.ts`).
+   `manager_command`, `agent_command`, `return_visit`, `unlock_achievement` (mapping in
+   `apps/client/src/analytics.ts`). `unlock_achievement` `{ achievement_id: 'livery_<id>' }` fires
+   once per livery the browser announces; `livery_equip` `{ livery_id }` fires on each equip sent.
 5. Verify with GA4 **DebugView** or **Realtime** after loading the site once.
 
 Note: the measurement ID is public by design (every visitor's browser sees it), but keeping it

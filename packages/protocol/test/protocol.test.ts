@@ -247,6 +247,7 @@ describe('@warehouse/protocol', () => {
       { type: 'setRunMode' as const, mode: 'freerange' as const },
       { type: 'acceptRelocation' as const, targetSite: 'slc-2' as const },
       { type: 'dispatchersCallPref' as const, enabled: false },
+      { type: 'setLivery' as const, id: 'night_shift' as const },
     ];
 
     it('parses every valid ClientMessage variant', () => {
@@ -422,6 +423,8 @@ describe('@warehouse/protocol', () => {
         bestStreak: 9,
         playedToday: false,
       },
+      { type: 'liveryStatus' as const, equipped: 'standard' as const, unlocked: ['standard' as const, 'champion' as const] },
+      { type: 'liveryUnlocked' as const, ids: ['gold_fork' as const] },
       {
         type: 'leagueResult' as const,
         weekKey: '2026-W49',

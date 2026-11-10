@@ -5,6 +5,7 @@ import type { Pose } from './motion.js';
 import type { Painter } from './painter.js';
 import { resolveCargoSpriteKey, teamColor } from './scenery.js';
 import { forkHeightM, isoZ } from './liftGeometry.js';
+import { liveryPaletteFor } from '../ui/liveries.js';
 
 export interface Part {
   cx: number;
@@ -49,7 +50,8 @@ export function vehicleParts(
 ): Part[] {
   const ca = Math.cos(p.a);
   const sa = Math.sin(p.a);
-  const team = teamColor(v);
+  const livery = liveryPaletteFor(v);
+  const team = livery?.primary ?? teamColor(v);
   const theme = getSiteTheme(siteId);
   const parts: Part[] = [];
   const model = modelOf(v.type);
@@ -81,6 +83,7 @@ export function vehicleParts(
   if (model === 'agv') {
     add(0, 0, 0.9, 0.52, 1.5, 6, '#E2E8F0');
     add(0, 0, 0.84, 0.46, 7.5, 1.6, team);
+    if (livery?.accent) add(0, 0, 0.86, 0.14, 9.1, 0.3, livery.accent); // livery deck stripe
     add(0.38, 0, 0.1, 0.3, 7.5, 5, '#334155'); // LiDAR sensor bar
     add(0.41, 0, 0.06, 0.22, 9.2, 1.6, '#38BDF8'); // LiDAR optical lens
     cargoAt(-0.02, 9.2);
@@ -89,7 +92,19 @@ export function vehicleParts(
     const wid = reach ? 0.38 : 0.48;
     for (const sx of [-0.22, 0.24]) for (const sy of [-1, 1]) add(sx, sy * (wid / 2 + 0.02), 0.2, 0.1, 0, 5, '#1E293B');
     add(-0.04, 0, reach ? 0.62 : 0.74, wid, 3, 7, '#94A3B8');
-    add(-0.36, 0, 0.26, wid, 3, reach ? 9 : 13, team); // counterweight carries the team colour
+    const cwH = reach ? 9 : 13;
+    add(-0.36, 0, 0.26, wid, 3, cwH, team); // counterweight carries the team / livery colour
+    if (livery?.accent) {
+      // Livery decal: slightly oversized thin boxes so they paint over the counterweight faces.
+      const a = livery.accent;
+      if (livery.accentKind === 'trim') add(-0.36, 0, 0.27, wid + 0.01, 3 + cwH - 1.2, 1.2, a);
+      else if (livery.accentKind === 'stripe') add(-0.36, 0, 0.27, wid + 0.01, 3 + cwH * 0.45, 1.8, a);
+      else if (livery.accentKind === 'band') add(0.08, 0, 0.5, wid + 0.01, 8, 1.6, a);
+      else if (livery.accentKind === 'chevron') {
+        for (const sy of [-1, 1]) add(-0.49, sy * 0.1, 0.02, 0.1, 3 + cwH * 0.35, 2, a);
+        add(-0.49, 0, 0.02, 0.1, 3 + cwH * 0.35 + 2, 2, a);
+      }
+    }
     // Operator seat & console detail
     add(-0.1, 0, 0.2, 0.22, 10, 4.5, '#0F172A');
     if (!reach) {
@@ -202,7 +217,7 @@ export function drawVehicle(
   siteId = s.siteId ?? 'den-1',
 ): void {
   const ctx = pt.ctx;
-  const team = teamColor(v);
+  const team = liveryPaletteFor(v)?.primary ?? teamColor(v);
   ctx.save();
   ctx.globalAlpha = s.dim ? 0.4 : 1;
   pt.poly(pt.circleGrid(p.x, p.y, 0.62), 'rgba(15,23,42,0.16)'); // contact shadow

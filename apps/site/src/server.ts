@@ -36,6 +36,14 @@ import {
   dayKey,
   weekKey,
   displayStreak,
+  GOLD_FORK_DAILY_RANK,
+  LIVERIES,
+  LIVERY_COOLDOWN_MS,
+  isLiveryId,
+  liveryIndex,
+  newlyUnlocked,
+  unlockedLiveries,
+  type LiveryId,
 } from '@warehouse/protocol';
 import {
   ArmorGuard,
@@ -90,7 +98,9 @@ import {
 } from '@warehouse/sim';
 import {
   InMemoryPersistenceStore,
+  liveryProfileOf,
   type PersistenceStore,
+  type PlayerProfileDoc,
 } from './persistence.js';
 import {
   createPublicIdMapper,
@@ -647,6 +657,8 @@ export interface ConnectedClient {
   streamBudget?: number;
   /** Wall-clock ms the stream budget was last accrued. */
   streamBudgetAtMs?: number;
+  /** Wall-clock ms of the last accepted `setLivery` (cooldown). */
+  lastLiveryAtMs?: number;
 }
 
 export interface SiteServerOptions {
@@ -860,11 +872,80 @@ export async function createSiteServer(
           bestStreak: p?.bestDailyStreak ?? 0,
           playedToday: last === today,
         });
+        applyStoredLivery(conn, p);
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[${siteId}] daily status read failed: ${message}`);
       });
+  }
+
+  /** Human (non-bot) vehicles owned or driven by `cid`. */
+  function ownedHumanVehicles(cid: string): Vehicle[] {
+    return world.vehicles.filter(
+      (x) => x.human && !x.isBot && (x.ownerClientId === cid || x.controlledByClientId === cid),
+    );
+  }
+
+  /**
+   * Re-applies the stored livery to the driver's vehicle on join / resume and privately sends
+   * `liveryStatus`. A stored livery that is no longer unlocked falls back to `standard`.
+   */
+  function applyStoredLivery(conn: ConnectedClient, p: PlayerProfileDoc | null): void {
+    if (conn.isBot || !conn.clientId) return;
+    const unlocked = unlockedLiveries(liveryProfileOf(p));
+    const stored = p?.livery;
+    const equipped: LiveryId = isLiveryId(stored) && unlocked.includes(stored) ? stored : 'standard';
+    for (const v of ownedHumanVehicles(conn.clientId)) v.livery = liveryIndex(equipped);
+    sendTo(conn.socket, { type: 'liveryStatus', equipped, unlocked });
+  }
+
+  /**
+   * Handles `setLivery`: validates the id, re-reads the profile, rejects locked liveries, then
+   * persists, repaints the driver's vehicle, and confirms with `liveryStatus`. Errors are sent to
+   * the requester; nothing is applied unless the profile proves the unlock.
+   */
+  function handleSetLivery(conn: ConnectedClient, rawId: string, nowMs: number): void {
+    const cid = conn.clientId;
+    const fail = (code: string, message: string): void => sendTo(conn.socket, { type: 'error', code, message });
+    if (conn.isBot || !cid) return fail('livery_failed', 'Only drivers can equip liveries.');
+    if (!isLiveryId(rawId)) return fail('livery_invalid', `Unknown livery "${rawId.slice(0, 40)}".`);
+    if (conn.lastLiveryAtMs !== undefined && nowMs - conn.lastLiveryAtMs < LIVERY_COOLDOWN_MS) {
+      return fail('livery_rate_limited', 'Changing paint too fast. Try again in a moment.');
+    }
+    conn.lastLiveryAtMs = nowMs;
+    const id = rawId;
+    persistence
+      .getPlayerStats(cid)
+      .then(async (p) => {
+        const unlocked = unlockedLiveries(liveryProfileOf(p));
+        if (!unlocked.includes(id)) {
+          fail('livery_locked', `${LIVERIES[id].name} is locked. ${LIVERIES[id].rule}`);
+          return;
+        }
+        // No profile yet means only `standard` is unlocked, which is already the default.
+        if (p) await persistence.setPlayerLivery(cid, id, nowMs);
+        for (const v of ownedHumanVehicles(cid)) v.livery = liveryIndex(id);
+        sendToOwner(cid, { type: 'liveryStatus', equipped: id, unlocked });
+        broadcastDelta(pendingEvents.splice(0), true, Date.now());
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[${siteId}] livery write failed: ${message}`);
+        fail('livery_failed', 'Your livery could not be saved. Please try again.');
+      });
+  }
+
+  /** Tells the driver which liveries a finished run unlocked (profile before vs after). */
+  async function sendNewUnlocks(cid: string, before: PlayerProfileDoc | null): Promise<void> {
+    try {
+      const after = await persistence.getPlayerStats(cid);
+      const ids = newlyUnlocked(liveryProfileOf(before), liveryProfileOf(after));
+      if (ids.length > 0) sendToOwner(cid, { type: 'liveryUnlocked', ids });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[${siteId}] livery unlock read failed: ${message}`);
+    }
   }
 
   async function persistVehicleStats(
@@ -919,6 +1000,19 @@ export async function createSiteServer(
         ...(runMode === 'daily' && typeof v.dailyKey === 'string' ? { dailyKey: v.dailyKey } : {}),
       });
     }
+    // Livery unlocks: snapshot the profile before this run's writes (finished human runs only).
+    const trackUnlocks = !alreadyPersisted && Boolean(v.runFinished) && human;
+    let before: PlayerProfileDoc | null = null;
+    let beforeOk = false;
+    if (trackUnlocks) {
+      try {
+        before = await persistence.getPlayerStats(cid);
+        beforeOk = true;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[${siteId}] livery baseline read failed: ${message}`);
+      }
+    }
     await persistence.recordRunStats({
       clientId: cid,
       name: playerName,
@@ -932,6 +1026,7 @@ export async function createSiteServer(
     });
     if (daily) await recordDailyCompletion(cid, playerName, daily, nowMs);
     if (league) await recordLeagueCompletion(cid, playerName, league, nowMs);
+    if (trackUnlocks && beforeOk) await sendNewUnlocks(cid, before);
   }
 
   /**
@@ -1013,6 +1108,14 @@ export async function createSiteServer(
         streak: rec.streak,
         streakDelta: rec.streakDelta,
       });
+      if (rank <= GOLD_FORK_DAILY_RANK) {
+        try {
+          await persistence.recordDailyTop10(cid, daily.dayKey);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(`[${siteId}] daily top-10 write failed for ${daily.dayKey}: ${message}`);
+        }
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[${siteId}] daily result write failed for ${daily.dayKey}: ${message}`);
@@ -1367,6 +1470,7 @@ export async function createSiteServer(
             }
           : null,
         ...vehicleDetail(v),
+        ...(v.human && !v.isBot ? { livery: v.livery ?? 0 } : {}),
       };
     });
 
@@ -2918,6 +3022,12 @@ export async function createSiteServer(
 
       case 'dispatchersCallPref': {
         conn.dispatchersCallOptOut = !msg.enabled;
+        break;
+      }
+
+      case 'setLivery': {
+        conn.lastHumanActivityAt = nowMs;
+        handleSetLivery(conn, msg.id, nowMs);
         break;
       }
 

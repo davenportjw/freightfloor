@@ -624,6 +624,8 @@ export interface Vehicle {
   } | null;
   lastTacticsReqAt: number;
   target: VehicleTarget | null;
+  /** Equipped cosmetic livery (`LIVERY_IDS` index; human drivers only). Never affects stats. */
+  livery?: number;
   /** Combo step index into COMBO_STEPS (0 = 1.0×, 3 = 2.0× cap). Optional for old snapshots. */
   comboStep?: number;
   /** Current combo multiplier (mirrors COMBO_STEPS[comboStep]). */

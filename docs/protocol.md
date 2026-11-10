@@ -158,7 +158,8 @@ type ClientMessage =
   | { type: 'a2uiAction'; screenId: string; actionId: string; dispatch?: DispatchParams; managerOp?: ManagerOp }
   | { type: 'setRunMode'; mode: RunMode }
   | { type: 'acceptRelocation'; targetSite: SiteId }
-  | { type: 'dispatchersCallPref'; enabled: boolean };
+  | { type: 'dispatchersCallPref'; enabled: boolean }
+  | { type: 'setLivery'; id: string };
 ```
 
 | `type` | Fields | Description |
@@ -179,6 +180,7 @@ type ClientMessage =
 | `a2uiAction` | `screenId: string`, `actionId: string`, `dispatch?: DispatchParams`, `managerOp?: ManagerOp` | Submits an interactive A2UI clarification screen selection. For a Dispatcher's Call card, `screenId` is the minigame `id` and `actionId` is `dc-opt-<idx>`; the server executes its own stored option and ignores `dispatch` (§3.7). |
 | `setRunMode` | `mode: 'blitz' \| 'freerange' \| 'daily'` | Switches the driver's active run mode between 3-Minute Blitz (`'blitz'`), Free Range (`'freerange'`) and the Daily Shift (`'daily'`). `isTimedRun(mode)` is true for `'blitz'` and `'daily'` (both run the personal 3-minute clock). |
 | `acceptRelocation` | `targetSite: SiteId` | Accepts a Cross-Site Surge Relocation offer, awarding `+75` relocation bonus points and minting a carry-over ticket to `targetSite`. |
+| `setLivery` | `id: string` (a `LiveryId`, ≤ 40 chars) | Equips a cosmetic forklift livery (§3.8). Human drivers only. The site re-reads the player's profile and checks `unlockedLiveries(profile)`: an unknown id gets `error` `livery_invalid`, a locked one `error` `livery_locked`, a failed profile read/write `error` `livery_failed`. On success the vehicle's `livery` changes on the next full delta, `players/{clientId}.livery` is persisted, and the owner receives `liveryStatus`. |
 | `dispatchersCallPref` | `enabled: boolean` | Per-connection opt-out of the Dispatcher's Call minigame (§3.7). The client sends `enabled: false` after `welcome` when the player turned it off. |
 
 ---
@@ -206,7 +208,9 @@ type ServerMessage =
   | { type: 'dailyResult'; dailyKey: string; pts: number; dailyBest: number; improved: boolean; dailyRank: number; dailyOf: number; attempts: number; streak: number; streakDelta: number }
   | { type: 'runSummary'; runMode: RunMode; pts: number; deliveries: number; tape: string; dailyKey?: string }
   | { type: 'dailyStatus'; dailyKey: string; streak: number; bestStreak: number; playedToday: boolean }
-  | { type: 'leagueResult'; weekKey: string; pts: number; weekPts: number; delta: number; counted: boolean; runsCounted: number; rank: number; of: number };
+  | { type: 'leagueResult'; weekKey: string; pts: number; weekPts: number; delta: number; counted: boolean; runsCounted: number; rank: number; of: number }
+  | { type: 'liveryStatus'; equipped: LiveryId; unlocked: LiveryId[] }
+  | { type: 'liveryUnlocked'; ids: LiveryId[] };
 ```
 
 | `type` | Fields | Description |
@@ -229,6 +233,8 @@ type ServerMessage =
 | `runSummary` | `runMode`, `pts`, `deliveries`, `tape`, `dailyKey?` | Private: sent to a human driver's own sockets once, the moment their run finishes (clock reached 00:00). `tape` is the exact server `runTape` (`RunTapeSchema`: `O` on-time, `L` late, `X` incident, ≤ 40 chars) for the share card; it is never broadcast in `delta`. `dailyKey` is set for Daily runs. |
 | `dailyStatus` | `dailyKey`, `streak`, `bestStreak`, `playedToday` | Private: sent once after `welcome` to human drivers from their stored profile. `streak` is the read-decayed Daily streak (`displayStreak`, 0 after a missed day); `playedToday` is true when the player already completed today's Daily. Not sent when the profile read fails (the failure is logged). |
 | `leagueResult` | `weekKey`, `pts`, `weekPts`, `delta`, `counted`, `runsCounted`, `rank`, `of` | Private: sent only to the finishing human driver's sockets after a timed run (Blitz or Daily) is folded into their Weekly League entry. `counted` is false (and `delta` 0) when the run did not beat their 10th-best run of the week; `rank`/`of` are their league standing among the week's entrants. Bots never write. On a store failure the driver gets `error` `league_record_failed` instead. |
+| `liveryStatus` | `equipped: LiveryId`, `unlocked: LiveryId[]` | Private: sent to a human driver after `welcome` (from `players/{clientId}`) and after every accepted `setLivery`. A failed profile read is logged and nothing is sent. |
+| `liveryUnlocked` | `ids: LiveryId[]` (≥ 1) | Private: sent to the finishing human driver after a finished run's stats, Daily and League writes land, listing liveries the run newly unlocked (`newlyUnlocked(before, after)`). The client shows an unlock toast and fires GA4 `unlock_achievement`. |
 
 **Opaque player ids on the wire**: every `clientId` the site sends (`welcome.you.clientId`, `presence.players[].clientId`, `snapshot.vehicles[].ownerClientId`/`controlledByClientId`, `snapshot.players`, `snapshot.difficultyVotes` / `delta.votes` keys, `snapshot.cards` / `delta.hands` keys, `completedRuns[].clientId`, and event `clientId` / `owner` / `player` fields) is the player's **publicId** (`p1_…`, same derivation as the lobby), never the raw clientId. The mapping is uniform, so the recipient's own id is also its publicId and client-side equality checks work unchanged. The sim, Firestore snapshots, and heartbeats keep raw clientIds internally.
 
@@ -293,6 +299,7 @@ type FloorOrdersStatus = {
 | `tactics` | `VehicleTacticsSchema` = `{ speed, respect, buffer, chargeAt, batch: number; flatPath, preemptForP0, poach: boolean; note?: string }` | Current tuned tactics (numbers rounded to 2 dp). |
 | `path` | `number[]` (ints) | Flattened `[x0, y0, x1, y1, …]` of the first `MAX_PATH_WAYPOINTS` planned waypoints. |
 | `extra` | `boolean` | Vehicle was added above the base fleet. |
+| `livery?` | `number` (int ≥ 0) | Equipped cosmetic livery of a human driver as its index in `LIVERY_IDS` (`0` = `standard`), sent on every full delta for human (non-bot) vehicles so a change shows within `BOARD_INTERVAL_MS`. Omitted for AI and bots. Decode with `liveryFromIndex`. See §3.8. |
 | `humanCharging?` | `boolean` | True when a human-driven vehicle is actively charging on a charger pad (`+5%/min`); included on full deltas and on light deltas for human vehicles. |
 | `decision?` | `VehicleDecisionSchema` = `{ kind: 'contract' \| 'hazard' \| 'tactics' \| 'cards'; model: string; latencyMs: number; reason: string; t: number }` | The last **applied** Gemini decision for this agent: real model id and measured call latency (ms, including the one retry if it happened). Absent until a real decision has been applied; never synthesised. |
 
@@ -396,6 +403,24 @@ See `docs/gameplay.md` §3c for the rules (window, situations, 8 s pick, scoring
 | `dispatchers_call_pick` | `vid, id, optionIdx, geminiIdx, agreed, orderIds, evalUntil` | The driver picked; the option was executed through `dispatchOrderRoute`. |
 | `dispatchers_call_result` | `vid, id, situation, optionIdx, geminiIdx, agreed, timedOut, dispatched, delivered, onTime, pts` | The outcome window closed (or the run ended, or the pick timed out with `pts: 0`). `pts` was added to `runPts` / `sPts`. |
 
+### 3.8 Forklift liveries (cosmetic)
+
+Liveries are paint jobs for a human driver's forklift. They never change stats. The catalog (`LIVERIES`) and the unlock rules (`unlockedLiveries`) live in `@warehouse/protocol` so the site, the lobby, and the client agree:
+
+| Livery | Unlock rule (profile field) |
+|---|---|
+| `standard` | Always. |
+| `night_shift` / `hi_vis` / `streak_30` | `bestDailyStreak` ≥ 3 / 7 / 30. |
+| `cold_chain` | `dailiesCompleted` ≥ 5. |
+| `century` | `totalDeliveries` ≥ 100. |
+| `gold_fork` | `dailyTop10s` ≥ 1 (a day finished in that Daily's top 10; counted once per day). |
+| `regional_den` / `regional_slc` / `regional_phx` / `regional_abq` | A Daily Shift completed on a site of that region (`dailySites`). |
+| `champion` | `leagueWins` ≥ 1 (written by the lobby's Weekly League finalizer). |
+
+Flow: after `welcome` the site sends `liveryStatus`. The client equips with `setLivery`, and the site validates against the stored profile, so locked liveries can't be forced from the client. The equipped id is persisted on `players/{clientId}.livery` and re-applied to the driver's vehicle on every join or resume. After a finished run's writes land, the site compares unlocks before and after and sends `liveryUnlocked` when the run unlocked something. A `champion` unlock comes from the lobby finalizer, not a run, so the client also toasts unlocks it hasn't seen before when `liveryStatus` arrives.
+
+Rendering is procedural. The client recolours the forklift body, counterweight, and team ring with the livery palette and paints the accent decal. There are no per-livery sprite sheets.
+
 ---
 
 ## 3a. Daily Shift helpers (`@warehouse/protocol` §9)
@@ -426,6 +451,10 @@ Shared by the sim, site, lobby and client so every shard agrees on the day's Dai
 | `nextLeagueRuns(topRuns, pts)` | Pure fold of one run into a player's week: counts while fewer than 10 runs or when `pts` beats the 10th best (which is evicted). Returns `{ topRuns (desc), weekPts, delta, counted }`. |
 | `LeagueRowSchema` / `LeaguePodiumEntrySchema` / `LeagueResponseSchema` | `GET /api/league` row, podium place, and response `{ weekKey, endsAt, top, entrants, you?, finalized, podium? }`. |
 | `LeagueResultMessageSchema` | The private `leagueResult` server message (§3). |
+| `LIVERY_IDS` / `LiveryIdSchema` / `LIVERIES` | Cosmetic livery catalog (§3.8). The index in `LIVERY_IDS` is the wire value of `QuantisedVehicleDelta.livery`; only append. Each `LiveryDef` is `{ id, name, primary, dark, light, accent?, accentKind?, rule }`. |
+| `liveryIndex(id)` / `liveryFromIndex(i)` / `isLiveryId(x)` / `regionalLiveryFor(siteId)` | Wire index helpers (unknown index → `standard`) and the region livery for a site id (overflow sites count for their region). |
+| `unlockedLiveries(profile)` / `newlyUnlocked(before, after)` | Pure unlock rules over `LiveryProfile { bestDailyStreak, dailiesCompleted, totalDeliveries, dailyTop10s, dailySites, leagueWins }`. |
+| `SetLiveryMessageSchema` / `LiveryStatusMessageSchema` / `LiveryUnlockedMessageSchema` | `setLivery` (client) and the private `liveryStatus` / `liveryUnlocked` server messages. |
 
 `CompletedRunRecord` (sim, persisted with completed runs) gains `dailyKey?: string \| null` on daily runs and `tape?: string` on every run (`O` on-time, `L` late, `X` incident; max `RUN_TAPE_MAX = 40`).
 

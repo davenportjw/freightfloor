@@ -4,7 +4,7 @@
  *   Floor   — Team Standings (B) · Fleet · Drivers (online count) · Value created · Network
  *   View    — Layers ▸ · Day history (H) · HUD Full / Minimal (V)
  *   Co-Pilot— Tune Co-Pilot (G)
- *   Game    — Settings · Leaderboard & awards (L) · How to play (?)
+ *   Game    — Garage · Settings · Leaderboard & awards (L) · How to play (?)
  *
  * Team Standings has its own flyout element (`#standFly`, ui/teamStandings.ts). The other flyouts
  * reuse the existing panel modules (fleet, presence, value chart, network) mounted into sections
@@ -15,6 +15,7 @@ import type { RenderLayers } from '../renderer.js';
 import type { UiCtx, UiModule } from './context.js';
 import { el, kbd, KeyedView } from './dom.js';
 import { mountFleet } from './fleet.js';
+import { mountGarage } from './garage.js';
 import { mountNetwork } from './network.js';
 import type { PanelHandle } from './panel.js';
 import { mountPresence, presenceView } from './presence.js';
@@ -38,6 +39,7 @@ export const FLYOUT_TITLES: Record<FlyoutId, string> = {
   value: 'Value created',
   network: 'Network',
   layers: 'Layers',
+  garage: 'Garage',
   settings: 'Settings',
 };
 
@@ -152,6 +154,7 @@ export function mountMenu(menuBtn: HTMLElement, root: HTMLElement, ctx: UiCtx): 
         [
           'Game',
           [
+            { label: 'Garage', active: fly === 'garage', attrs: { 'data-flyout': 'garage' }, onClick: () => actions.setFlyout('garage') },
             { label: 'Settings', active: fly === 'settings', attrs: { 'data-flyout': 'settings' }, onClick: () => actions.setFlyout('settings') },
             {
               label: 'Leaderboard & awards',
@@ -227,7 +230,7 @@ export function mountFlyouts(root: HTMLElement, ctx: UiCtx): UiModule & { panels
   const close = el('button', { class: 'x', text: '✕', title: 'Close (Esc)', attrs: { type: 'button', 'aria-label': 'Close' } });
   close.addEventListener('click', () => ctx.actions.setFlyout(null));
   root.append(el('div', { class: 'fly-head' }, [title, close]));
-  for (const id of ['fleet', 'drivers', 'value', 'network', 'layers', 'settings'] as FlyoutId[]) {
+  for (const id of ['fleet', 'drivers', 'value', 'network', 'layers', 'garage', 'settings'] as FlyoutId[]) {
     const s = el('div', { class: `fly-section fly-${id}`, attrs: { 'data-flyout-section': id } });
     s.hidden = true;
     sections.set(id, s);
@@ -237,6 +240,7 @@ export function mountFlyouts(root: HTMLElement, ctx: UiCtx): UiModule & { panels
   const presence = mountPresence(sections.get('drivers')!, ctx);
   const value = mountValueChart(sections.get('value')!, ctx);
   const network = mountNetwork(sections.get('network')!, ctx);
+  const garage = mountGarage(sections.get('garage')!, ctx);
   const panels = [fleet.panel, value.panel, network.panel];
   for (const p of panels) p.setState('open', false);
 
@@ -337,6 +341,7 @@ export function mountFlyouts(root: HTMLElement, ctx: UiCtx): UiModule & { panels
           }),
         );
       }
+      if (id === 'garage') garage.update();
       if (id === 'settings') {
         const headingUp = getCamMode() === 'headingUp';
         driveCamBtn.textContent = `Drive Camera: ${headingUp ? 'Forklift Up (Rotate Floor)' : 'Fixed Floor'}`;

@@ -2142,4 +2142,79 @@ describe('M2 & M3: @warehouse/site server, brain scheduler, governance, and armo
     expect(JSON.stringify(entries)).not.toContain('league-blitz');
     expect(await store.getLeagueRank(week, 0)).toEqual({ rank: 3, of: 2 });
   });
+  it('37. applies stored liveries on join, validates setLivery, and announces run unlocks', async () => {
+    const { server, wsUrl } = await bootServer();
+    const store = server.persistence;
+    const base = {
+      isBot: false,
+      totalDeliveries: 0,
+      totalScore: 0,
+      shiftsPlayed: 1,
+      lastSiteId: 'den-1' as const,
+      updatedAt: Date.now(),
+    };
+    await store.upsertPlayerStats({ ...base, clientId: 'livery-a', name: 'Painter', bestDailyStreak: 3, livery: 'night_shift' });
+    // A stored livery that is no longer unlocked falls back to standard.
+    await store.upsertPlayerStats({ ...base, clientId: 'livery-c', name: 'Racer', livery: 'champion' });
+    const join = async (cid: string, name: string, isBot = false) => {
+      const client = await connectWsClient(`${wsUrl}?ticket=${encodeURIComponent(makeTicket(cid, name, { isBot }))}`);
+      activeClients.push(client);
+      const welcome = await client.waitForType('welcome');
+      return { client, v: server.world.vehicles.find((x) => x.id === welcome.you.vid)! };
+    };
+
+    const a = await join('livery-a', 'Painter');
+    expect(await a.client.waitForType('liveryStatus')).toEqual({
+      type: 'liveryStatus',
+      equipped: 'night_shift',
+      unlocked: ['standard', 'night_shift'],
+    });
+    expect(a.v.livery).toBe(1);
+
+    // Unknown ids are rejected before the cooldown is consumed.
+    a.client.send({ type: 'setLivery', id: 'rainbow' });
+    expect(await a.client.waitForType('error')).toMatchObject({ code: 'livery_invalid' });
+
+    a.client.send({ type: 'setLivery', id: 'standard' });
+    expect(await a.client.waitForType('liveryStatus')).toMatchObject({ equipped: 'standard' });
+    expect(a.v.livery).toBe(0);
+    expect((await store.getPlayerStats('livery-a'))?.livery).toBe('standard');
+    // The confirming full delta carries the human's livery index; AI vehicles carry none.
+    const delta = await a.client.waitForType('delta');
+    expect(delta.vehicles.find((x) => x.id === a.v.id)?.livery).toBe(0);
+    expect(delta.vehicles.find((x) => !x.human)?.livery).toBeUndefined();
+
+    a.client.send({ type: 'setLivery', id: 'night_shift' });
+    expect(await a.client.waitForType('error')).toMatchObject({ code: 'livery_rate_limited' });
+
+    const c = await join('livery-c', 'Racer');
+    expect(await c.client.waitForType('liveryStatus')).toMatchObject({ equipped: 'standard', unlocked: ['standard'] });
+    c.client.send({ type: 'setLivery', id: 'champion' });
+    expect(await c.client.waitForType('error')).toMatchObject({ code: 'livery_locked' });
+    expect(c.v.livery).toBe(0);
+
+    const bot = await join('livery-bot-1', 'BotDriver', true);
+
+    // A finished Daily at den-1 ranked #1 unlocks the regional and Gold Fork liveries.
+    c.v.runMode = 'daily';
+    c.v.dailyKey = dayKeyOf(Date.now());
+    c.v.runStartedAt = server.world.t - 180;
+    c.v.runEndsAt = server.world.t;
+    c.v.runFinished = true;
+    c.v.runDeliveries = 2;
+    c.v.deliveries = 2;
+    c.v.runPts = 200;
+    c.v.sPts = 200;
+    c.v.runTape = 'OO';
+    await server.stepTick(Date.now());
+    expect(await c.client.waitForType('liveryUnlocked')).toEqual({ type: 'liveryUnlocked', ids: ['gold_fork', 'regional_den'] });
+    const profile = await store.getPlayerStats('livery-c');
+    expect(profile).toMatchObject({ dailyTop10s: 1, lastDailyTop10Key: dayKeyOf(Date.now()), dailySites: ['den-1'] });
+    // Counted once per day.
+    expect(await store.recordDailyTop10('livery-c', dayKeyOf(Date.now()))).toBe(false);
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bot.client.messages.some((m) => m.type === 'liveryStatus' || m.type === 'liveryUnlocked')).toBe(false);
+    expect(a.client.messages.some((m) => m.type === 'liveryUnlocked')).toBe(false);
+  });
 });

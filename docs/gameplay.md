@@ -209,6 +209,24 @@ One league per ISO week (`weekKey`, e.g. `2026-W46`), starting Monday 00:00 UTC.
   - The results sheet of a Blitz or Daily run shows a league pill (`[data-role="league-rank"]`): `League: #14 this week (+212)`, `League: #14 this week · didn't beat your 10th-best run`, or `League not saved: <error>`. It appears only once the server answered.
   - The intro card shows last week's podium as a compact pill (`[data-role="intro-podium-pill"]`, `🏆 Last week: 1. Ada 1,900 · 2. …`) once that week is finalized. Clicking it opens This Week; ✕ dismisses it for that week (`localStorage['ff-league-podium-dismissed:<weekKey>']`).
 
+## 3f. Forklift Liveries
+
+Liveries are paint jobs for a human driver's forklift. They are cosmetic only and never change stats. Unlocks are earned by coming back, and the rules live in `@warehouse/protocol` (`LIVERIES`, `unlockedLiveries`), so every shard agrees:
+
+| Livery | How to unlock |
+|---|---|
+| Standard Issue | Every driver. |
+| Night Shift / Hi-Vis / Iron Shift | Best Daily Shift streak of 3 / 7 / 30 days. |
+| Cold Chain | Complete 5 Daily Shifts. |
+| Century | 100 lifetime deliveries. |
+| Gold Fork | Finish a day in that Daily's top 10 (`GOLD_FORK_DAILY_RANK`). |
+| Denver Hub / Salt Lake Nursery / Phoenix Fab / Albuquerque Roastery | Complete a Daily Shift on a site in that region. |
+| Champion | Win a Weekly League. |
+
+- **Garage** (☰ → Game → Garage): every livery as a card with a colour swatch. Locked cards show their rule. **Equip** sends `setLivery`; the site checks the stored profile, saves the choice on `players/{clientId}.livery`, and repaints the forklift for everyone. Equips are limited to one per second (`LIVERY_COOLDOWN_MS`). Errors (`livery_locked`, `livery_rate_limited`, `livery_failed`) show inline in the Garage. Spectators see *Join as a driver to paint your forklift*.
+- **Unlock toast**: `🎨 Livery unlocked: <name>` appears when a finished run unlocks something (`liveryUnlocked`) and, for unlocks that happen off-run such as Champion, the first time `liveryStatus` lists a livery this browser has not announced (`localStorage['ff.liveries.seen']`). The first load on a new browser marks everything seen without toasting.
+- **Rendering**: procedural. The counterweight (AGV deck), the team ring and the Cab View body use the livery colour, and the accent is drawn as a trim, stripe, band or chevron decal. There are no per-livery sprite sheets. AI vehicles keep their style colours.
+
 ## 4. Facility Tiers & Expansion (Up to Tier 6 / 60 Vehicles)
 
 Each warehouse site dynamically expands its floor plan as the active vehicle count grows:
@@ -329,7 +347,7 @@ The menu (`#menu`) opens flyouts beside it:
 | Floor | **Team Standings** (`B`) · Fleet · Drivers (online count) · Value created · Network (live sites, Switch) |
 | View | Layers ▸ (Routes · Traffic heat · Labels · Ghost planner) · Day history (`H`, the drawer) · HUD Full / Minimal (`V`) · Drive camera (`R`, `Fixed floor` / `Forklift up`) · Cab View (`P`, first person) |
 | Co-Pilot | Tune Co-Pilot (`G`, Co-Pilot & Agent Designer modal) |
-| Game | Settings (camera fit/zoom, Drive Camera orientation toggle, Rack Lift Minigame, Dispatcher's Call) · Leaderboard & awards (`L`) · How to play (`?`) |
+| Game | Garage (forklift liveries) · Settings (camera fit/zoom, Drive Camera orientation toggle, Rack Lift Minigame, Dispatcher's Call) · Leaderboard & awards (`L`) · How to play (`?`) |
 
 - **Team Standings** (`#standFly`, formerly the Strategy board): every AI driving style and the Humans, ranked by orders/hr **per truck** (so a style does not win by headcount), from the server's `stats.board`. Clicking a row highlights that team on the floor.
 - **🏆 Leaderboard & awards** (`[data-action="open-leaderboard-modal"]`, `L`) opens the **Full-Screen Leaderboard & Silly Superlatives** modal (`#leaderboardModal`). It shows Live Shift Standings, Floor Superlatives & Silly Awards, and Cross-Site Network Champions & Shift Hall of Fame. A **📅 Today** tab shows today's Daily Shift board (section 3d).

@@ -8,7 +8,7 @@
  * Privacy: events never carry display names, client IDs, publicIds, resume codes, vehicle IDs, or
  * free text typed by the player (manager orders and agent commands send only their kind).
  */
-import type { ClientMessage, ServerMessage } from '@warehouse/protocol';
+import { isLiveryId, type ClientMessage, type LiveryId, type ServerMessage } from '@warehouse/protocol';
 
 export type AnalyticsParams = Record<string, string | number | boolean>;
 export interface AnalyticsEvent {
@@ -62,9 +62,17 @@ export function eventForClientMessage(msg: ClientMessage): AnalyticsEvent | null
       return { name: 'relocation_accept', params: {} };
     case 'dispatchersCallPref':
       return { name: 'dispatchers_call_pref', params: { enabled: msg.enabled } };
+    case 'setLivery':
+      // Catalog ids only (never raw text the site would reject).
+      return isLiveryId(msg.id) ? { name: 'livery_equip', params: { livery_id: msg.id } } : null;
     default:
       return null;
   }
+}
+
+/** GA4 recommended `unlock_achievement`, one per newly announced livery. */
+export function unlockEvents(ids: readonly LiveryId[]): AnalyticsEvent[] {
+  return ids.map((id) => ({ name: 'unlock_achievement', params: { achievement_id: `livery_${id}` } }));
 }
 
 /** Seat on a site (lobby join or queued seat claim). */

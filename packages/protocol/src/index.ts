@@ -680,6 +680,38 @@ export const DispatchersCallPrefMessageSchema = z.object({
 });
 export type DispatchersCallPrefMessage = z.infer<typeof DispatchersCallPrefMessageSchema>;
 
+/**
+ * Stable livery order. A livery's index in this tuple is its wire value
+ * (`QuantisedVehicleDelta.livery`), so only ever APPEND new ids.
+ */
+export const LIVERY_IDS = [
+  'standard',
+  'night_shift',
+  'hi_vis',
+  'cold_chain',
+  'century',
+  'gold_fork',
+  'regional_den',
+  'regional_slc',
+  'regional_phx',
+  'regional_abq',
+  'champion',
+  'streak_30',
+] as const;
+export const LiveryIdSchema = z.enum(LIVERY_IDS);
+export type LiveryId = z.infer<typeof LiveryIdSchema>;
+
+/**
+ * Client → site: equip an unlocked livery. `id` is a plain string so the site can answer an
+ * unknown id with `livery_invalid` (and a locked one with `livery_locked`) instead of a generic
+ * `invalid_message`.
+ */
+export const SetLiveryMessageSchema = z.object({
+  type: z.literal('setLivery'),
+  id: z.string().min(1).max(40),
+});
+export type SetLiveryMessage = z.infer<typeof SetLiveryMessageSchema>;
+
 export const ClientMessageSchema = z
   .discriminatedUnion('type', [
     HelloMessageSchema,
@@ -699,6 +731,7 @@ export const ClientMessageSchema = z
     SetRunModeMessageSchema,
     AcceptRelocationMessageSchema,
     DispatchersCallPrefMessageSchema,
+    SetLiveryMessageSchema,
   ])
   .superRefine((m, ctx) => {
     if (
@@ -731,6 +764,7 @@ export const CLIENT_MESSAGE_TYPES = [
   'setRunMode',
   'acceptRelocation',
   'dispatchersCallPref',
+  'setLivery',
 ] as const;
 
 // ============================================================================
@@ -918,6 +952,8 @@ export const QuantisedVehicleDeltaSchema = z.object({
   autopilot: z.boolean().optional(),
   /** Active Co-Pilot / Agent Designer directive on this vehicle. */
   directive: AgentDirectiveSchema.nullable().optional(),
+  /** Equipped livery wire index (`LIVERY_IDS`), human drivers on FULL deltas only. */
+  livery: z.number().int().nonnegative().optional(),
 });
 export const VehicleDeltaSchema = QuantisedVehicleDeltaSchema;
 export const WireVehicleSchema = QuantisedVehicleDeltaSchema;
@@ -1560,6 +1596,21 @@ export const LeagueResultMessageSchema = z.object({
 });
 export type LeagueResultMessage = z.infer<typeof LeagueResultMessageSchema>;
 
+/** Site → owner: equipped livery and every unlocked id (after `welcome` and after `setLivery`). */
+export const LiveryStatusMessageSchema = z.object({
+  type: z.literal('liveryStatus'),
+  equipped: LiveryIdSchema,
+  unlocked: z.array(LiveryIdSchema),
+});
+export type LiveryStatusMessage = z.infer<typeof LiveryStatusMessageSchema>;
+
+/** Site → owner: liveries newly unlocked by the run that just finished. */
+export const LiveryUnlockedMessageSchema = z.object({
+  type: z.literal('liveryUnlocked'),
+  ids: z.array(LiveryIdSchema).min(1),
+});
+export type LiveryUnlockedMessage = z.infer<typeof LiveryUnlockedMessageSchema>;
+
 export const ServerMessageSchema = z.discriminatedUnion('type', [
   WelcomeMessageSchema,
   DeltaMessageSchema,
@@ -1579,6 +1630,8 @@ export const ServerMessageSchema = z.discriminatedUnion('type', [
   RunSummaryMessageSchema,
   DailyStatusMessageSchema,
   LeagueResultMessageSchema,
+  LiveryStatusMessageSchema,
+  LiveryUnlockedMessageSchema,
 ]);
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;
 
@@ -1601,6 +1654,8 @@ export const SERVER_MESSAGE_TYPES = [
   'runSummary',
   'dailyStatus',
   'leagueResult',
+  'liveryStatus',
+  'liveryUnlocked',
 ] as const;
 
 // ============================================================================
@@ -2390,3 +2445,231 @@ export const LeagueResponseSchema = z.object({
   podium: z.array(LeaguePodiumEntrySchema).max(LEAGUE_PODIUM_SIZE).optional(),
 });
 export type LeagueResponse = z.infer<typeof LeagueResponseSchema>;
+
+// ============================================================================
+// Unlockable Forklift Liveries (cosmetic only — never a stat bonus)
+// ============================================================================
+
+
+/** Optional decal painted on top of the body (procedural renderer). */
+export type LiveryAccent = 'trim' | 'stripe' | 'chevron' | 'band';
+
+export interface LiveryDef {
+  id: LiveryId;
+  name: string;
+  /** Body / counterweight colour. */
+  primary: string;
+  /** Shaded side colour. */
+  dark: string;
+  /** Highlight colour. */
+  light: string;
+  /** Decal colour (trim, stripe, chevron or band). */
+  accent?: string;
+  accentKind?: LiveryAccent;
+  /** Player-facing unlock rule. */
+  rule: string;
+}
+
+/** Livery catalog. `standard` matches the existing human teal so nothing changes by default. */
+export const LIVERIES: Record<LiveryId, LiveryDef> = {
+  standard: {
+    id: 'standard',
+    name: 'Standard Issue',
+    primary: '#0D9488',
+    dark: '#0F766E',
+    light: '#5EEAD4',
+    rule: 'Unlocked for every driver.',
+  },
+  night_shift: {
+    id: 'night_shift',
+    name: 'Night Shift',
+    primary: '#2B2F36',
+    dark: '#16191E',
+    light: '#4B5260',
+    accent: '#FACC15',
+    accentKind: 'trim',
+    rule: 'Reach a 3-day Daily Shift streak.',
+  },
+  hi_vis: {
+    id: 'hi_vis',
+    name: 'Hi-Vis',
+    primary: '#D9F99D',
+    dark: '#A3C21A',
+    light: '#F7FEE7',
+    accent: '#E5E7EB',
+    accentKind: 'stripe',
+    rule: 'Reach a 7-day Daily Shift streak.',
+  },
+  cold_chain: {
+    id: 'cold_chain',
+    name: 'Cold Chain',
+    primary: '#7DD3FC',
+    dark: '#3B9BC8',
+    light: '#E0F2FE',
+    accent: '#FFFFFF',
+    accentKind: 'band',
+    rule: 'Complete 5 Daily Shifts.',
+  },
+  century: {
+    id: 'century',
+    name: 'Century',
+    primary: '#7F1D1D',
+    dark: '#561313',
+    light: '#B04646',
+    accent: '#FDF6E3',
+    accentKind: 'stripe',
+    rule: 'Deliver 100 pallets in total.',
+  },
+  gold_fork: {
+    id: 'gold_fork',
+    name: 'Gold Fork',
+    primary: '#D4A017',
+    dark: '#9C7410',
+    light: '#F5D76E',
+    accent: '#111111',
+    accentKind: 'trim',
+    rule: 'Finish in the top 10 of a Daily Shift.',
+  },
+  regional_den: {
+    id: 'regional_den',
+    name: 'Denver Hub',
+    primary: '#D97706',
+    dark: '#A35905',
+    light: '#F7B35A',
+    accent: '#FFFFFF',
+    accentKind: 'band',
+    rule: 'Complete a Daily Shift at the Denver site.',
+  },
+  regional_slc: {
+    id: 'regional_slc',
+    name: 'Salt Lake Nursery',
+    primary: '#16A34A',
+    dark: '#0F7535',
+    light: '#6EDB95',
+    accent: '#FFFFFF',
+    accentKind: 'band',
+    rule: 'Complete a Daily Shift at the Salt Lake City site.',
+  },
+  regional_phx: {
+    id: 'regional_phx',
+    name: 'Phoenix Fab',
+    primary: '#0284C7',
+    dark: '#015F8F',
+    light: '#5BBDEB',
+    accent: '#FFFFFF',
+    accentKind: 'band',
+    rule: 'Complete a Daily Shift at the Phoenix site.',
+  },
+  regional_abq: {
+    id: 'regional_abq',
+    name: 'Albuquerque Roastery',
+    primary: '#C2410C',
+    dark: '#8E2F09',
+    light: '#EB8457',
+    accent: '#FFFFFF',
+    accentKind: 'band',
+    rule: 'Complete a Daily Shift at the Albuquerque site.',
+  },
+  champion: {
+    id: 'champion',
+    name: 'Champion',
+    primary: '#F8FAFC',
+    dark: '#CBD5E1',
+    light: '#FFFFFF',
+    accent: '#DC143C',
+    accentKind: 'chevron',
+    rule: 'Win a Weekly League.',
+  },
+  streak_30: {
+    id: 'streak_30',
+    name: 'Iron Shift',
+    primary: '#4B5563',
+    dark: '#2F3640',
+    light: '#7B8594',
+    accent: '#F97316',
+    accentKind: 'stripe',
+    rule: 'Reach a 30-day Daily Shift streak.',
+  },
+};
+
+/** Wire index of a livery (its position in `LIVERY_IDS`). */
+export function liveryIndex(id: LiveryId): number {
+  return LIVERY_IDS.indexOf(id);
+}
+
+/** Livery for a wire index; unknown / missing indices fall back to `standard`. */
+export function liveryFromIndex(i: number | null | undefined): LiveryId {
+  if (typeof i !== 'number' || !Number.isInteger(i)) return 'standard';
+  return LIVERY_IDS[i] ?? 'standard';
+}
+
+export function isLiveryId(id: unknown): id is LiveryId {
+  return typeof id === 'string' && (LIVERY_IDS as readonly string[]).includes(id);
+}
+
+/** Profile counters the unlock rules read (all optional; missing = 0 / none). */
+export interface LiveryProfile {
+  bestDailyStreak?: number;
+  dailiesCompleted?: number;
+  totalDeliveries?: number;
+  /** Distinct days finished in a Daily Shift's top 10. */
+  dailyTop10s?: number;
+  /** Sites a Daily Shift was completed on (overflow sites count for their region). */
+  dailySites?: readonly string[];
+  leagueWins?: number;
+}
+
+const REGIONAL_LIVERY_BY_PREFIX: Record<string, LiveryId> = {
+  den: 'regional_den',
+  slc: 'regional_slc',
+  phx: 'regional_phx',
+  abq: 'regional_abq',
+};
+
+/** Regional livery for a site id (`den-1`, `den-7` → `regional_den`), or null. */
+export function regionalLiveryFor(siteId: string): LiveryId | null {
+  const m = /^(den|slc|phx|abq)-\d+$/i.exec(siteId.trim());
+  return m ? (REGIONAL_LIVERY_BY_PREFIX[m[1].toLowerCase()] ?? null) : null;
+}
+
+/** A Daily Shift finish at or above this rank counts toward `dailyTop10s` (`gold_fork`). */
+export const GOLD_FORK_DAILY_RANK = 10;
+/** Minimum gap between accepted `setLivery` messages per connection. */
+export const LIVERY_COOLDOWN_MS = 1000;
+
+/** Pure: every livery the profile has unlocked, in catalog order. */
+export function unlockedLiveries(profile: LiveryProfile | null | undefined): LiveryId[] {
+  const p = profile ?? {};
+  const streak = p.bestDailyStreak ?? 0;
+  const regional = new Set<LiveryId>();
+  for (const s of p.dailySites ?? []) {
+    const r = regionalLiveryFor(s);
+    if (r) regional.add(r);
+  }
+  const has: Record<LiveryId, boolean> = {
+    standard: true,
+    night_shift: streak >= 3,
+    hi_vis: streak >= 7,
+    cold_chain: (p.dailiesCompleted ?? 0) >= 5,
+    century: (p.totalDeliveries ?? 0) >= 100,
+    gold_fork: (p.dailyTop10s ?? 0) >= 1,
+    regional_den: regional.has('regional_den'),
+    regional_slc: regional.has('regional_slc'),
+    regional_phx: regional.has('regional_phx'),
+    regional_abq: regional.has('regional_abq'),
+    champion: (p.leagueWins ?? 0) >= 1,
+    streak_30: streak >= 30,
+  };
+  return LIVERY_IDS.filter((id) => has[id]);
+}
+
+/** Pure: liveries unlocked in `after` that were not unlocked in `before`. */
+export function newlyUnlocked(
+  before: LiveryProfile | null | undefined,
+  after: LiveryProfile | null | undefined,
+): LiveryId[] {
+  const had = new Set(unlockedLiveries(before));
+  return unlockedLiveries(after).filter((id) => !had.has(id));
+}
+
+

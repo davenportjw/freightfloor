@@ -2,7 +2,7 @@
  * Shared contract between main.ts (wiring) and the HUD modules in src/ui/.
  * Modules read the store and call actions; they never touch the socket directly.
  */
-import type { AgentDirective, DifficultyLevel, DispatchParams, ManagerOp, RunMode, SiteId } from '@warehouse/protocol';
+import type { AgentDirective, DifficultyLevel, DispatchParams, LiveryId, ManagerOp, RunMode, SiteId } from '@warehouse/protocol';
 import type { ClientStore, DrawerTab, DriveCameraMode, FlyoutId, LeaderboardModalTab, UiOverlay } from '../state.js';
 import type { RenderLayers } from '../renderer.js';
 import type { NoticeKind } from './notify.js';
@@ -108,6 +108,8 @@ export interface Actions {
   refreshLeagueBoard(): void;
   /** Fetch last week's league board (`store.leaguePrevious`) for the podium pill. */
   refreshLeaguePrevious(): void;
+  /** Equip an unlocked livery (`setLivery`); the site answers `liveryStatus` or a `livery_*` error. */
+  setLivery(id: LiveryId): void;
   /**
    * Find and switch to an existing callsign or resume code (`wr1_…`) via the lobby.
    * Returns null on success or an error string (new names are rejected).
