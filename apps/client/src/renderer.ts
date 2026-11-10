@@ -3,6 +3,7 @@
  * block (2:1 iso, TW=64/TH=32, extruded shaded boxes). It only draws real world state;
  * camera, picking and remote-vehicle interpolation live here, pure math lives in ./render/.
  */
+import { confettiFrame, flashAlpha, pruneJuice, ringFrame, type Juice } from './render/juice.js';
 import {
   evaluateRackLift,
   guide as simGuide,
@@ -301,6 +302,8 @@ export class WarehouseRenderer {
   private callouts: Array<Callout & { born: number }> = [];
   /** Rival speech bubbles (real Gemini reason / event text) keyed to a vehicle id. */
   private bubbles: Array<RivalBubble & { born: number }> = [];
+  /** Moment juice (confetti / ring pulse / PB flash) on my forklift or the screen edge. */
+  private juice: Juice[] = [];
 
   constructor(o: WarehouseRendererInit) {
     this.canvas = o.canvas;
@@ -372,6 +375,11 @@ export class WarehouseRenderer {
   pushCallout(c: Callout, nowMs: number): void {
     this.callouts = this.callouts.filter((x) => nowMs - x.born < CALLOUT_MS).slice(-3);
     this.callouts.push({ ...c, born: nowMs });
+  }
+
+  /** Queue a moment effect (render/juice.ts); expired ones are dropped and the list is capped. */
+  pushJuice(j: Juice, nowMs: number): void {
+    this.juice = pruneJuice([...this.juice, j], nowMs);
   }
 
   /** Speech bubble over another vehicle (the rival) for BUBBLE_MS; one bubble per vehicle. */
@@ -730,6 +738,54 @@ export class WarehouseRenderer {
     if (me) this.drawGuide(world, me, opts);
     if (me) this.drawCallouts(me);
     this.drawBubbles(world);
+    this.drawJuice(me);
+  }
+
+  /** Confetti and ring pulses over my forklift; the PB flash as a gold screen-edge glow. */
+  private drawJuice(me: Vehicle | null | undefined): void {
+    const now = this.nowMs;
+    this.juice = pruneJuice(this.juice, now);
+    if (!this.juice.length) return;
+    const ctx = this.ctx;
+    const pt = this.painter;
+    const z = Math.max(0.8, Math.min(1.6, this.cam.zoom));
+    const p = me ? (this.poses.get(me.id) ?? { x: me.px, y: me.py, a: me.angle }) : null;
+    ctx.save();
+    for (const j of this.juice) {
+      if (j.kind === 'flash') {
+        const a = flashAlpha(j, now, this.reducedMotion);
+        if (a <= 0) continue;
+        const r = Math.max(this.VW, this.VH) * 0.75;
+        const g = ctx.createRadialGradient(this.VW / 2, this.VH / 2, r * 0.55, this.VW / 2, this.VH / 2, r);
+        g.addColorStop(0, 'rgba(245,158,11,0)');
+        g.addColorStop(1, `rgba(245,158,11,${a.toFixed(3)})`);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, this.VW, this.VH);
+        continue;
+      }
+      if (!p) continue;
+      if (j.kind === 'ring') {
+        const f = ringFrame(j, now, this.reducedMotion);
+        if (!f) continue;
+        ctx.globalAlpha = f.alpha;
+        pt.poly(pt.circleGrid(p.x, p.y, f.radius), null, j.colors[0], f.width);
+        continue;
+      }
+      const bits = confettiFrame(j, now, this.reducedMotion);
+      if (!bits.length) continue;
+      const [ox, oy] = pt.P(p.x, p.y, 40);
+      for (const b of bits) {
+        ctx.globalAlpha = b.alpha;
+        ctx.fillStyle = b.color;
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        ctx.translate(ox + b.dx * z, oy + b.dy * z);
+        ctx.rotate(b.rot);
+        ctx.fillRect((-b.size * z) / 2, (-b.size * z) / 4, b.size * z, (b.size * z) / 2);
+      }
+      ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    }
+    ctx.restore();
   }
 
   /** Is grid point (gx, gy) on screen (with an iso-pixel margin for tall objects)? */

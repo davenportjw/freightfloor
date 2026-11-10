@@ -239,6 +239,7 @@ The client (`apps/client`, vanilla TypeScript + Canvas2D, Vite) has two HUD layo
 | `fpv/cabMath.ts`, `fpv/liftTarget.ts` | — | Pure cab math (yaw, eye, head tilt, damping, tank-style touch mapping, rack faces, grade colours) and lift-target resolution. Node-tested in `test/fpv.test.ts` |
 | `render/orders.ts` | — | Pure helpers for map overlays: cone-tile validity (mirrors sim `toggleCone`) and dispatch source-zone → rack mapping |
 | `render/ghost.ts` | — | Ghost planner path to the highlighted order |
+| `render/juice.ts` | — | Pure moment-juice model (`juiceForEvent`, `streakMilestone`, `dailyJuice`, `confettiFrame`, `ringFrame`, `flashAlpha`). `main.ts` pushes juice on `delta` fare events and `dailyResult`. `WarehouseRenderer.pushJuice` / `drawJuice` paint confetti, ring and edge flash in the iso view, and honour `prefers-reduced-motion`. Node-tested in `test/juice.test.ts` |
 
 `renderer.ts` draws the cone ghost and your own cones in cone mode, the dispatch preview (source racks, target bay, dashed link), `E ·` action tags, and (when `rackLiftMinigame` is enabled) 3D shelf-elevated rack pallets (`L1 Low`, `L2 Mid`, `L3 High`), 3D forklift fork elevation (`v.fork`), and the world-space vertical Mast Height Slider gauge alongside the forklift mast. It also exposes `follow(vid)` / `panTo(x, y)` for the free Floor camera.
 

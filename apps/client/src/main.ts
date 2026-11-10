@@ -104,7 +104,8 @@ import {
   unlockEvents,
 } from './analytics.js';
 import { recordLocalVisit } from './visits.js';
-import { diffSeenUnlocks } from './ui/liveries.js';
+import { diffSeenUnlocks, liveryPaletteFor } from './ui/liveries.js';
+import { dailyJuice, juiceForEvent, ringJuice, streakMilestone } from './render/juice.js';
 
 // Re-exported for the existing test suite (test/client.test.ts).
 export { applyQuantisedDelta, formatRunDisplayName, nextRunDisplayName, parseRunDisplayName } from './state.js';
@@ -1290,6 +1291,8 @@ function boot(): void {
       case 'delta': {
         const me = store.myVehicle();
         const predicting = store.isDriving() && input.predicting(now, me);
+        const juiceVid = store.renderMyVid();
+        const prevStreak = juiceVid ? (store.world.vehicles.find((v) => v.id === juiceVid)?.streak ?? null) : null;
         const events = store.applyDelta(msg, { acceptMyPose: !predicting });
         if (!predicting) input.settle(store.world.t, now);
         // Routing (ui/notify.ts): my scoring/run events → world popup; my interact hints → the
@@ -1307,6 +1310,9 @@ function boot(): void {
             renderer.pushCallout(c, now);
             cab?.pushCallout(c, now);
           }
+          const jv = calloutVid ? store.world.vehicles.find((v) => v.id === calloutVid) : undefined;
+          const j = juiceForEvent(ev, calloutVid, jv ? liveryPaletteFor(jv) : null, now);
+          if (j) renderer.pushJuice(j, now);
           const b = rivalBubbleFor(ev, calloutVid);
           if (b) {
             renderer.pushBubble(b, now);
@@ -1315,6 +1321,10 @@ function boot(): void {
           const route = routeSimEvent(ev, hudMode, calloutVid, calloutKey);
           if (route === 'alert') store.ui.alert = noticeAlert('hint', ev.text, Date.now());
           else if (route === 'orderLine') store.ui.orderNote = { text: ev.text, until: Date.now() + ORDER_NOTE_MS };
+        }
+        if (juiceVid && juiceVid === calloutVid && prevStreak != null) {
+          const next = store.world.vehicles.find((v) => v.id === juiceVid)?.streak ?? 0;
+          if (streakMilestone(prevStreak, next) != null) renderer.pushJuice(ringJuice(now), now);
         }
         noteRunStart();
         noteMyOrders();
@@ -1459,6 +1469,7 @@ function boot(): void {
         break;
       case 'dailyResult':
         store.applyDailyResult(msg);
+        for (const j of dailyJuice(msg, now)) renderer.pushJuice(j, now);
         // A new best moves the Today board: refetch next time it is shown.
         if (msg.improved) store.dailyBoard = { ...store.dailyBoard, updatedAt: null };
         break;

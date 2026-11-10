@@ -227,6 +227,22 @@ Liveries are paint jobs for a human driver's forklift. They are cosmetic only an
 - **Unlock toast**: `🎨 Livery unlocked: <name>` appears when a finished run unlocks something (`liveryUnlocked`) and, for unlocks that happen off-run such as Champion, the first time `liveryStatus` lists a livery this browser has not announced (`localStorage['ff.liveries.seen']`). The first load on a new browser marks everything seen without toasting.
 - **Rendering**: procedural. The counterweight (AGV deck), the team ring and the Cab View body use the livery colour, and the accent is drawn as a trim, stripe, band or chevron decal. There are no per-livery sprite sheets. AI vehicles keep their style colours.
 
+## 3g. Moment Juice
+
+Short client-side effects play when existing game state changes. They add no server data and never change scoring.
+
+| Moment | Effect |
+|---|---|
+| Your delivery is on time (fare rating other than `slow`) | Confetti burst over your forklift in your livery colours plus gold and white (teal with no livery). |
+| Your delivery streak reaches a multiple of 5 | Gold ring pulse around your forklift. |
+| Your Daily Shift streak reaches 3 / 7 / 14 / 30 / 50 / 100 days | Gold ring pulse. |
+| A repeat Daily Shift attempt beats your best | Gold edge flash across the screen. |
+
+- Confetti is seeded from the event (`mulberry32`), so it looks the same every time and uses no `Math.random`.
+- At most 6 effects are live at once (`JUICE_MAX`). Each lasts under 1.2 s.
+- **Reduced motion** (`prefers-reduced-motion: reduce`): no confetti, the ring stays still and only fades, and the flash becomes a dim glow.
+- The effects show in the Drive and Floor iso view only, not in Cab View.
+
 ## 4. Facility Tiers & Expansion (Up to Tier 6 / 60 Vehicles)
 
 Each warehouse site dynamically expands its floor plan as the active vehicle count grows:
