@@ -164,8 +164,8 @@ class FakeFirestore {
           for (const [id, r] of this.col(ref.name)) docReads.set(`${ref.name}/${id}`, r.version);
           return snap;
         },
-        set: (ref: FakeDocRef, data: Data) => {
-          writes.push(() => this.write(ref.colName, ref.id, data, false));
+        set: (ref: FakeDocRef, data: Data, opts?: { merge?: boolean }) => {
+          writes.push(() => this.write(ref.colName, ref.id, data, Boolean(opts?.merge)));
         },
         delete: (ref: FakeDocRef) => {
           writes.push(() => this.remove(ref.colName, ref.id));
@@ -305,6 +305,34 @@ describe('resume codes and existing callsign lookup', () => {
     const byCode = await b.inject({ method: 'POST', url: '/api/join', payload: { clientId: 'other', resume: first.resumeToken } });
     expect(byCode.statusCode).toBe(200);
     expect(byCode.json().clientId).toBe('fs-player');
+
+    await a.close();
+    await b.close();
+  });
+
+  it('Firestore recordVisit merges the visit ledger without clobbering identity, once per day across instances', async () => {
+    const db = new FakeFirestore();
+    seedFullSites(db, { 'den-1': { drivers: 0 } });
+    const [a, b] = await twoInstances(db);
+    const first = (await a.inject({ method: 'POST', url: '/api/join', payload: { clientId: 'fs-visit' } })).json();
+    await b.inject({ method: 'POST', url: '/api/join', payload: { clientId: 'fs-visit' } });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const doc = db.raw('players').find((p) => p.clientId === 'fs-visit')!;
+    expect(doc.resumeTokenHash).toBe(hashResumeToken(first.resumeToken));
+    expect(doc.name).toBe(first.name);
+    expect(doc.activeDays).toBe(1);
+    expect(doc.firstSeenDay).toBe(doc.lastSeenDay);
+
+    // Concurrent same-day calls from both instances still count the day once.
+    const storeA = new FirestoreLobbyStore(db as never, {});
+    const storeB = new FirestoreLobbyStore(db as never, {});
+    const now = Date.now();
+    await Promise.all([storeA.recordVisit('fs-visit', now), storeB.recordVisit('fs-visit', now)]);
+    expect(db.raw('players').find((p) => p.clientId === 'fs-visit')!.activeDays).toBe(1);
+    const next = await storeA.recordVisit('fs-visit', now + 86_400_000);
+    expect(next).toMatchObject({ isReturn: true, daysSinceLast: 1 });
+    expect(db.raw('players').find((p) => p.clientId === 'fs-visit')!.activeDays).toBe(2);
 
     await a.close();
     await b.close();

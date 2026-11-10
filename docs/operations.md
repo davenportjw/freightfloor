@@ -327,8 +327,27 @@ The client ships GA4 support, but it is off until you give the lobby a measureme
 3. The lobby serves the ID at `GET /api/config` and only then adds Google's tag hosts to its CSP.
    With no ID the CSP stays strict and no tag loads.
 4. Mark the key events in GA4 → Admin → Events: `site_join`, `level_start`, `level_end`,
-   `manager_command`, `agent_command` (mapping in `apps/client/src/analytics.ts`).
+   `manager_command`, `agent_command`, `return_visit` (mapping in `apps/client/src/analytics.ts`).
 5. Verify with GA4 **DebugView** or **Realtime** after loading the site once.
 
 Note: the measurement ID is public by design (every visitor's browser sees it), but keeping it
 in tfvars lets forks point analytics at their own property instead of yours.
+
+### Retention
+
+Day boundaries for retention (and for the upcoming Daily Shift, streaks, and weekly league) are
+**UTC midnight**, with ISO weeks starting Monday 00:00 UTC (`dayKey` / `weekKey` in
+`@warehouse/protocol`).
+
+- **GA4 `return_visit`** `{ days_since_last, active_days }` fires on the first boot of a later
+  UTC day than the browser's previous visit (`localStorage['ff.visits']`, `apps/client/src/visits.ts`).
+  It is not sent on a player's first day (GA4's own `first_visit` covers that). Use a GA4 cohort
+  exploration on `return_visit` for classic D1/D7 retention.
+- **Server ledger.** On every human `POST /api/join` the lobby advances `firstSeenDay`,
+  `lastSeenDay`, and `activeDays` on `players/{clientId}` (`LobbyStore.recordVisit`, a Firestore
+  transaction, at most one write per player per day). It runs off the response path: a failed
+  write is logged as `recordVisit failed` and never blocks the join. Bots are never recorded.
+- **Report.** `npm run report:retention -- [--as-of YYYY-MM-DD] [--json]` reads that ledger with
+  ADC (read-only, creates nothing) and prints **unbounded** D1/D7/D30 retention: the share of each
+  eligible cohort whose `lastSeenDay` is at least N days after `firstSeenDay`. Players who
+  predate the ledger are listed as skipped.

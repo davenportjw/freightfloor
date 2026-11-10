@@ -118,6 +118,20 @@ export function eventForServerMessage(msg: ServerMessage): AnalyticsEvent | null
   return null;
 }
 
+/**
+ * `return_visit`: first boot on a later UTC day than the player's previous visit. Not sent on the
+ * first-ever day (GA4 reports `first_visit` itself) or for repeat visits within a day.
+ */
+export function returnVisitEvent(
+  update: { isReturn: boolean; daysSinceLast: number | null; ledger: { activeDays: number } } | null,
+): AnalyticsEvent | null {
+  if (!update?.isReturn || update.daysSinceLast === null) return null;
+  return {
+    name: 'return_visit',
+    params: { days_since_last: update.daysSinceLast, active_days: update.ledger.activeDays },
+  };
+}
+
 type Gtag = (...args: unknown[]) => void;
 interface GtagWindow {
   dataLayer?: unknown[];

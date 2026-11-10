@@ -28,12 +28,15 @@ import {
   verifyProxyHeader,
   verifyTicket,
   WS_PER_MESSAGE_DEFLATE,
+  dayKey,
+  nextVisitLedger,
   type LeaderboardEntry,
   type Phase,
   type QueueStatus,
   type RunMode,
   type SiteId,
   type SiteStatus,
+  type VisitUpdate,
 } from '@warehouse/protocol';
 import {
   generateDriverCallsign,
@@ -173,6 +176,10 @@ export interface StoredPlayerDoc {
   updatedAt?: number;
   /** SHA-256 (hex) of the player's secret resume code; the raw code is never stored. */
   resumeTokenHash?: string;
+  /** Return-visit ledger (UTC day keys), advanced once per day by `recordVisit` at join. */
+  firstSeenDay?: string;
+  lastSeenDay?: string;
+  activeDays?: number;
 }
 
 export interface QueueEntry {
@@ -246,6 +253,12 @@ export interface LobbyStore {
    * (Firestore: `runTransaction`, retried on contention). `fn` may be re-invoked on retry.
    */
   runQueueTransaction?<T>(fn: (tx: QueueTxn) => Promise<T>): Promise<T>;
+  /**
+   * Advances the player's return-visit ledger (`firstSeenDay`, `lastSeenDay`, `activeDays` on
+   * `players/{clientId}`) to the UTC day of `nowMs`. Writes at most once per player per day and
+   * must be atomic across lobby instances (Firestore: `runTransaction`).
+   */
+  recordVisit?(clientId: string, nowMs: number): Promise<VisitUpdate>;
 }
 
 // ---------------------------------------------------------------------------
@@ -710,6 +723,31 @@ export class FirestoreLobbyStore implements LobbyStore {
     return [];
   }
 
+  async recordVisit(clientId: string, nowMs: number): Promise<VisitUpdate> {
+    const ref = this.db.collection(this.colName('players')).doc(clientId);
+    const today = dayKey(nowMs);
+    return this.db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const data = snap.exists ? (snap.data() ?? {}) : {};
+      const update = nextVisitLedger(
+        { firstDay: data.firstSeenDay, lastDay: data.lastSeenDay, activeDays: data.activeDays },
+        today,
+      );
+      if (update.isNewDay) {
+        tx.set(
+          ref,
+          {
+            firstSeenDay: update.ledger.firstDay,
+            lastSeenDay: update.ledger.lastDay,
+            activeDays: update.ledger.activeDays,
+          },
+          { merge: true },
+        );
+      }
+      return update;
+    });
+  }
+
   async resolvePlayerIdentity(params: ResolvePlayerIdentityParams): Promise<PlayerIdentityResult> {
     const col = this.db.collection(this.colName('players'));
     const normalizeBaseName = (name: string) => name.replace(/\s+Run\s+\d+$/i, '').trim().toLowerCase();
@@ -1056,6 +1094,27 @@ export class InMemoryLobbyStore implements LobbyStore {
   async listCallsigns(_query: string = '', _limit: number = 20): Promise<string[]> {
     // Public callsign enumeration/autocomplete is disabled so players cannot browse or assume another player's identity.
     return [];
+  }
+
+  async recordVisit(clientId: string, nowMs: number): Promise<VisitUpdate> {
+    const p = this.players.get(clientId);
+    const update = nextVisitLedger(
+      p ? { firstDay: p.firstSeenDay, lastDay: p.lastSeenDay, activeDays: p.activeDays } : null,
+      dayKey(nowMs),
+    );
+    if (update.isNewDay) {
+      const doc = p ?? { clientId, name: '', deliveries: 0 };
+      doc.firstSeenDay = update.ledger.firstDay;
+      doc.lastSeenDay = update.ledger.lastDay;
+      doc.activeDays = update.ledger.activeDays;
+      this.players.set(clientId, doc);
+    }
+    return update;
+  }
+
+  getPlayer(clientId: string): StoredPlayerDoc | undefined {
+    const p = this.players.get(clientId);
+    return p ? { ...p } : undefined;
   }
 
   async resolvePlayerIdentity(params: ResolvePlayerIdentityParams): Promise<PlayerIdentityResult> {
@@ -2541,6 +2600,13 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
     }
 
     const { placement, resolvedClientId, resolvedName, seatLeaseId, effectiveMode, queueStatus } = outcome;
+    // Return-visit ledger for humans with a persistent identity. Off the response path: a ledger
+    // write failure is logged with the real error and never blocks the join.
+    if (!isBot && store.resolvePlayerIdentity && store.recordVisit) {
+      store.recordVisit(resolvedClientId, nowMs).catch((err: unknown) => {
+        req.log.warn({ err }, 'recordVisit failed');
+      });
+    }
     const expiresAt = nowMs + TICKET_TTL_MS;
     const ticket = signTicket(
       {

@@ -97,9 +97,11 @@ import {
   eventForServerMessage,
   fetchAnalyticsConfig,
   joinEvent,
+  returnVisitEvent,
   runEndEvents,
   runStartEvent,
 } from './analytics.js';
+import { recordLocalVisit } from './visits.js';
 
 // Re-exported for the existing test suite (test/client.test.ts).
 export { applyQuantisedDelta, formatRunDisplayName, nextRunDisplayName, parseRunDisplayName } from './state.js';
@@ -159,6 +161,15 @@ function storageGet(key: string): string | null {
   }
 }
 
+/** `localStorage`, or null where access throws (blocked storage / sandboxed iframes). */
+function safeLocalStorage(): Storage | null {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function storageSet(key: string, value: string): void {
   try {
     localStorage.setItem(key, value);
@@ -194,6 +205,7 @@ function boot(): void {
   // ---- analytics (GA4 key events; off unless the lobby sets GA_MEASUREMENT_ID) ----
   const analytics = new Analytics();
   void fetchAnalyticsConfig().then((id) => analytics.start(id));
+  analytics.track(returnVisitEvent(recordLocalVisit(safeLocalStorage(), Date.now())));
   /** Last run (`vid:runStartedAt`) whose GA4 run-end events were sent. */
   let trackedRunEndKey = '';
 

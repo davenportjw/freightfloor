@@ -1809,3 +1809,117 @@ export const TransferSchema = z.object({
   carrier: z.string().min(1),
 });
 export type Transfer = z.infer<typeof TransferSchema>;
+
+// ============================================================================
+// 8. Retention Calendar (day / ISO-week keys) & Visit Ledger
+// ============================================================================
+//
+// One shared definition of "a day" and "a week" for Daily Shifts, streaks, the weekly league,
+// and return-visit tracking. Boundaries are UTC midnight (Monday 00:00 UTC for weeks) so every
+// shard, the lobby, and the client agree without time-zone or DST handling.
+
+/** `YYYY-MM-DD` (UTC calendar day). */
+export const DAY_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+/** `YYYY-Www` (ISO-8601 week, Monday start, UTC). */
+export const WEEK_KEY_PATTERN = /^\d{4}-W\d{2}$/;
+export const DayKeySchema = z.string().regex(DAY_KEY_PATTERN);
+export const WeekKeySchema = z.string().regex(WEEK_KEY_PATTERN);
+
+const DAY_MS = 86_400_000;
+const pad2 = (n: number) => String(n).padStart(2, '0');
+
+/** UTC day key for an epoch-ms timestamp. */
+export function dayKey(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+}
+
+/** Epoch ms of 00:00 UTC on `key`. Throws on a malformed key. */
+export function dayKeyToMs(key: string): number {
+  if (!DAY_KEY_PATTERN.test(key)) throw new Error(`invalid day key: ${key}`);
+  const [y, m, d] = key.split('-').map(Number);
+  const ms = Date.UTC(y, m - 1, d);
+  if (dayKey(ms) !== key) throw new Error(`invalid day key: ${key}`);
+  return ms;
+}
+
+/** `key` shifted by `n` whole days (negative for earlier). */
+export function addDays(key: string, n: number): string {
+  return dayKey(dayKeyToMs(key) + n * DAY_MS);
+}
+
+/** Whole days from `from` to `to` (positive when `to` is later). */
+export function daysBetween(from: string, to: string): number {
+  return Math.round((dayKeyToMs(to) - dayKeyToMs(from)) / DAY_MS);
+}
+
+/** ISO-8601 week key (`YYYY-Www`) for an epoch-ms timestamp, evaluated in UTC. */
+export function weekKey(ms: number): string {
+  const d = new Date(dayKeyToMs(dayKey(ms)));
+  const dow = d.getUTCDay() || 7; // Mon=1 … Sun=7
+  d.setUTCDate(d.getUTCDate() + 4 - dow); // Thursday of this ISO week decides the year
+  const isoYear = d.getUTCFullYear();
+  const week = Math.ceil(((d.getTime() - Date.UTC(isoYear, 0, 1)) / DAY_MS + 1) / 7);
+  return `${isoYear}-W${pad2(week)}`;
+}
+
+/** Epoch ms of Monday 00:00 UTC starting the ISO week containing `ms`. */
+export function weekStartMs(ms: number): number {
+  const dayStart = dayKeyToMs(dayKey(ms));
+  const dow = new Date(dayStart).getUTCDay() || 7;
+  return dayStart - (dow - 1) * DAY_MS;
+}
+
+/** Days-active ledger kept per player (client localStorage and `players/{clientId}`). */
+export interface VisitLedger {
+  firstDay: string;
+  lastDay: string;
+  activeDays: number;
+}
+
+export interface VisitUpdate {
+  ledger: VisitLedger;
+  /** True when `today` was not yet counted (first visit ever, or first visit of a new day). */
+  isNewDay: boolean;
+  /** True only for a returning visit on a later day (not the player's first-ever day). */
+  isReturn: boolean;
+  /** Days since the previous active day, or null on the first-ever visit / same-day repeat. */
+  daysSinceLast: number | null;
+}
+
+/**
+ * Advances a visit ledger to `today`. Pure and idempotent within a day. A malformed or
+ * future-dated previous ledger is treated as absent rather than producing negative gaps.
+ */
+export function nextVisitLedger(prev: Partial<VisitLedger> | null | undefined, today: string): VisitUpdate {
+  dayKeyToMs(today);
+  const valid =
+    prev &&
+    typeof prev.firstDay === 'string' &&
+    typeof prev.lastDay === 'string' &&
+    DAY_KEY_PATTERN.test(prev.firstDay) &&
+    DAY_KEY_PATTERN.test(prev.lastDay) &&
+    typeof prev.activeDays === 'number' &&
+    Number.isFinite(prev.activeDays) &&
+    prev.activeDays >= 1 &&
+    prev.lastDay <= today &&
+    prev.firstDay <= prev.lastDay;
+  if (!valid) {
+    return {
+      ledger: { firstDay: today, lastDay: today, activeDays: 1 },
+      isNewDay: true,
+      isReturn: false,
+      daysSinceLast: null,
+    };
+  }
+  const p = prev as VisitLedger;
+  if (p.lastDay === today) {
+    return { ledger: { ...p }, isNewDay: false, isReturn: false, daysSinceLast: null };
+  }
+  return {
+    ledger: { firstDay: p.firstDay, lastDay: today, activeDays: Math.floor(p.activeDays) + 1 },
+    isNewDay: true,
+    isReturn: true,
+    daysSinceLast: daysBetween(p.lastDay, today),
+  };
+}
