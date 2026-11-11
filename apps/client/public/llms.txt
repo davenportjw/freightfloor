@@ -1,0 +1,23 @@
+# Freight Floor
+
+> Freight Floor (https://freightfloor.com) is a free, arcade-style multiplayer forklift game that runs in the browser. Players drive forklifts on a shared, isometric warehouse floor, picking up and delivering pallets against rival forklifts driven by Google Gemini AI agents. It is open source (Apache-2.0) and built by Davenporter (https://davenporter.com).
+
+## Gameplay
+
+- 3-Minute Blitz (default): a personal high-score run. The clock starts on your first move.
+- Free Range: open-ended driving, ranked by points per real minute (PPM) and on-time percentage.
+- Contract cards: each run deals 3 goal cards. Completed cards give perks such as speed, reach or battery efficiency.
+- AI fleet: rival forklifts follow Sprinter, Steady, Batcher, Opportunist and Strategist archetypes, with decisions from Gemini on Vertex AI.
+- Four regional warehouse sites (Denver, Salt Lake City, Phoenix, Albuquerque) that hand pallets to each other.
+- Floor mode: spectators watch the shift, see KPIs and send floor orders to the AI fleet.
+- Controls: WASD to drive, E to pick up or drop, Shift to boost, C for Co-Pilot, Tab for standings, ? for help.
+
+## Links
+
+- [Play Freight Floor](https://freightfloor.com/): the game (needs JavaScript and a modern browser; free to play)
+- [Source code](https://github.com/davenportjw/freightfloor): TypeScript monorepo, Apache-2.0
+- [Gameplay guide](https://github.com/davenportjw/freightfloor/blob/main/docs/gameplay.md): scoring, cards, modes and rules
+- [Architecture](https://github.com/davenportjw/freightfloor/blob/main/docs/architecture.md): Cloud Run lobby and regional site shards, Firestore, Pub/Sub, Vertex AI
+- [Prompt armor and security](https://github.com/davenportjw/freightfloor/blob/main/docs/security.md): how player text sent to the AI drivers is screened
+- [Write-up: Demos should be fun, why I built FreightFloor](https://davenporter.com/writings/freightfloor-demos-should-be-fun)
+- [Builds page](https://davenporter.com/builds/freight-floor)

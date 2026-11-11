@@ -57,6 +57,8 @@ Clients connect **exclusively** to the public `warehouse-lobby` service (`min=0,
 
 Both WebSocket hops negotiate **`permessage-deflate`** (`WS_PER_MESSAGE_DEFLATE` in `@warehouse/protocol`: zlib level 1, context takeover, 256-byte threshold): the site's `WebSocketServer` accepts the offer from the lobby's upstream `ws` client, and the lobby's `WebSocketServer` accepts the browser's offer. In a 32-driver + 20-agent bench, the 10 Hz `delta` stream averaged ~294 KB/s per driver uncompressed vs ~22 KB/s compressed (−92% egress on each hop), for ~0.14 extra CPU cores on the shard. `GET /api/network` serves the cross-site leaderboard from a 30 s per-instance cache (`TOP_PLAYERS_CACHE_TTL_MS`) backed by a ranked `orderBy('totalScore','desc').limit(20)` query.
 
+**Search & answer-engine metadata (SEO / GEO).** The game is a canvas SPA, so `apps/client/index.html` carries everything crawlers read: a descriptive `<title>` and meta description, `canonical` → `https://freightfloor.com/`, Open Graph / Twitter `summary_large_image` tags (`/og-image.jpg`, 1200×630), a schema.org JSON-LD `@graph` (`WebSite`, `VideoGame`+`WebApplication`, `Organization` Davenporter), and a `<noscript>` text summary for non-JS crawlers. `/llms.txt` (static, `apps/client/public/llms.txt`) is a markdown summary for LLM crawlers, referenced from `<link rel="alternate">` and a comment in the lobby's `/robots.txt`. The lobby's SPA fallback returns `index.html` only for extension-less paths; missing files (`/foo.png`) get a plain `404` so they aren't indexed as soft-404s.
+
 ```mermaid
 sequenceDiagram
   participant C as Client

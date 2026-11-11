@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   buildCspHeader,
@@ -90,5 +93,48 @@ describe('@warehouse/lobby: crawler files', () => {
     expect(evil.body).not.toContain('<script>');
     expect(evil.body).toContain('<loc>https://freightfloor.com/</loc>');
     await app.close();
+  });
+
+  it('points robots.txt at llms.txt', async () => {
+    const app = await buildLobbyServer({
+      store: new InMemoryLobbyStore([]),
+      ticketSecret: TEST_SECRET,
+      gaMeasurementId: null,
+    });
+    const robots = await app.inject({
+      method: 'GET',
+      url: '/robots.txt',
+      headers: { 'x-forwarded-host': 'freightfloor.com' },
+    });
+    expect(robots.body).toContain('# LLMs: https://freightfloor.com/llms.txt');
+    await app.close();
+  });
+
+  it('serves real 404s for missing files but falls back to index.html for page paths', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lobby-static-'));
+    writeFileSync(join(dir, 'index.html'), '<!doctype html><title>Freight Floor</title>');
+    writeFileSync(join(dir, 'llms.txt'), '# Freight Floor\n');
+    const app = await buildLobbyServer({
+      store: new InMemoryLobbyStore([]),
+      ticketSecret: TEST_SECRET,
+      gaMeasurementId: null,
+      staticDir: dir,
+    });
+    try {
+      const llms = await app.inject({ method: 'GET', url: '/llms.txt' });
+      expect(llms.statusCode).toBe(200);
+      expect(llms.body).toContain('# Freight Floor');
+
+      const missing = await app.inject({ method: 'GET', url: '/apple-touch-icon.png?v=1' });
+      expect(missing.statusCode).toBe(404);
+      expect(missing.body).not.toContain('<title>');
+
+      const page = await app.inject({ method: 'GET', url: '/play?site=site-den-1' });
+      expect(page.statusCode).toBe(200);
+      expect(page.body).toContain('<title>Freight Floor</title>');
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

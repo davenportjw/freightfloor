@@ -3,11 +3,109 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Freight Floor</title>
+    <title>Freight Floor: Multiplayer Forklift Game with Gemini AI Drivers</title>
+    <meta name="description" content="Freight Floor is a free browser game where you drive a forklift on a busy multiplayer warehouse floor. Grab rush pallets, avoid rival forklifts driven by Gemini AI, and set a high score in a 3-minute Blitz." />
+    <link rel="canonical" href="https://freightfloor.com/" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta name="theme-color" content="#cfd8e3" />
+    <meta name="author" content="Davenporter" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="alternate" type="text/markdown" title="LLM summary" href="/llms.txt" />
+
+    <!-- Open Graph / social link previews -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Freight Floor" />
+    <meta property="og:url" content="https://freightfloor.com/" />
+    <meta property="og:title" content="Freight Floor: Multiplayer Forklift Game with Gemini AI Drivers" />
+    <meta property="og:description" content="Drive a forklift on a busy multiplayer warehouse floor. Grab rush pallets, avoid Gemini-driven AI rivals, and set a high score in a 3-minute Blitz. Free in your browser." />
+    <meta property="og:image" content="https://freightfloor.com/og-image.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Isometric warehouse floor with storage racks, cold storage zones, pallets and forklifts" />
+    <meta property="og:locale" content="en_US" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Freight Floor: Multiplayer Forklift Game with Gemini AI Drivers" />
+    <meta name="twitter:description" content="Drive a forklift on a busy multiplayer warehouse floor and set a high score in a 3-minute Blitz. Free in your browser." />
+    <meta name="twitter:image" content="https://freightfloor.com/og-image.jpg" />
+    <meta name="twitter:image:alt" content="Isometric warehouse floor with storage racks, cold storage zones, pallets and forklifts" />
+
+    <!-- Structured data (a non-executing data block, so CSP script-src does not apply). -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://freightfloor.com/#website",
+            "url": "https://freightfloor.com/",
+            "name": "Freight Floor",
+            "inLanguage": "en",
+            "publisher": { "@id": "https://davenporter.com/#org" }
+          },
+          {
+            "@type": ["VideoGame", "WebApplication"],
+            "@id": "https://freightfloor.com/#game",
+            "name": "Freight Floor",
+            "url": "https://freightfloor.com/",
+            "image": "https://freightfloor.com/og-image.jpg",
+            "description": "A free, arcade-style multiplayer forklift game played in the browser. Players drive forklifts on a shared warehouse floor, picking up and delivering pallets against rival forklifts driven by Gemini AI agents, in 3-minute Blitz runs or open-ended Free Range play, across four regional warehouse sites.",
+            "genre": ["Arcade", "Simulation", "Racing"],
+            "playMode": ["MultiPlayer", "SinglePlayer"],
+            "gamePlatform": "Web browser",
+            "applicationCategory": "GameApplication",
+            "operatingSystem": "Any (modern web browser)",
+            "inLanguage": "en",
+            "isAccessibleForFree": true,
+            "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+            "license": "https://www.apache.org/licenses/LICENSE-2.0",
+            "codeRepository": "https://github.com/davenportjw/freightfloor",
+            "author": { "@id": "https://davenporter.com/#org" },
+            "publisher": { "@id": "https://davenporter.com/#org" },
+            "isPartOf": { "@id": "https://freightfloor.com/#website" },
+            "subjectOf": {
+              "@type": "BlogPosting",
+              "headline": "Demos should be fun: why I built FreightFloor",
+              "url": "https://davenporter.com/writings/freightfloor-demos-should-be-fun"
+            },
+            "sameAs": [
+              "https://github.com/davenportjw/freightfloor",
+              "https://davenporter.com/builds/freight-floor"
+            ]
+          },
+          {
+            "@type": "Organization",
+            "@id": "https://davenporter.com/#org",
+            "name": "Davenporter",
+            "url": "https://davenporter.com"
+          }
+        ]
+      }
+    </script>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body data-mode="floor">
+    <!-- Text summary for visitors and crawlers that don't run JavaScript (the game itself is a canvas). -->
+    <noscript>
+      <main style="max-width: 42rem; margin: 3rem auto; padding: 0 1.25rem; font: 16px/1.55 system-ui, sans-serif; color: #0f172a">
+        <h1>Freight Floor: a multiplayer forklift game</h1>
+        <p>Freight Floor is a free, arcade-style multiplayer forklift game that runs in your browser. You drive a forklift on a shared warehouse floor: grab rush pallets off the receiving dock, weave through the aisles past rival forklifts, and deliver to the right bay before the clock runs out.</p>
+        <h2>How it plays</h2>
+        <ul>
+          <li><strong>3-Minute Blitz:</strong> a personal high-score run. The clock starts when you first drive.</li>
+          <li><strong>Free Range:</strong> open-ended driving, ranked by points per minute and on-time rate.</li>
+          <li><strong>AI rivals:</strong> the other forklifts are AI drivers whose decisions come from Google Gemini.</li>
+          <li><strong>Contract cards:</strong> pick goals at the start of each run. Finished cards give perks such as more speed or reach.</li>
+          <li><strong>Four regional sites:</strong> Denver, Salt Lake City, Phoenix and Albuquerque, with pallets moving between them.</li>
+          <li><strong>Controls:</strong> WASD to drive, E to pick up or drop, Shift to boost, C for Co-Pilot.</li>
+        </ul>
+        <p><strong>Freight Floor needs JavaScript to play.</strong> Turn on JavaScript and reload this page.</p>
+        <p>
+          <a href="https://github.com/davenportjw/freightfloor">Source code on GitHub</a> (Apache-2.0) ·
+          <a href="https://davenporter.com/writings/freightfloor-demos-should-be-fun">Write-up: Demos should be fun</a> ·
+          <a href="https://davenporter.com">Powered by Davenporter</a>
+        </p>
+      </main>
+    </noscript>
     <!-- Full-bleed world canvas. The renderer sizes it from this container. -->
     <div id="stage">
       <canvas id="world" aria-label="Warehouse floor. Drag to pan, scroll to zoom, click a vehicle to inspect it."></canvas>

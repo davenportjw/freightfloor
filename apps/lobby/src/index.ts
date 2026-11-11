@@ -2173,6 +2173,9 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
       'Disallow: /ws',
       'Disallow: /sites/',
       '',
+      '# Plain-text summary for LLM and answer-engine crawlers.',
+      `# LLMs: ${publicOrigin(req)}/llms.txt`,
+      '',
       `Sitemap: ${publicOrigin(req)}/sitemap.xml`,
       '',
     ].join('\n');
@@ -3265,6 +3268,12 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
     app.setNotFoundHandler(async (req, reply) => {
       if (req.url.startsWith('/api/') || req.url.startsWith('/sites/')) {
         return reply.code(404).send({ error: 'not_found', message: 'API route not found' });
+      }
+      // Missing files (anything with an extension, e.g. /apple-touch-icon.png) get a real 404
+      // instead of index.html, so crawlers don't index soft-404s.
+      const path = req.url.split('?')[0] ?? '';
+      if (/\.[a-z0-9]{1,8}$/i.test(path)) {
+        return reply.code(404).type('text/plain; charset=utf-8').send('Not found');
       }
       return reply.sendFile('index.html');
     });
