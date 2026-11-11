@@ -426,7 +426,10 @@ export function drawVehicle(
 
   const camRot = pt.cam?.rot ?? 0;
   const canWheel = typeof (pt as Partial<Painter>).wheel === 'function';
+  // LOD: rims are a couple of pixels when zoomed out; skip them there.
+  const lowDetail = (pt.cam?.zoom ?? 1) < 0.9;
   for (const q of vehicleParts(v, p, s.nowMs, siteId, true, camRot, { motion: s.motion })) {
+    if (lowDetail && q.role === 'hub') continue;
     const a = p.a + (q.yaw ?? 0);
     if (q.shape === 'wheel' && canWheel) pt.wheel(q.cx, q.cy, q.len, q.wid, a, q.z0, q.h, q.hex, 'rgba(15,23,42,0.35)');
     else if (q.shape === 'cyl' && typeof (pt as Partial<Painter>).cyl === 'function') pt.cyl(q.cx, q.cy, q.len / 2, q.z0, q.h, q.hex);

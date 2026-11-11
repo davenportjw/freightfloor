@@ -6,40 +6,26 @@ import { type Camera, rotateGrid, TH, TW } from './iso.js';
 
 export type Pt = [number, number];
 
-const shadeCache = new Map<string, string>();
+const shadeCache = new Map<string, Map<number, string>>();
 
 /** Multiply an #RRGGBB colour's channels by f (cached). */
 export function shade(hex: string, f: number): string {
-  const key = hex + f;
-  let c = shadeCache.get(key);
+  // Two-level cache: no per-call key string (this runs thousands of times per frame).
+  let byF = shadeCache.get(hex);
+  if (!byF) shadeCache.set(hex, (byF = new Map()));
+  let c = byF.get(f);
   if (c) return c;
   const n = parseInt(hex.slice(1), 16);
   const ch = (s: number) => Math.max(0, Math.min(255, Math.round(((n >> s) & 255) * f)));
   c = `rgb(${ch(16)},${ch(8)},${ch(0)})`;
-  shadeCache.set(key, c);
+  byF.set(f, c);
   return c;
 }
 
-/** Convex hull (Andrew's monotone chain) of screen points, counter-clockwise. */
-export function convexHull(points: readonly Pt[]): Pt[] {
-  const pts = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  if (pts.length < 3) return pts;
-  const cross = (o: Pt, a: Pt, b: Pt) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-  const lower: Pt[] = [];
-  for (const p of pts) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-    lower.push(p);
-  }
-  const upper: Pt[] = [];
-  for (let i = pts.length - 1; i >= 0; i--) {
-    const p = pts[i];
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-    upper.push(p);
-  }
-  upper.pop();
-  lower.pop();
-  return lower.concat(upper);
-}
+/** Unit circle table for wheel sidewalls (shared; wheels are drawn many times per frame). */
+const WHEEL_SEGS = 14;
+const WHEEL_COS = Array.from({ length: WHEEL_SEGS }, (_, i) => Math.cos((i / WHEEL_SEGS) * Math.PI * 2));
+const WHEEL_SIN = Array.from({ length: WHEEL_SEGS }, (_, i) => Math.sin((i / WHEEL_SEGS) * Math.PI * 2));
 
 export class Painter {
   constructor(
@@ -387,8 +373,8 @@ export class Painter {
   /**
    * Wheel: a cylinder whose axle runs across heading `a`. `diam` / `tread` in tiles; `z0` / `h`
    * in iso px (the tyre's vertical extent, so it can be drawn taller than true scale). Draws the
-   * hidden sidewall joined to the visible one as the tread (convex hull of both silhouettes), then
-   * the camera-facing sidewall with a soft top-lit gradient.
+   * hidden sidewall joined to the visible one as the tread silhouette, then the camera-facing
+   * sidewall.
    */
   wheel(
     cx: number,
@@ -410,44 +396,82 @@ export class Painter {
     // Axle direction in camera space decides which sidewall faces the viewer (+x,+y is near).
     const [rnx, rny] = rotateGrid(nx, ny, rot);
     const near = rnx + rny >= 0 ? 1 : -1;
+    // The projection is affine, so project the centre once and build both sidewalls from screen
+    // vectors (no per-point P()/rotateGrid). The tread silhouette is the union of the far ellipse
+    // and its translate by `d`: walk the ellipse once, taking the far point where the outline faces
+    // away from `d` and the near point where it faces toward it (O(N), no hull sort).
+    const z = this.cam.zoom;
+    const [pcx, pcy] = this.P(cx, cy, z0 + h / 2);
+    const [px1, py1] = this.P(cx + ux, cy + uy, z0 + h / 2);
+    const [pnx, pny] = this.P(cx + nx, cy + ny, z0 + h / 2);
     const r = diam / 2;
-    const rz = h / 2;
-    const zc = z0 + rz;
-    const N = 16;
-    const face = (side: number): Pt[] => {
-      const ox = cx + nx * side * (tread / 2);
-      const oy = cy + ny * side * (tread / 2);
-      const out: Pt[] = [];
-      for (let i = 0; i < N; i++) {
-        const t = (i / N) * Math.PI * 2;
-        const c = Math.cos(t) * r;
-        out.push(this.P(ox + ux * c, oy + uy * c, zc + Math.sin(t) * rz));
-      }
-      return out;
-    };
-    const farPts = face(-near);
-    const nearPts = face(near);
-    this.poly(convexHull(farPts.concat(nearPts)), shade(hex, 0.72), stroke);
-    let minY = Infinity;
-    let maxY = -Infinity;
-    for (const q of nearPts) {
-      if (q[1] < minY) minY = q[1];
-      if (q[1] > maxY) maxY = q[1];
-    }
+    const ax = (px1 - pcx) * r; // screen vector of the wheel radius along the heading
+    const ay = (py1 - pcy) * r;
+    const bz = (h / 2) * z; // screen radius straight up
+    const hx = (pnx - pcx) * (tread / 2) * near; // centre → near sidewall
+    const hy = (pny - pcy) * (tread / 2) * near;
+    const N = WHEEL_SEGS;
     const ctx = this.ctx;
-    if (typeof ctx.createLinearGradient === 'function' && maxY - minY > 0.5) {
-      const g = ctx.createLinearGradient(0, minY, 0, maxY);
-      g.addColorStop(0, shade(hex, 1.15));
-      g.addColorStop(1, shade(hex, 0.82));
-      ctx.beginPath();
-      ctx.moveTo(nearPts[0][0], nearPts[0][1]);
-      for (let i = 1; i < nearPts.length; i++) ctx.lineTo(nearPts[i][0], nearPts[i][1]);
-      ctx.closePath();
-      ctx.fillStyle = g;
-      ctx.fill();
-    } else {
-      this.poly(nearPts, shade(hex, 1));
+    // Far sidewall points F_i = c - h + a·cos t - (0, bz)·sin t; near N_i = F_i + 2h.
+    const fx = pcx - hx;
+    const fy = pcy - hy;
+    const dx = 2 * hx;
+    const dy = 2 * hy;
+    // Outward normal = orient · (ty, -tx), where orient is the winding of the projected ellipse.
+    const orient = -ax * bz >= 0 ? 1 : -1;
+    ctx.beginPath();
+    let prevSide = 0;
+    for (let i = 0; i <= N; i++) {
+      const k = i % N;
+      const ct = WHEEL_COS[k];
+      const st = WHEEL_SIN[k];
+      const ox = ax * ct;
+      const oy = ay * ct - bz * st;
+      // Outline tangent at t is a·(-sin t) - (0,bz)·cos t; the outward normal facing `d` picks the face.
+      const tx = -ax * st;
+      const ty = -ay * st - bz * ct;
+      const side = orient * (ty * dx - tx * dy) >= 0 ? 1 : -1;
+      const px = fx + ox;
+      const py = fy + oy;
+      if (i === 0) {
+        if (side > 0) ctx.moveTo(px + dx, py + dy);
+        else ctx.moveTo(px, py);
+      } else {
+        if (side !== prevSide) {
+          // Bridge across the silhouette edge (both copies of this point).
+          if (side > 0) {
+            ctx.lineTo(px, py);
+            ctx.lineTo(px + dx, py + dy);
+          } else {
+            ctx.lineTo(px + dx, py + dy);
+            ctx.lineTo(px, py);
+          }
+        } else if (side > 0) ctx.lineTo(px + dx, py + dy);
+        else ctx.lineTo(px, py);
+      }
+      prevSide = side;
     }
+    ctx.closePath();
+    ctx.fillStyle = shade(hex, 0.72);
+    ctx.fill();
+    if (stroke) {
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    // Camera-facing sidewall (flat-lit: a per-wheel gradient cost more than the rest of the wheel).
+    const nxs = pcx + hx;
+    const nys = pcy + hy;
+    ctx.beginPath();
+    for (let i = 0; i < N; i++) {
+      const px = nxs + ax * WHEEL_COS[i];
+      const py = nys + ay * WHEEL_COS[i] - bz * WHEEL_SIN[i];
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = shade(hex, 1.02);
+    ctx.fill();
   }
 
   /**
@@ -457,11 +481,15 @@ export class Painter {
   footprintShadow(cx: number, cy: number, len: number, wid: number, a: number, alpha = 0.2): void {
     const ca = Math.cos(a);
     const sa = Math.sin(a);
-    const layers: Array<[number, number]> = [
-      [0.12, alpha * 0.35],
-      [0.06, alpha * 0.45],
-      [0, alpha * 0.6],
-    ];
+    // Three feathered layers up close; one layer (same overall darkness) when zoomed out.
+    const layers: Array<[number, number]> =
+      this.cam.zoom >= 1.2
+        ? [
+            [0.12, alpha * 0.35],
+            [0.06, alpha * 0.45],
+            [0, alpha * 0.6],
+          ]
+        : [[0.05, alpha * 0.85]];
     for (const [grow, al] of layers) {
       const hl = len / 2 + grow;
       const hw = wid / 2 + grow;
@@ -474,8 +502,9 @@ export class Painter {
         [hl - rr, -hw + rr, (3 * Math.PI) / 2],
       ];
       for (const [lx, ly, a0] of corners) {
-        for (let i = 0; i <= 4; i++) {
-          const t = a0 + (i / 4) * (Math.PI / 2);
+        const segs = this.cam.zoom >= 1.2 ? 4 : 2;
+        for (let i = 0; i <= segs; i++) {
+          const t = a0 + (i / segs) * (Math.PI / 2);
           const px = lx + Math.cos(t) * rr;
           const py = ly + Math.sin(t) * rr;
           pts.push(this.P(cx + ca * px - sa * py, cy + sa * px + ca * py));

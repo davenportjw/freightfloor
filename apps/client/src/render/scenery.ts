@@ -564,7 +564,12 @@ export function drawCargoItem(
   propShadow(p, cx, cy, 0.66, 0.66, z0);
   if (o.p0) auraRing(p, cx, cy, z0, '#EF4444');
   else if (o.isTransfer) auraRing(p, cx, cy, z0, NET_COLOR);
+  // LOD (matches drawRack's 0.7 threshold): zoomed out, the pallet base is one slab and thin
+  // straps / labels / lids are skipped; the silhouette and colours stay the same.
+  const lowDetail = (p.cam?.zoom ?? 1) < 0.7;
+  if (lowDetail) p.aaBox(cx - 0.32, cy - 0.32, 0.64, 0.64, z0, 3.4, '#A16207');
   for (const q of cargoPrims(o, siteId).prims) {
+    if (lowDetail && (q.z0 < 3.4 || q.h < 1.2)) continue;
     if (q.kind === 'cyl') p.cyl(cx + q.x, cy + q.y, q.w / 2, z0 + q.z0, q.h, q.hex);
     else p.aaBox(cx + q.x - q.w / 2, cy + q.y - q.d / 2, q.w, q.d, z0 + q.z0, q.h, q.hex);
   }

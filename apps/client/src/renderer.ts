@@ -1040,6 +1040,7 @@ export class WarehouseRenderer {
       });
     }
     for (const c of map.chargers) {
+      if (!this.visible(c.x + 0.5, c.y + 0.5)) continue;
       const busy = world.vehicles.some(
         (v) => isVehicleCharging(v) && Math.hypot(v.px - (c.x + 0.5), v.py - (c.y + 0.5)) < 0.9,
       );
@@ -1059,6 +1060,7 @@ export class WarehouseRenderer {
       const z0 = elevated ? isoZ(beamTopM(level)) : 0; // sits on the liftGeometry beam
       const px = elevated ? s.rx * 0.65 + s.ax * 0.35 : s.ax;
       const py = elevated ? s.ry * 0.65 + s.ay * 0.35 : s.ay;
+      if (!this.visible(px + 0.5, py + 0.5, TW)) continue; // off-screen pallets cost ~10 primitives each
       const isGuidedTarget =
         elevated &&
         (opts.guide?.order?.id === o.id || (opts.guide?.kind === 'pick' && opts.guide?.x === s.ax && opts.guide?.y === s.ay));
@@ -1079,7 +1081,7 @@ export class WarehouseRenderer {
     // cones
     for (const k of world.cones) {
       const [x, y] = k.split(',').map(Number);
-      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !this.visible(x + 0.5, y + 0.5)) continue;
       items.push({
         d: depth(x, y, 1),
         fn: () => {
@@ -1091,6 +1093,7 @@ export class WarehouseRenderer {
     const hl = opts.highlightStrategy;
     for (const v of world.vehicles) {
       const p = this.poses.get(v.id)!;
+      if (!this.visible(p.x, p.y, TW * 1.5)) continue;
       const strat = stratOf(v);
       const ov = opts.overlays.get(v.id);
       items.push({

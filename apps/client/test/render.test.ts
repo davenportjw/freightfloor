@@ -379,9 +379,8 @@ describe('render/scenery & multi-site visual themes', () => {
   });
 
   it('Painter.wheel draws tread + sidewall, and drawVehicle grounds models with a footprint shadow', async () => {
-    const { Painter, convexHull } = await import('../src/render/painter.js');
+    const { Painter } = await import('../src/render/painter.js');
     const { drawVehicle } = await import('../src/render/vehicles.js');
-    expect(convexHull([[0, 0], [2, 0], [1, 1], [2, 2], [0, 2]])).toHaveLength(4);
     let fills = 0;
     const ctx: any = {
       save() {},
