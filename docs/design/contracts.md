@@ -50,7 +50,7 @@ maxDrivers?: number;
 ```
 
 ## Renderer API (Agent B implements; Agent C consumes)
-`apps/client/src/renderer.ts` keeps exporting `WarehouseRenderer`, `RenderVehicleOverlay`, `headingToIndex16`, `resolveVehicleSpriteKey` (keep the last two even if unused, existing tests import them).
+`apps/client/src/renderer.ts` keeps exporting `WarehouseRenderer` and `RenderVehicleOverlay`. (`headingToIndex16`, `resolveVehicleSpriteKey`, `resolveCargoSpriteKey`, `resolveConveyorSpriteKey` and `setAtlas` were removed with the baked sprite atlas; every object is drawn procedurally.)
 
 ```ts
 export interface RenderVehicleOverlay { brainThinking?: boolean; brainError?: string | null; }

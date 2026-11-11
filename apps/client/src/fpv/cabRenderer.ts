@@ -24,9 +24,10 @@ import { arrowColor, BUBBLE_MS, CALLOUT_MS, calloutColor, guideUrgency, wrapBubb
 import { forkHeightM, isoZ, ISO_PX_PER_M, liftWindowM, beamTopM, TILE_M } from '../render/liftGeometry.js';
 import { PoseTracker, type Pose } from '../render/motion.js';
 import { Painter } from '../render/painter.js';
-import { drawCargoItem, drawConveyorItem, drawRack, drawStruct, getSiteVisuals, teamColor } from '../render/scenery.js';
-import { dockParts, dockTruckFrame, rigParts, SimClock } from '../render/trucks.js';
-import { vehicleParts } from '../render/vehicles.js';
+import { drawCargoItem, drawCharger, drawCone, drawConveyorItem, drawRack, drawStruct, getSiteVisuals, teamColor } from '../render/scenery.js';
+import { dockParts, dockTruckFrame, rigParts, SimClock, type RigBox } from '../render/trucks.js';
+import { footprintOf, modelOf, vehicleParts, type Part } from '../render/vehicles.js';
+import { WheelOdometer, type WheelMotion } from '../render/wheels.js';
 import { watchDevicePixelRatio, watchElementSize } from '../render/dpr.js';
 import { PrimRecorder, parseColor, type Prim } from './boxSink.js';
 import {
@@ -45,6 +46,169 @@ import { resolveLiftTarget, type LiftTarget } from './liftTarget.js';
 const M_PER_PX = 1 / ISO_PX_PER_M;
 const FLOOR_PX_PER_TILE = 32;
 const GRADE_COL = { perfect: '#34d399', clean: '#fbbf24', scrape: '#f87171' } as const;
+
+/**
+ * Lambert material with two cheap, instancing-aware shading terms patched into the stock shader:
+ * - edge ink: darkens texels within a few cm of a box edge (measured in metres via the instance
+ *   scale, so a 6 m rack upright and a 3 cm fork tip get the same line weight), echoing the iso
+ *   painter's outlined faces;
+ * - floor AO: darkens the first ~35 cm above the floor so parts sit on the ground instead of
+ *   floating.
+ * Cylinders / wheels skip the edge term (their unit-cube coordinates aren't box edges).
+ */
+function shadedMaterial(o: { edges: boolean; transparent?: boolean; opacity?: number }): THREE.MeshLambertMaterial {
+  const mat = new THREE.MeshLambertMaterial({
+    color: 0xffffff,
+    transparent: Boolean(o.transparent),
+    opacity: o.opacity ?? 1,
+    depthWrite: !o.transparent,
+  });
+  mat.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace(
+        '#include <common>',
+        '#include <common>\nvarying vec3 vBoxLocal;\nvarying vec3 vBoxScale;\nvarying float vWorldY;',
+      )
+      .replace(
+        '#include <begin_vertex>',
+        [
+          '#include <begin_vertex>',
+          'vBoxLocal = position;',
+          '#ifdef USE_INSTANCING',
+          'vBoxScale = vec3(length(instanceMatrix[0].xyz), length(instanceMatrix[1].xyz), length(instanceMatrix[2].xyz));',
+          'vWorldY = (modelMatrix * instanceMatrix * vec4(position, 1.0)).y;',
+          '#else',
+          'vBoxScale = vec3(1.0);',
+          'vWorldY = (modelMatrix * vec4(position, 1.0)).y;',
+          '#endif',
+        ].join('\n'),
+      );
+    sh.fragmentShader = sh.fragmentShader
+      .replace(
+        '#include <common>',
+        '#include <common>\nvarying vec3 vBoxLocal;\nvarying vec3 vBoxScale;\nvarying float vWorldY;',
+      )
+      .replace(
+        '#include <color_fragment>',
+        [
+          '#include <color_fragment>',
+          o.edges
+            ? [
+                'vec3 dEdge = (0.5 - abs(vBoxLocal)) * vBoxScale;',
+                'float eMn = min(dEdge.x, min(dEdge.y, dEdge.z));',
+                'float eMx = max(dEdge.x, max(dEdge.y, dEdge.z));',
+                'float eMid = dEdge.x + dEdge.y + dEdge.z - eMn - eMx;',
+                'diffuseColor.rgb *= mix(0.7, 1.0, smoothstep(0.008, 0.03, eMid));',
+              ].join('\n')
+            : '',
+          'diffuseColor.rgb *= mix(0.68, 1.0, smoothstep(0.0, 0.35, vWorldY));',
+        ].join('\n'),
+      );
+  };
+  return mat;
+}
+
+/** Soft rounded-rectangle alpha texture for blob shadows (white, alpha-feathered edges). */
+function softShadowTexture(): THREE.Texture {
+  const N = 64;
+  const cv = document.createElement('canvas');
+  cv.width = N;
+  cv.height = N;
+  const g = cv.getContext('2d');
+  if (g) {
+    // Shadow-only fill: draw the shape far off-canvas and let its blurred shadow land in frame.
+    g.shadowColor = '#ffffff';
+    g.shadowBlur = N * 0.16;
+    g.shadowOffsetX = N * 10;
+    g.fillStyle = '#ffffff';
+    const m = N * 0.2;
+    const r = N * 0.16;
+    const x = m - N * 10;
+    const w = N - 2 * m;
+    g.beginPath();
+    g.moveTo(x + r, m);
+    g.arcTo(x + w, m, x + w, m + w, r);
+    g.arcTo(x + w, m + w, x, m + w, r);
+    g.arcTo(x, m + w, x, m, r);
+    g.arcTo(x, m, x + w, m, r);
+    g.closePath();
+    g.fill();
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/** Instanced, oriented soft blob shadows lying on the floor (vehicles, floor pallets, chargers, cones). */
+class ShadowBatch {
+  readonly mesh: THREE.InstancedMesh;
+  private readonly m = new THREE.Matrix4();
+  private readonly q = new THREE.Quaternion();
+  private readonly p = new THREE.Vector3();
+  private readonly s = new THREE.Vector3();
+  private readonly up = new THREE.Vector3(0, 1, 0);
+  private n = 0;
+
+  constructor(scene: THREE.Scene, cap = 1024) {
+    const geo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x0f172a,
+      map: softShadowTexture(),
+      transparent: true,
+      opacity: 0.5,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+    this.mesh = new THREE.InstancedMesh(geo, mat, cap);
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.mesh.frustumCulled = false;
+    this.mesh.count = 0;
+    scene.add(this.mesh);
+  }
+
+  begin(): void {
+    this.n = 0;
+  }
+
+  /** Footprint centre (grid), size (tiles) and heading; the texture's feather adds ~60 % margin. */
+  add(gx: number, gy: number, len: number, wid: number, a: number): void {
+    if (this.n >= this.mesh.instanceMatrix.count) return;
+    this.p.set(gx * TILE_M, 0.006, gy * TILE_M);
+    this.q.setFromAxisAngle(this.up, objectYaw(a));
+    this.s.set(len * TILE_M * 1.65, 1, wid * TILE_M * 1.65);
+    this.m.compose(this.p, this.q, this.s);
+    this.mesh.setMatrixAt(this.n++, this.m);
+  }
+
+  end(): void {
+    this.mesh.count = this.n;
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  dispose(): void {
+    this.mesh.geometry.dispose();
+    const mat = this.mesh.material as THREE.MeshBasicMaterial;
+    mat.map?.dispose();
+    mat.dispose();
+    this.mesh.dispose();
+  }
+}
+
+/** Record one vehicle part into a prim recorder (wheels as true-scale axle cylinders). */
+function recordPart(rec: PrimRecorder, q: Part, a: number): void {
+  const ya = a + (q.yaw ?? 0);
+  if (q.shape === 'wheel' && q.axleM !== undefined) rec.axleWheel(q.cx, q.cy, q.len, q.wid, ya, q.axleM, q.hex);
+  else if (q.shape === 'cyl') rec.cyl(q.cx, q.cy, q.len / 2, q.z0, q.h, q.hex);
+  else rec.oBox(q.cx, q.cy, q.len, q.wid, ya, q.z0, q.h, q.hex);
+}
+
+/** Record one dock-rig box (tyres / rims as true-scale wheels; rigs always drive along x). */
+function recordRigBox(rec: PrimRecorder, b: RigBox): void {
+  if (b.wheel) rec.axleWheel(b.x + b.w / 2, b.y + b.d / 2, b.w, b.d, 0, b.wheel.axleM, b.hex);
+  else rec.aaBox(b.x, b.y, b.w, b.d, b.z0, b.h, b.hex);
+}
 
 /** Instanced batch of unit boxes or cylinders with per-instance colour. */
 class Batch {
@@ -177,18 +341,29 @@ export class CabRenderer {
 
   private readonly boxGeo = new THREE.BoxGeometry(1, 1, 1);
   private readonly cylGeo = new THREE.CylinderGeometry(0.5, 0.5, 1, 14);
-  private readonly opaqueMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-  private readonly glassMat = new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.4, depthWrite: false });
+  /** Unit wheel: cylinder turned so its axle runs along local Z (across the heading). */
+  private readonly wheelGeo = new THREE.CylinderGeometry(0.5, 0.5, 1, 22).rotateX(Math.PI / 2);
+  private readonly opaqueMat = shadedMaterial({ edges: true });
+  private readonly roundMat = shadedMaterial({ edges: false });
+  private readonly glassMat = shadedMaterial({ edges: true, transparent: true, opacity: 0.4 });
+  private readonly glassRoundMat = shadedMaterial({ edges: false, transparent: true, opacity: 0.4 });
   /** Fainter glass for my own chassis (the hood must not hide the forks). */
-  private readonly faintMat = new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.2, depthWrite: false });
+  private readonly faintMat = shadedMaterial({ edges: true, transparent: true, opacity: 0.2 });
+  private readonly wheels = new WheelOdometer();
 
   private staticBox: Batch;
   private staticCyl: Batch;
   private dynBox: Batch;
   private dynCyl: Batch;
   private dynGlass: Batch;
+  private dynWheel: Batch;
+  private dynGlassCyl: Batch;
+  private dynGlassWheel: Batch;
+  private meGlassCyl: Batch;
   private meBox: Batch;
   private meCyl: Batch;
+  private meWheel: Batch;
+  private readonly shadows: ShadowBatch;
   private meGlass: Batch;
   private meFaint: Batch;
   private readonly rings: FlatBatch;
@@ -250,12 +425,18 @@ export class CabRenderer {
     this.scene.add(sun);
 
     this.staticBox = new Batch(this.scene, this.boxGeo, this.opaqueMat, 4096);
-    this.staticCyl = new Batch(this.scene, this.cylGeo, this.opaqueMat, 1024);
+    this.staticCyl = new Batch(this.scene, this.cylGeo, this.roundMat, 1024);
     this.dynBox = new Batch(this.scene, this.boxGeo, this.opaqueMat, 2048);
-    this.dynCyl = new Batch(this.scene, this.cylGeo, this.opaqueMat, 512);
+    this.dynCyl = new Batch(this.scene, this.cylGeo, this.roundMat, 512);
     this.dynGlass = new Batch(this.scene, this.boxGeo, this.glassMat, 256);
+    this.dynWheel = new Batch(this.scene, this.wheelGeo, this.roundMat, 512);
+    this.dynGlassCyl = new Batch(this.scene, this.cylGeo, this.glassRoundMat, 64);
+    this.dynGlassWheel = new Batch(this.scene, this.wheelGeo, this.glassRoundMat, 64);
+    this.meGlassCyl = new Batch(this.scene, this.cylGeo, this.glassRoundMat, 32, 1);
     this.meBox = new Batch(this.scene, this.boxGeo, this.opaqueMat, 128, 1);
-    this.meCyl = new Batch(this.scene, this.cylGeo, this.opaqueMat, 32, 1);
+    this.meCyl = new Batch(this.scene, this.cylGeo, this.roundMat, 32, 1);
+    this.meWheel = new Batch(this.scene, this.wheelGeo, this.roundMat, 16, 1);
+    this.shadows = new ShadowBatch(this.scene);
     this.meGlass = new Batch(this.scene, this.boxGeo, this.glassMat, 64, 1);
     this.meFaint = new Batch(this.scene, this.boxGeo, this.faintMat, 64, 1);
     this.rings = new FlatBatch(this.scene, new THREE.RingGeometry(0.82, 1, 40), 0.9);
@@ -385,7 +566,8 @@ export class CabRenderer {
 
   destroy(): void {
     for (const fn of this.cleanup.splice(0)) fn();
-    for (const b of [this.staticBox, this.staticCyl, this.dynBox, this.dynCyl, this.dynGlass, this.meBox, this.meCyl, this.meGlass, this.meFaint]) b.dispose();
+    for (const b of [this.staticBox, this.staticCyl, this.dynBox, this.dynCyl, this.dynGlass, this.dynWheel, this.dynGlassCyl, this.dynGlassWheel, this.meBox, this.meCyl, this.meWheel, this.meGlass, this.meGlassCyl, this.meFaint]) b.dispose();
+    this.shadows.dispose();
     this.floor?.geometry.dispose();
     this.gl.dispose();
     this.glCanvas.remove();
@@ -480,6 +662,16 @@ export class CabRenderer {
       g.lineTo(W * S, y * S + 0.5);
     }
     g.stroke();
+    // Baked ambient occlusion: soft dark halos where racks / structures meet the floor.
+    g.save();
+    g.shadowColor = 'rgba(15,23,42,0.45)';
+    g.shadowBlur = S * 0.35;
+    g.shadowOffsetX = W * S + S * 4;
+    g.fillStyle = '#000';
+    const off = -(W * S + S * 4);
+    for (const r of map.racks) g.fillRect(off + (r.x + 0.04) * S, (r.y + 0.04) * S, S * 0.92, S * 0.92);
+    for (const st of map.structs) g.fillRect(off + st.x * S, st.y * S, st.w * S, st.h * S);
+    g.restore();
     // one-way lane chevrons
     g.strokeStyle = 'rgba(71,85,105,0.55)';
     g.lineWidth = Math.max(1, S * 0.05);
@@ -633,6 +825,7 @@ export class CabRenderer {
     const rec = this.rec;
     rec.clear();
     rec.alphaMul = 1;
+    this.shadows.begin();
     const map = world.map;
     // Order pallets: on their shelf level when Lift Mode is on (always in the cab), else at the aisle.
     for (const o of world.orders) {
@@ -644,6 +837,7 @@ export class CabRenderer {
       const px = elevated ? s.rx * 0.65 + s.ax * 0.35 : s.ax;
       const py = elevated ? s.ry * 0.65 + s.ay * 0.35 : s.ay;
       drawCargoItem(rec.asPainter(), px, py, z0, o, world.siteId);
+      if (z0 === 0) this.shadows.add(px + 0.5, py + 0.5, 0.64, 0.64, 0);
     }
     // Conveyor totes.
     const dockT = this.dockClock.update(world.t, nowMs);
@@ -689,7 +883,7 @@ export class CabRenderer {
         chocked: frame.phase === 'docked',
         doorPallets: frame.phase === 'docked' ? r.doorPallets : null,
       })) {
-        rec.aaBox(b.x, b.y, b.w, b.d, b.z0, b.h, b.hex);
+        recordRigBox(rec, b);
       }
       rec.alphaMul = 1;
     }
@@ -698,80 +892,95 @@ export class CabRenderer {
       const busy = world.vehicles.some(
         (v) => (v.state === 'charging' || v.humanCharging) && Math.hypot(v.px - (c.x + 0.5), v.py - (c.y + 0.5)) < 0.9,
       );
-      rec.aaBox(c.x + 0.3, c.y + 0.82, 0.4, 0.14, 0, 16, busy ? '#22C55E' : '#16A34A');
+      drawCharger(rec.asPainter(), c.x, c.y, busy);
+      this.shadows.add(c.x + 0.5, c.y + 0.88, 0.48, 0.2, 0);
     }
     // Cones.
     for (const k of world.cones) {
       const [x, y] = k.split(',').map(Number);
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      rec.aaBox(x + 0.25, y + 0.25, 0.5, 0.5, 0, 2, '#334155');
-      rec.aaBox(x + 0.36, y + 0.36, 0.28, 0.28, 2, 9, '#F97316');
-      rec.aaBox(x + 0.4, y + 0.4, 0.2, 0.2, 7, 2, '#FFFFFF');
+      drawCone(rec.asPainter(), x, y);
+      this.shadows.add(x + 0.5, y + 0.5, 0.5, 0.5, 0);
     }
-    // Rival vehicles.
+    // Vehicles: soft footprint shadows for everyone (mine included), full models for rivals.
     for (const v of world.vehicles) {
-      if (v.id === me.id) continue;
       const p = this.poses.get(v.id);
       if (!p) continue;
-      for (const q of vehicleParts(v, p, nowMs, world.siteId)) rec.oBox(q.cx, q.cy, q.len, q.wid, p.a, q.z0, q.h, q.hex);
+      const fp = footprintOf(modelOf(v.type));
+      this.shadows.add(p.x + Math.cos(p.a) * fp.ox, p.y + Math.sin(p.a) * fp.ox, fp.len, fp.wid, p.a);
+      if (v.id === me.id) continue;
+      const motion = this.motionFor(v.id, p, nowMs);
+      for (const q of vehicleParts(v, p, nowMs, world.siteId, true, 0, { motion, lugs: Boolean(motion) })) recordPart(rec, q, p.a);
     }
+    this.shadows.end();
     const opaque = rec.prims.filter((p) => p.alpha >= 0.99);
     this.dynBox.fill(opaque.filter((p) => p.kind === 'box'));
     this.dynCyl.fill(opaque.filter((p) => p.kind === 'cyl'));
-    this.dynGlass.fill(rec.prims.filter((p) => p.alpha < 0.99));
+    this.dynWheel.fill(opaque.filter((p) => p.kind === 'wheel'));
+    const glass = rec.prims.filter((p) => p.alpha < 0.99);
+    this.dynGlass.fill(glass.filter((p) => p.kind === 'box'));
+    this.dynGlassCyl.fill(glass.filter((p) => p.kind === 'cyl'));
+    this.dynGlassWheel.fill(glass.filter((p) => p.kind === 'wheel'));
+  }
+
+  /** Wheel roll / steer for a vehicle (none under reduced motion: wheels sit still and straight). */
+  private motionFor(id: string, p: Pose, nowMs: number): WheelMotion | undefined {
+    const m = this.wheels.update(id, p, nowMs);
+    return this.reducedMotion ? undefined : m;
   }
 
   /**
-   * My own truck, seen from the seat. Same parts as the iso model, re-classified for a cab:
-   * - mast: the solid slab becomes two slim rails + a top crossbar (you look *between* them);
-   * - forks + high-vis tips: solid (they are what you aim with);
-   * - carriage backrest, carried cargo and the chassis: see-through, so neither the load nor the
-   *   hood hides the forks / rack;
+   * My own truck, seen from the seat. Same parts as the iso model, re-styled by `role`:
+   * - mast rails / tie bars, forks + high-vis tips, wheels and hubs: solid (they are what you aim
+   *   with, and the tyres ground the view at the bottom of the frame);
+   * - mast tie bars only on the topmost stage, so the collapsed outer stage doesn't bar the view
+   *   once the inner stage telescopes up;
+   * - carriage backrest and carried cargo: see-through (40 %), so the load never hides the rack;
+   * - chassis / body / counterweight etc.: ghosted (20 %), so the hood never hides the forks;
    * - overhead-guard posts / roof and the centre lift cylinder: dropped (at eye distance they
    *   filled half the screen).
    */
   private buildMe(me: Vehicle, p: Pose, siteId: string | undefined, nowMs: number): void {
     const rec = this.meRec;
     rec.clear();
-    const bare = vehicleParts(me, p, nowMs, siteId, false);
-    const full = vehicleParts(me, p, nowMs, siteId, true);
-    const keyOf = (q: { cx: number; cy: number; z0: number; h: number; hex: string }) =>
-      `${q.cx.toFixed(4)}|${q.cy.toFixed(4)}|${q.z0}|${q.h}|${q.hex}`;
-    const bareKeys = new Set(bare.map(keyOf));
-    const ca = Math.cos(p.a);
-    const sa = Math.sin(p.a);
-    const forkZ = isoZ(forkHeightM(me.fork ?? 0));
-    const mastTop = Math.max(0, ...bare.filter((q) => q.role === 'mast').map((q) => q.z0 + q.h));
-    for (const q of bare) {
-      const hex = q.hex.toUpperCase();
-      const isMast = q.role === 'mast';
-      const isGuardPost = hex === '#334155' && q.z0 === 10 && q.h === 14;
-      const isGuardRoof = hex === '#475569' && q.z0 === 24 && q.wid > 0.3;
-      const isCylinder = hex === '#CBD5E1' && q.z0 === 2;
-      const isBackrest = hex === '#1E293B' && q.h === 5.5;
-      const isFork = Math.abs(q.z0 - forkZ) < 1e-6 && q.h === 2 && q.wid < 0.1;
-      if (isGuardPost || isGuardRoof || isCylinder) continue;
-      if (isMast) {
-        const half = q.wid / 2 - 0.02;
-        for (const sgn of [-1, 1]) {
-          rec.oBox(q.cx - sa * half * sgn, q.cy + ca * half * sgn, 0.05, 0.025, p.a, q.z0, q.h, q.hex);
-        }
-        // Crossbar only on the topmost stage, so the collapsed outer stage doesn't bar the view once
-        // the inner stage telescopes up.
-        if (q.z0 + q.h >= mastTop - 1e-6) rec.oBox(q.cx, q.cy, 0.05, q.wid, p.a, q.z0 + q.h - 1.2, 1.2, q.hex);
-        continue;
+    const motion = this.motionFor(me.id, p, nowMs);
+    const parts = vehicleParts(me, p, nowMs, siteId, true, 0, { motion, lugs: Boolean(motion) });
+    const mastTop = Math.max(0, ...parts.filter((q) => q.role === 'mast').map((q) => q.z0 + q.h));
+    for (const q of parts) {
+      switch (q.role) {
+        case 'guardPost':
+        case 'guardRoof':
+        case 'liftCylinder':
+          continue;
+        case 'mastTie':
+          if (q.z0 + q.h < mastTop - 1e-6) continue;
+          rec.alphaMul = 1;
+          break;
+        case 'mast':
+        case 'fork':
+        case 'forkTip':
+        case 'wheel':
+        case 'hub':
+        case 'lug':
+          rec.alphaMul = 1;
+          break;
+        case 'backrest':
+        case 'cargo':
+          rec.alphaMul = 0.4;
+          break;
+        default:
+          rec.alphaMul = 0.2;
       }
-      rec.alphaMul = isFork ? 1 : isBackrest ? 0.4 : 0.2;
-      rec.oBox(q.cx, q.cy, q.len, q.wid, p.a, q.z0, q.h, q.hex);
-      rec.alphaMul = 1;
+      recordPart(rec, q, p.a);
     }
-    rec.alphaMul = 0.4;
-    for (const q of full) if (!bareKeys.has(keyOf(q))) rec.oBox(q.cx, q.cy, q.len, q.wid, p.a, q.z0, q.h, q.hex);
     rec.alphaMul = 1;
     const opaque = rec.prims.filter((x) => x.alpha >= 0.99);
     this.meBox.fill(opaque.filter((x) => x.kind === 'box'));
     this.meCyl.fill(opaque.filter((x) => x.kind === 'cyl'));
-    this.meGlass.fill(rec.prims.filter((x) => x.alpha < 0.99 && x.alpha >= 0.3));
+    this.meWheel.fill(opaque.filter((x) => x.kind === 'wheel'));
+    const glass = rec.prims.filter((x) => x.alpha < 0.99 && x.alpha >= 0.3);
+    this.meGlass.fill(glass.filter((x) => x.kind === 'box'));
+    this.meGlassCyl.fill(glass.filter((x) => x.kind !== 'box'));
     this.meFaint.fill(rec.prims.filter((x) => x.alpha < 0.3));
   }
 

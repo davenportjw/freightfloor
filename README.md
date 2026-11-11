@@ -66,7 +66,7 @@
 
 ## Why We Built It
 
-1. **Because driving an isometric forklift is genuinely fun.** Snatching a `P0` rush pallet off a crowded receiving dock, threading a narrow aisle past twenty autonomous forklifts with `Space` boost, and sliding onto a charger pad at `8%` battery on a custom 2:1 isometric Canvas2D + 3D sprite-atlas renderer is immediately tactile and rewarding.
+1. **Because driving an isometric forklift is genuinely fun.** Snatching a `P0` rush pallet off a crowded receiving dock, threading a narrow aisle past twenty autonomous forklifts with `Space` boost, and sliding onto a charger pad at `8%` battery on a custom procedural 2:1 isometric Canvas2D renderer (plus a three.js first-person Cab View) is immediately tactile and rewarding.
 2. **To have a real, high-frequency multiplayer sandbox for production AI engineering.** Most AI demos are turn-based chat boxes. We wanted an always-on, authoritative 10 Hz environment with real physics, contention, strict latency budgets, and untrusted public input where we can benchmark production AI patterns end-to-end:
    - **Hybrid Neuro-Symbolic Control**: High-level tactical reasoning (`gemini-3.5-flash-lite` choosing strategy weights, shift cards, Dispatcher's Call proposals, and natural-language command routing with strict JSON schemas) paired with deterministic 10 Hz physics, occupancy reservations, and A\* pathfinding (`packages/sim`).
    - **7-Layer Adversarial Prompt Defense (`@warehouse/armor`)**: Untrusted natural-language manager orders and player callsigns pass through Unicode hygiene, **Google Cloud Model Armor** (`sanitizeUserPrompt` + `sanitizeModelResponse`), cryptographic nonce-fenced least-privilege parsing, Zod schema validation, and per-player strike/governance clamps.
@@ -131,7 +131,6 @@ warehouse/
 │   ├── lobby/          # Public Fastify gateway, shard placement/queue directory & authenticated WS reverse proxy
 │   └── site/           # Private authoritative regional shard server, Vertex AI brains, Dispatcher's Call & Firestore
 ├── tools/
-│   ├── sprites/        # Pure-TypeScript 96×96 isometric 3D sprite atlas generator (atlas.png + atlas.json)
 │   ├── smoke/          # Live HTTP/WS, Prompt Armor, and headless Chrome UI verification probes
 │   ├── loadtest/       # 128-client Cloud Run Job load harness (112 protocol bots + 16 Gemini 3.5 Flash-Lite pilots)
 │   └── ast-sidecar/    # Multi-compiler AST & Cross-Layer Lineage GraphDB Sidecar (SCIP + SQLite LPG)
@@ -164,7 +163,7 @@ All sensitive values and deployment-specific settings are controlled via environ
 npm install
 npm run build
 ```
-*(Builds are orchestrated and cached via [Wireit](https://github.com/google/wireit), including deterministic 96×96 3D sprite atlas generation in `tools/sprites`.)*
+*(Builds are orchestrated and cached via [Wireit](https://github.com/google/wireit).)*
 
 ### 2. Run the Fast Offline Test Suite
 All unit and integration tests run completely offline in a few seconds without requiring cloud credentials:

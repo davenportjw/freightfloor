@@ -353,61 +353,136 @@ export function drawRack(p: Painter, r: Rack, siteId = 'den-1'): void {
   p.aaBox(x + 0.02, y + 0.02, 0.96, 0.96, H - 1, 2.5, capColor);
 }
 
-/**
- * Resolves the pre-baked isometric 3D cargo sprite key (`cargo_<style>_<variant>`)
- * for an order at the given regional site.
- */
-export function resolveCargoSpriteKey(
-  o: Pick<Order, 'id' | 'p0' | 'isTransfer'>,
-  siteId = 'den-1',
-): string {
-  const theme = getSiteTheme(siteId);
-  const suffix = o.p0
-    ? 'p0'
-    : o.isTransfer
-      ? 'net'
-      : String(Math.abs(o.id || 0) % 3);
-  return `cargo_${theme.cargoStyle}_${suffix}`;
+/** Scale an `#rrggbb` colour's channels by `f`, returning `#rrggbb` (cab + iso painters both parse it). */
+function shadeHex(hex: string, f: number): string {
+  const n = parseInt(hex.slice(1, 7), 16);
+  const ch = (sh: number) => Math.max(0, Math.min(255, Math.round(((n >> sh) & 255) * f)));
+  return `#${((ch(16) << 16) | (ch(8) << 8) | ch(0)).toString(16).padStart(6, '0')}`;
 }
 
 /**
- * Resolves the pre-baked isometric 3D conveyor tote sprite key (`conv_<style>_<variant>`)
- * for a moving outbound tote at the given regional site.
+ * Soft ground shadow under a floor-standing prop (iso only: duck-typed so the Cab View's
+ * `PrimRecorder` and test painters skip it; the Cab View has its own instanced blob shadows).
  */
-export function resolveConveyorSpriteKey(index: number, siteId = 'den-1'): string {
-  const theme = getSiteTheme(siteId);
-  const variant = Math.abs(Math.floor(index)) % 2;
-  return `conv_${theme.cargoStyle}_${variant}`;
+function propShadow(p: Painter, cx: number, cy: number, w: number, d: number, z0: number, alpha = 0.22): void {
+  if (z0 > 0.01 || typeof (p as Partial<Painter>).footprintShadow !== 'function') return;
+  p.footprintShadow(cx, cy, w, d, 0, alpha);
+}
+
+/** Floor aura ring for P0 rush / cross-site NET pallets (iso only). */
+function auraRing(p: Painter, cx: number, cy: number, z0: number, col: string): void {
+  if (z0 > 0.01 || typeof (p as Partial<Painter>).poly !== 'function' || typeof p.circleGrid !== 'function') return;
+  p.poly(p.circleGrid(cx, cy, 0.46), null, col, 2);
+}
+
+/** Minimal primitive sink shared by props: boxes centred at (cx, cy), upright cylinders. */
+interface PropSink {
+  box(cx: number, cy: number, w: number, d: number, z0: number, h: number, hex: string): void;
+  cyl(cx: number, cy: number, r: number, z0: number, h: number, hex: string): void;
+}
+
+const painterSink = (p: Painter): PropSink => ({
+  box: (cx, cy, w, d, z0, h, hex) => p.aaBox(cx - w / 2, cy - d / 2, w, d, z0, h, hex),
+  cyl: (cx, cy, r, z0, h, hex) => p.cyl(cx, cy, r, z0, h, hex),
+});
+
+/** Pallet base centred at (cx, cy): three stringer runners under a deck board (3.4 iso-px tall). */
+function palletBase(e: PropSink, cx: number, cy: number, z0: number, deckHex: string, stringerHex: string): void {
+  const s = 0.64;
+  const h = s / 2;
+  for (const oy of [-h + 0.06, 0, h - 0.06]) e.box(cx, cy + oy, s, 0.12, z0, 1.8, stringerHex);
+  e.box(cx, cy, s, s, z0 + 1.8, 1.6, deckHex);
 }
 
 /**
- * Draws an order's physical cargo item at aisle slot `(x, y)` starting at height `z0`.
- * Uses the baked 96x96 2:1 isometric 3D sprite when `p.sprite` has a loaded atlas,
- * falling back to procedural 3D primitives otherwise.
+ * Upright box split around wider horizontal bands, emitted bottom-to-top. The iso painter has no
+ * depth buffer, so a wider band drawn after a taller box would paint its top face over the box
+ * (this is what squashed the old Denver carton flat in Forklift Up).
  */
-export function drawCargoItem(
-  p: Painter,
-  x: number,
-  y: number,
+function bandedBox(
+  e: PropSink,
+  cx: number,
+  cy: number,
+  w: number,
+  d: number,
   z0: number,
-  o: Pick<Order, 'id' | 'p0' | 'isTransfer'>,
-  siteId = 'den-1',
+  h: number,
+  hex: string,
+  bands: ReadonlyArray<{ z: number; h: number; hex: string; grow: number }>,
 ): void {
-  const key = resolveCargoSpriteKey(o, siteId);
-  if (typeof (p as Partial<Painter>).sprite === 'function' && p.sprite(key, x + 0.5, y + 0.5, z0, 1.5)) {
-    return;
+  let z = z0;
+  for (const b of [...bands].sort((a, c) => a.z - c.z)) {
+    if (b.z > z) e.box(cx, cy, w, d, z, b.z - z, hex);
+    e.box(cx, cy, w + b.grow * 2, d + b.grow * 2, b.z, b.h, b.hex);
+    z = b.z + b.h;
   }
+  if (z0 + h > z) e.box(cx, cy, w, d, z, z0 + h - z, hex);
+}
+
+/** Upright cylinder split around wider hoops, emitted bottom-to-top (same reason as `bandedBox`). */
+function hoopedCyl(
+  e: PropSink,
+  cx: number,
+  cy: number,
+  r: number,
+  z0: number,
+  h: number,
+  hex: string,
+  hoops: ReadonlyArray<{ z: number; h: number; hex: string; r: number }>,
+): void {
+  let z = z0;
+  for (const b of [...hoops].sort((a, c) => a.z - c.z)) {
+    if (b.z > z) e.cyl(cx, cy, r, z, b.z - z, hex);
+    e.cyl(cx, cy, b.r, b.z, b.h, b.hex);
+    z = b.z + b.h;
+  }
+  if (z0 + h > z) e.cyl(cx, cy, r, z, z0 + h - z, hex);
+}
+
+/** One cargo primitive in item-local space: centred on (x, y) tiles from the item centre, z0 from its base. */
+export interface CargoPrim {
+  kind: 'box' | 'cyl';
+  x: number;
+  y: number;
+  /** Box: size along x / y (tiles). Cylinder: diameter for both. */
+  w: number;
+  d: number;
+  z0: number;
+  h: number;
+  hex: string;
+}
+
+/**
+ * The single cargo model per regional style, in painter order (bottom-to-top). Floor and shelf
+ * pallets (`drawCargoItem`), pallets carried on the forks (`vehicleParts`) and the 3D Cab View all
+ * build from this, so a pallet looks the same wherever it is and from every camera.
+ */
+export function cargoPrims(o: Pick<Order, 'id' | 'p0' | 'isTransfer'>, siteId = 'den-1'): { prims: CargoPrim[]; height: number } {
   const theme = getSiteTheme(siteId);
   const variant = Math.abs(o.id || 0) % 3;
+  const prims: CargoPrim[] = [];
+  let top = 0;
+  const e: PropSink = {
+    box: (x, y, w, d, z0, h, hex) => {
+      prims.push({ kind: 'box', x, y, w, d, z0, h, hex });
+      top = Math.max(top, z0 + h);
+    },
+    cyl: (x, y, r, z0, h, hex) => {
+      prims.push({ kind: 'cyl', x, y, w: r * 2, d: r * 2, z0, h, hex });
+      top = Math.max(top, z0 + h);
+    },
+  };
+  const zb = 3.4; // top of the pallet deck
 
   if (theme.cargoStyle === 'plants') {
-    // Wooden nursery tray + terracotta pot + botanical canopy / blossom
-    p.aaBox(x + 0.2, y + 0.2, 0.6, 0.6, z0, 2.2, '#A16207');
+    // Cedar nursery tray + soil bed, terracotta pot with a lip, tiered foliage and a blossom.
+    palletBase(e, 0, 0, 0, '#854D0E', '#5C3409');
+    e.box(0, 0, 0.56, 0.56, zb, 2.2, '#3F2E1E');
     const potCol = o.p0 ? '#DC2626' : o.isTransfer ? NET_COLOR : '#C2410C';
-    p.cyl(x + 0.5, y + 0.5, 0.21, z0 + 2.2, 5.2, potCol);
-    const leafCol =
-      variant === 0 ? '#16A34A' : variant === 1 ? '#15803D' : '#059669';
-    p.cyl(x + 0.5, y + 0.5, 0.28, z0 + 7.0, 6.2, leafCol);
+    hoopedCyl(e, 0, 0, 0.22, zb + 2.2, 6.6, potCol, [{ z: zb + 7.0, h: 1.8, hex: shadeHex(potCol, 1.12), r: 0.24 }]);
+    const leafCol = variant === 0 ? '#16A34A' : variant === 1 ? '#15803D' : '#059669';
+    e.cyl(0, 0, 0.29, zb + 8.8, 6.0, leafCol);
+    e.cyl(0, 0, 0.22, zb + 14.8, 3.8, '#22C55E');
     const bloomCol = o.p0
       ? '#FEF08A'
       : o.isTransfer
@@ -417,15 +492,11 @@ export function drawCargoItem(
           : variant === 1
             ? '#4ADE80'
             : '#FACC15';
-    p.cyl(x + 0.5, y + 0.5, 0.14, z0 + 13.0, 2.4, bloomCol);
-    return;
-  }
-
-  if (theme.cargoStyle === 'tech') {
-    // Brushed aluminum wafer base + dark cleanroom FOUP pod + glowing status ring
-    p.aaBox(x + 0.2, y + 0.2, 0.6, 0.6, z0, 2.2, '#94A3B8');
-    const bodyCol = o.p0 ? '#991B1B' : o.isTransfer ? '#312E81' : '#1E293B';
-    p.aaBox(x + 0.24, y + 0.24, 0.52, 0.52, z0 + 2.2, 9.5, bodyCol);
+    e.cyl(0, 0, 0.13, zb + 18.6, 2.4, bloomCol);
+  } else if (theme.cargoStyle === 'tech') {
+    // Brushed aluminium base, cleanroom FOUP pod with a glowing status ring, purge-port cap.
+    palletBase(e, 0, 0, 0, '#94A3B8', '#475569');
+    const podCol = o.p0 ? '#991B1B' : o.isTransfer ? '#312E81' : '#1E293B';
     const glowCol = o.p0
       ? '#F87171'
       : o.isTransfer
@@ -435,14 +506,12 @@ export function drawCargoItem(
           : variant === 1
             ? '#22D3EE'
             : '#34D399';
-    p.aaBox(x + 0.22, y + 0.22, 0.56, 0.56, z0 + 6.5, 2.0, glowCol);
-    p.cyl(x + 0.5, y + 0.5, 0.15, z0 + 11.7, 1.8, glowCol);
-    return;
-  }
-
-  if (theme.cargoStyle === 'artisan') {
-    // Timber pallet + standing oak barrel / copper cask + brass hoop
-    p.aaBox(x + 0.2, y + 0.2, 0.6, 0.6, z0, 2.2, '#A16207');
+    bandedBox(e, 0, 0, 0.52, 0.52, zb, 11.5, podCol, [{ z: zb + 4.8, h: 2.2, hex: glowCol, grow: 0.02 }]);
+    e.cyl(0, 0, 0.16, zb + 11.5, 2.4, '#CBD5E1');
+    e.cyl(0, 0, 0.1, zb + 13.9, 1.5, glowCol);
+  } else if (theme.cargoStyle === 'artisan') {
+    // Hand-hewn timber pallet + oak cask with two tension hoops and a sealed bung lid.
+    palletBase(e, 0, 0, 0, '#A16207', '#78350F');
     const caskCol = o.p0
       ? '#DC2626'
       : o.isTransfer
@@ -452,19 +521,53 @@ export function drawCargoItem(
           : variant === 1
             ? '#92400E'
             : '#B45309';
-    p.cyl(x + 0.5, y + 0.5, 0.25, z0 + 2.2, 10.2, caskCol);
-    const hoopCol = o.p0 ? '#FEF08A' : o.isTransfer ? '#C7D2FE' : '#FBBF24';
-    p.cyl(x + 0.5, y + 0.5, 0.26, z0 + 5.8, 1.6, hoopCol);
-    p.cyl(x + 0.5, y + 0.5, 0.22, z0 + 12.4, 1.2, '#D97706');
-    return;
+    const hoopCol = o.p0 ? '#FEF08A' : o.isTransfer ? '#C7D2FE' : variant === 2 ? '#2DD4BF' : '#FBBF24';
+    hoopedCyl(e, 0, 0, 0.25, zb, 12.5, caskCol, [
+      { z: zb + 2.8, h: 1.6, hex: hoopCol, r: 0.265 },
+      { z: zb + 8.0, h: 1.6, hex: hoopCol, r: 0.265 },
+    ]);
+    e.cyl(0, 0, 0.21, zb + 12.5, 1.5, '#D97706');
+  } else {
+    // Default ('den-1' boxes): timber pallet + corrugated cartons + high-vis strapping.
+    palletBase(e, 0, 0, 0, '#C4A06B', '#78350F');
+    const boxCol = o.p0 ? '#EF4444' : o.isTransfer ? NET_COLOR : variant === 0 ? '#D97706' : variant === 1 ? '#C8963F' : '#B45309';
+    const strapCol = o.p0 ? '#FEF3C7' : o.isTransfer ? '#C7D2FE' : '#FDE68A';
+    if (variant === 1 && !o.p0 && !o.isTransfer) {
+      // Two-layer stack: one base carton, two half cartons on top, a strap over both lids.
+      e.box(0, 0, 0.52, 0.52, zb, 6.2, boxCol);
+      e.box(-0.12, 0, 0.24, 0.48, zb + 6.2, 5.4, '#D97706');
+      e.box(0.13, 0, 0.22, 0.48, zb + 6.2, 5.4, '#B45309');
+      e.box(0, 0, 0.54, 0.12, zb + 11.6, 0.6, strapCol);
+    } else {
+      bandedBox(e, 0, 0, 0.52, 0.52, zb, 11.2, boxCol, [{ z: zb + 4.8, h: 1.8, hex: strapCol, grow: 0.02 }]);
+      e.box(0, 0, 0.12, 0.54, zb + 11.2, 0.6, strapCol); // strap over the lid
+      e.box(-0.06, 0.27, 0.2, 0.02, zb + 7.2, 3.2, '#F8FAFC'); // shipping label (front face)
+    }
   }
+  return { prims, height: top };
+}
 
-  // Default ('den-1' boxes): pallet + cardboard / P0 / transfer carton + strapping band
-  p.aaBox(x + 0.2, y + 0.2, 0.6, 0.6, z0, 2.5, '#C4A06B');
-  const boxCol = o.p0 ? '#EF4444' : o.isTransfer ? NET_COLOR : '#D97706';
-  const strapCol = o.p0 ? '#FEF3C7' : o.isTransfer ? '#C7D2FE' : '#FDE68A';
-  p.aaBox(x + 0.24, y + 0.24, 0.52, 0.52, z0 + 2.5, 9, boxCol);
-  p.aaBox(x + 0.22, y + 0.22, 0.56, 0.56, z0 + 6.5, 1.5, strapCol);
+/**
+ * Draws an order's physical cargo item at aisle slot `(x, y)` starting at height `z0`
+ * (see `cargoPrims`), with a ground shadow and a P0 / NET aura ring when on the floor.
+ */
+export function drawCargoItem(
+  p: Painter,
+  x: number,
+  y: number,
+  z0: number,
+  o: Pick<Order, 'id' | 'p0' | 'isTransfer'>,
+  siteId = 'den-1',
+): void {
+  const cx = x + 0.5;
+  const cy = y + 0.5;
+  propShadow(p, cx, cy, 0.66, 0.66, z0);
+  if (o.p0) auraRing(p, cx, cy, z0, '#EF4444');
+  else if (o.isTransfer) auraRing(p, cx, cy, z0, NET_COLOR);
+  for (const q of cargoPrims(o, siteId).prims) {
+    if (q.kind === 'cyl') p.cyl(cx + q.x, cy + q.y, q.w / 2, z0 + q.z0, q.h, q.hex);
+    else p.aaBox(cx + q.x - q.w / 2, cy + q.y - q.d / 2, q.w, q.d, z0 + q.z0, q.h, q.hex);
+  }
 }
 
 /**
@@ -478,27 +581,53 @@ export function drawConveyorItem(
   index: number,
   siteId = 'den-1',
 ): void {
-  const key = resolveConveyorSpriteKey(index, siteId);
-  if (typeof (p as Partial<Painter>).sprite === 'function' && p.sprite(key, x + 0.5, y, z0, 1.5)) {
-    return;
-  }
   const theme = getSiteTheme(siteId);
+  const cx = x + 0.5;
+  const v = Math.abs(Math.floor(index)) % 2;
   if (theme.cargoStyle === 'plants') {
-    p.cyl(x + 0.5, y, 0.18, z0, 3.8, '#C2410C');
-    p.cyl(x + 0.5, y, 0.23, z0 + 3.5, 4.5, index % 2 ? '#16A34A' : '#22C55E');
+    p.cyl(cx, y, 0.19, z0, 4.0, '#C2410C');
+    p.cyl(cx, y, 0.24, z0 + 4.0, 4.8, v ? '#16A34A' : '#22C55E');
+    p.cyl(cx, y, 0.12, z0 + 8.8, 2.0, v ? '#F472B6' : '#FACC15');
     return;
   }
   if (theme.cargoStyle === 'tech') {
-    p.aaBox(x + 0.22, y - 0.18, 0.56, 0.36, z0, 6.5, '#0F172A');
-    p.aaBox(x + 0.2, y - 0.16, 0.6, 0.32, z0 + 3.2, 1.5, index % 2 ? '#38BDF8' : '#22D3EE');
+    bandedBox(painterSink(p), cx, y, 0.56, 0.36, z0, 7.2, '#0F172A', [{ z: z0 + 3.5, h: 1.8, hex: v ? '#38BDF8' : '#22D3EE', grow: 0.02 }]);
     return;
   }
   if (theme.cargoStyle === 'artisan') {
-    p.cyl(x + 0.5, y, 0.21, z0, 7.2, index % 2 ? '#78350F' : '#92400E');
-    p.cyl(x + 0.5, y, 0.22, z0 + 3.2, 1.3, '#FBBF24');
+    hoopedCyl(painterSink(p), cx, y, 0.21, z0, 8.0, v ? '#78350F' : '#92400E', [{ z: z0 + 3.6, h: 1.5, hex: '#FBBF24', r: 0.22 }]);
     return;
   }
-  p.aaBox(x + 0.22, y - 0.18, 0.56, 0.36, z0, 7, index % 2 ? '#D97706' : '#3B82F6');
+  // Default ('boxes'): tote with a cross strap over the lid and down the visible side.
+  p.aaBox(cx - 0.28, y - 0.18, 0.56, 0.36, z0, 7.5, v ? '#D97706' : '#3B82F6');
+  p.aaBox(cx - 0.29, y - 0.05, 0.58, 0.1, z0 + 7.5, 0.4, '#FEF3C7');
+  p.aaBox(cx + 0.28, y - 0.05, 0.01, 0.1, z0, 7.5, '#FEF3C7');
+}
+
+/**
+ * Battery charger on tile `(x, y)`: a cabinet on a plinth along the tile's south edge (clear of
+ * the parking spot at the tile centre), status screens on both faces, a floor cable to the pad
+ * and a beacon strip that turns amber while a vehicle is charging.
+ */
+export function drawCharger(p: Painter, x: number, y: number, busy: boolean): void {
+  propShadow(p, x + 0.5, y + 0.88, 0.5, 0.24, 0);
+  p.aaBox(x + 0.47, y + 0.55, 0.06, 0.26, 0, 0.6, '#0F172A'); // floor cable to the pad
+  p.aaBox(x + 0.26, y + 0.78, 0.48, 0.2, 0, 2, '#1E293B'); // plinth
+  p.aaBox(x + 0.34, y + 0.785, 0.32, 0.02, 9, 5.5, busy ? '#FEF08A' : '#34D399'); // screen (pad side)
+  p.aaBox(x + 0.28, y + 0.8, 0.44, 0.16, 2, 16, busy ? '#059669' : '#16A34A'); // cabinet
+  p.aaBox(x + 0.34, y + 0.96, 0.32, 0.02, 9, 5.5, busy ? '#FEF08A' : '#34D399'); // screen (aisle side)
+  p.aaBox(x + 0.27, y + 0.79, 0.46, 0.18, 18, 1.8, busy ? '#FACC15' : '#4ADE80'); // beacon strip
+}
+
+/** Traffic cone on tile `(x, y)`: rubber base, tapered orange body with a reflective collar. */
+export function drawCone(p: Painter, x: number, y: number): void {
+  const cx = x + 0.5;
+  const cy = y + 0.5;
+  propShadow(p, cx, cy, 0.5, 0.5, 0);
+  p.aaBox(cx - 0.26, cy - 0.26, 0.52, 0.52, 0, 2.4, '#1E293B');
+  p.cyl(cx, cy, 0.19, 2.4, 5.2, '#EA580C');
+  p.cyl(cx, cy, 0.15, 7.6, 3.2, '#F8FAFC');
+  p.cyl(cx, cy, 0.11, 10.8, 4.2, '#F97316');
 }
 
 /** Benches (returns QA), offices and break room. */

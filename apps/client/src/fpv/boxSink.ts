@@ -5,15 +5,17 @@
  * palette as the iso view. Pure (no three.js), safe for node tests.
  */
 import type { Painter } from '../render/painter.js';
+import { ISO_PX_PER_M, TILE_M } from '../render/liftGeometry.js';
 
 export interface Prim {
-  kind: 'box' | 'cyl';
+  /** `wheel` = cylinder with its axle along the local Z (across the heading). */
+  kind: 'box' | 'cyl' | 'wheel';
   /** Centre on the floor plane (grid units). */
   cx: number;
   cy: number;
-  /** Box: size along its local X (grid units). Cylinder: diameter. */
+  /** Box: size along its local X (grid units). Cylinder / wheel: diameter. */
   sx: number;
-  /** Box: size along its local Z (grid units). Cylinder: diameter. */
+  /** Box: size along its local Z (grid units). Cylinder: diameter. Wheel: tread width. */
   sz: number;
   /** Bottom / height in iso-px (converted to metres by the renderer). */
   z0: number;
@@ -84,13 +86,15 @@ export class PrimRecorder {
     this.push({ kind: 'cyl', cx, cy, sx: r * 2, sz: r * 2, z0, h, a: 0 }, hex);
   }
 
-  /** Never use baked iso sprites in 3D; builders fall back to their procedural primitives. */
-  sprite(): boolean {
-    return false;
-  }
-
-  hasSprite(): boolean {
-    return false;
+  /**
+   * True-scale round wheel: `diam` / `tread` in tiles, heading `a`, axle height in metres. Iso
+   * stretches wheels vertically for readability; the 3D view must not, so the height here is
+   * derived from the diameter rather than the iso part height.
+   */
+  axleWheel(cx: number, cy: number, diam: number, tread: number, a: number, axleM: number, hex: string): void {
+    if (!(diam > 0 && tread > 0)) return;
+    const dM = diam * TILE_M;
+    this.push({ kind: 'wheel', cx, cy, sx: diam, sz: tread, z0: (axleM - dM / 2) * ISO_PX_PER_M, h: dM * ISO_PX_PER_M, a }, hex);
   }
 
   /** Iso projection is meaningless here; builders only use it for 2D extras we skip. */

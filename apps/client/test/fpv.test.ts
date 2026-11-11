@@ -168,6 +168,23 @@ describe('PrimRecorder (iso builders → 3D primitives)', () => {
   });
 });
 
+describe('PrimRecorder wheels (true-scale 3D tyres)', () => {
+  it('axleWheel records a round wheel sitting on the floor regardless of the iso stretch', async () => {
+    const { vehicleParts } = await import('../src/render/vehicles.js');
+    const { ISO_PX_PER_M, TILE_M } = await import('../src/render/liftGeometry.js');
+    const rec = new PrimRecorder();
+    const v: any = { id: 'FL-W', type: 'counterbalance', fork: 0, cargo: [], orders: [] };
+    const tyres = vehicleParts(v, { x: 5, y: 5, a: 0.7 }, 0, 'den-1').filter((q) => q.role === 'wheel');
+    for (const q of tyres) rec.axleWheel(q.cx, q.cy, q.len, q.wid, 0.7 + (q.yaw ?? 0), q.axleM!, q.hex);
+    expect(rec.prims).toHaveLength(tyres.length);
+    for (const p of rec.prims) {
+      expect(p.kind).toBe('wheel');
+      expect(p.z0).toBeCloseTo(0, 9); // bottom of the tyre on the floor
+      expect(p.h / ISO_PX_PER_M).toBeCloseTo(p.sx * TILE_M, 9); // height == diameter (round)
+    }
+  });
+});
+
 describe('resolveLiftTarget', () => {
   it('prefers the active controller slot, else the guided rack order', () => {
     const world = createWorld({ seed: 42 });

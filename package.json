@@ -19,7 +19,6 @@
     "test:site": "npm test -w @warehouse/site",
     "test:lobby": "npm test -w @warehouse/lobby",
     "test:ast": "npm test -w @warehouse/ast-sidecar",
-    "sprites": "wireit",
     "ast:sync": "node --no-warnings tools/ast-sidecar/dist/cli.js sync",
     "ast:query": "node --no-warnings tools/ast-sidecar/dist/cli.js",
     "ast:analyze": "node --no-warnings tools/ast-sidecar/dist/cli.js analyze",
@@ -28,27 +27,11 @@
     "report:retention": "npm run build -w @warehouse/smoke && node tools/smoke/dist/retention.js"
   },
   "wireit": {
-    "sprites": {
-      "command": "node tools/sprites/dist/index.js",
-      "dependencies": [
-        "./tools/sprites:build"
-      ],
-      "files": [
-        "tools/sprites/dist/**"
-      ],
-      "output": [
-        "apps/client/public/assets/atlas.png",
-        "apps/client/public/assets/atlas.json"
-      ],
-      "clean": "if-file-deleted"
-    },
     "build": {
       "dependencies": [
         "./packages/protocol:build",
         "./packages/armor:build",
         "./packages/sim:build",
-        "./tools/sprites:build",
-        "sprites",
         "./apps/client:build",
         "./apps/lobby:build",
         "./apps/site:build",
@@ -62,7 +45,6 @@
         "./packages/protocol:test",
         "./packages/armor:test",
         "./packages/sim:test",
-        "./tools/sprites:test",
         "./apps/client:test",
         "./apps/lobby:test",
         "./apps/site:test",

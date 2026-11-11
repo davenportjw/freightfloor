@@ -1,22 +1,10 @@
 /**
- * Canvas2D isometric drawing primitives (mock: poly, shade, oBox, aaBox, circleGrid, pill, star, sprite).
+ * Canvas2D isometric drawing primitives (mock: poly, shade, oBox, aaBox, cyl, wheel, circleGrid, pill, star).
  * A Painter binds a 2D context to a live camera; all coordinates are grid tiles unless noted.
  */
 import { type Camera, rotateGrid, TH, TW } from './iso.js';
 
 export type Pt = [number, number];
-
-export interface SpriteFrameRect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  anchor?: { x: number; y: number };
-}
-
-export type SpriteFrameEntry =
-  | SpriteFrameRect
-  | { frame: SpriteFrameRect; anchor?: { x: number; y: number } };
 
 const shadeCache = new Map<string, string>();
 
@@ -32,67 +20,32 @@ export function shade(hex: string, f: number): string {
   return c;
 }
 
-export class Painter {
-  public atlasImage: CanvasImageSource | null = null;
-  public atlasFrames: Record<string, SpriteFrameEntry> | null = null;
+/** Convex hull (Andrew's monotone chain) of screen points, counter-clockwise. */
+export function convexHull(points: readonly Pt[]): Pt[] {
+  const pts = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (pts.length < 3) return pts;
+  const cross = (o: Pt, a: Pt, b: Pt) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower: Pt[] = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper: Pt[] = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  upper.pop();
+  lower.pop();
+  return lower.concat(upper);
+}
 
+export class Painter {
   constructor(
     public readonly ctx: CanvasRenderingContext2D,
     public readonly cam: Camera,
   ) {}
-
-  /** Bind a loaded sprite atlas image and frame dictionary for hardware-accelerated blitting. */
-  setAtlas(
-    image: CanvasImageSource | null,
-    frames: Record<string, SpriteFrameEntry> | null,
-  ): void {
-    this.atlasImage = image;
-    this.atlasFrames = frames;
-  }
-
-  /** True when the isometric sprite atlas is loaded and contains `key`. */
-  hasSprite(key: string): boolean {
-    return Boolean(this.atlasImage && this.atlasFrames && this.atlasFrames[key]);
-  }
-
-  /**
-   * Blit a pre-baked 2:1 isometric 3D sprite from the atlas centred at grid `(gx, gy, z0)`.
-   * Returns `true` when drawn, or `false` when the atlas is not yet loaded so callers can
-   * seamlessly fall back to procedural 3D primitives.
-   */
-  sprite(
-    key: string,
-    gx: number,
-    gy: number,
-    z0 = 0,
-    worldTileWidth = 1.5,
-    anchorY = 0.62,
-  ): boolean {
-    const img = this.atlasImage;
-    const entry = this.atlasFrames?.[key];
-    if (!img || !entry || typeof this.ctx?.drawImage !== 'function') return false;
-    if (Math.abs(this.cam.rot ?? 0) > 1e-4) return false;
-    const rect = 'frame' in entry ? entry.frame : entry;
-    const anchor = entry.anchor ?? ('frame' in entry ? entry.frame.anchor : undefined);
-    if (!rect || !rect.w || !rect.h) return false;
-    const [sx, sy] = this.P(gx, gy, z0);
-    const drawW = worldTileWidth * TW * this.cam.zoom;
-    const drawH = drawW * (rect.h / rect.w);
-    const ax = anchor?.x ?? 0.5;
-    const ay = anchor?.y ?? anchorY;
-    this.ctx.drawImage(
-      img,
-      rect.x,
-      rect.y,
-      rect.w,
-      rect.h,
-      sx - drawW * ax,
-      sy - drawH * ay,
-      drawW,
-      drawH,
-    );
-    return true;
-  }
 
   /** Project grid (gx, gy, z) to screen. */
   P(gx: number, gy: number, z = 0): Pt {
@@ -428,6 +381,107 @@ export class Painter {
       ctx.strokeStyle = shade(hex, 1.3);
       ctx.lineWidth = Math.max(0.75, 0.9 * z);
       ctx.stroke();
+    }
+  }
+
+  /**
+   * Wheel: a cylinder whose axle runs across heading `a`. `diam` / `tread` in tiles; `z0` / `h`
+   * in iso px (the tyre's vertical extent, so it can be drawn taller than true scale). Draws the
+   * hidden sidewall joined to the visible one as the tread (convex hull of both silhouettes), then
+   * the camera-facing sidewall with a soft top-lit gradient.
+   */
+  wheel(
+    cx: number,
+    cy: number,
+    diam: number,
+    tread: number,
+    a: number,
+    z0: number,
+    h: number,
+    hex: string,
+    stroke?: string,
+  ): void {
+    if (!(diam > 0 && tread > 0 && h > 0)) return;
+    const rot = this.cam.rot ?? 0;
+    const ux = Math.cos(a);
+    const uy = Math.sin(a);
+    const nx = -uy;
+    const ny = ux;
+    // Axle direction in camera space decides which sidewall faces the viewer (+x,+y is near).
+    const [rnx, rny] = rotateGrid(nx, ny, rot);
+    const near = rnx + rny >= 0 ? 1 : -1;
+    const r = diam / 2;
+    const rz = h / 2;
+    const zc = z0 + rz;
+    const N = 16;
+    const face = (side: number): Pt[] => {
+      const ox = cx + nx * side * (tread / 2);
+      const oy = cy + ny * side * (tread / 2);
+      const out: Pt[] = [];
+      for (let i = 0; i < N; i++) {
+        const t = (i / N) * Math.PI * 2;
+        const c = Math.cos(t) * r;
+        out.push(this.P(ox + ux * c, oy + uy * c, zc + Math.sin(t) * rz));
+      }
+      return out;
+    };
+    const farPts = face(-near);
+    const nearPts = face(near);
+    this.poly(convexHull(farPts.concat(nearPts)), shade(hex, 0.72), stroke);
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const q of nearPts) {
+      if (q[1] < minY) minY = q[1];
+      if (q[1] > maxY) maxY = q[1];
+    }
+    const ctx = this.ctx;
+    if (typeof ctx.createLinearGradient === 'function' && maxY - minY > 0.5) {
+      const g = ctx.createLinearGradient(0, minY, 0, maxY);
+      g.addColorStop(0, shade(hex, 1.15));
+      g.addColorStop(1, shade(hex, 0.82));
+      ctx.beginPath();
+      ctx.moveTo(nearPts[0][0], nearPts[0][1]);
+      for (let i = 1; i < nearPts.length; i++) ctx.lineTo(nearPts[i][0], nearPts[i][1]);
+      ctx.closePath();
+      ctx.fillStyle = g;
+      ctx.fill();
+    } else {
+      this.poly(nearPts, shade(hex, 1));
+    }
+  }
+
+  /**
+   * Soft oriented footprint shadow (rounded rectangle, three feathered layers) for a body of
+   * `len` × `wid` tiles centred at (cx, cy) with heading `a`. Grounds models better than a disc.
+   */
+  footprintShadow(cx: number, cy: number, len: number, wid: number, a: number, alpha = 0.2): void {
+    const ca = Math.cos(a);
+    const sa = Math.sin(a);
+    const layers: Array<[number, number]> = [
+      [0.12, alpha * 0.35],
+      [0.06, alpha * 0.45],
+      [0, alpha * 0.6],
+    ];
+    for (const [grow, al] of layers) {
+      const hl = len / 2 + grow;
+      const hw = wid / 2 + grow;
+      const rr = Math.min(hl, hw) * 0.45;
+      const pts: Pt[] = [];
+      const corners: Array<[number, number, number]> = [
+        [hl - rr, hw - rr, 0],
+        [-hl + rr, hw - rr, Math.PI / 2],
+        [-hl + rr, -hw + rr, Math.PI],
+        [hl - rr, -hw + rr, (3 * Math.PI) / 2],
+      ];
+      for (const [lx, ly, a0] of corners) {
+        for (let i = 0; i <= 4; i++) {
+          const t = a0 + (i / 4) * (Math.PI / 2);
+          const px = lx + Math.cos(t) * rr;
+          const py = ly + Math.sin(t) * rr;
+          pts.push(this.P(cx + ca * px - sa * py, cy + sa * px + ca * py));
+        }
+      }
+      this.poly(pts, `rgba(15,23,42,${al.toFixed(3)})`);
     }
   }
 

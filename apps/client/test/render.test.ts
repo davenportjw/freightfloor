@@ -312,64 +312,163 @@ describe('render/scenery & multi-site visual themes', () => {
       return { n: mast.length, top: Math.max(...mast.map((q) => q.z0 + q.h)) };
     };
     const low = mastTop(0);
-    expect(low.n).toBe(1);
+    expect(low.n).toBe(2); // one stage = twin rails
     expect(low.top).toBe(MAST_COLLAPSED_COUNTERBALANCE);
     const high = mastTop(1);
-    expect(high.n).toBe(2);
+    expect(high.n).toBe(4); // outer + telescoped inner stage
     expect(high.top).toBeGreaterThan(MAST_COLLAPSED_COUNTERBALANCE);
     expect(mastTop(0.5).top).toBeLessThan(high.top);
   });
 
-  it('resolves regional cargo and conveyor sprite keys and blits via Painter.sprite when atlas is loaded', async () => {
-    const {
-      drawCargoItem,
-      drawConveyorItem,
-      resolveCargoSpriteKey,
-      resolveConveyorSpriteKey,
-    } = await import('../src/render/scenery.js');
-    const { Painter } = await import('../src/render/painter.js');
+  it('gives every forklift model real round wheels, and tags every part with a role', async () => {
+    const { vehicleParts, WHEEL_ISO_STRETCH } = await import('../src/render/vehicles.js');
+    const { TILE_M, ISO_PX_PER_M } = await import('../src/render/liftGeometry.js');
+    const pose = { x: 10, y: 10, a: 0.3 };
+    for (const type of ['agv', 'counterbalance', 'reach']) {
+      const v: any = { id: 'FL-W', type, fork: 0, cargo: [], orders: [] };
+      const parts = vehicleParts(v, pose, 0, 'den-1');
+      expect(parts.every((q) => typeof q.role === 'string')).toBe(true);
+      const tyres = parts.filter((q) => q.role === 'wheel');
+      expect(tyres.length).toBeGreaterThanOrEqual(2);
+      for (const t of tyres) {
+        expect(t.shape).toBe('wheel');
+        expect(t.z0).toBe(0); // sits on the floor
+        // 3D axle at the true radius; iso height is the stretched true diameter.
+        expect(t.axleM).toBeCloseTo((t.len * TILE_M) / 2, 9);
+        expect(t.h).toBeCloseTo(t.len * TILE_M * ISO_PX_PER_M * WHEEL_ISO_STRETCH, 9);
+      }
+      expect(parts.filter((q) => q.role === 'hub')).toHaveLength(tyres.length);
+    }
+  });
 
-    expect(resolveCargoSpriteKey({ id: 3, p0: false, card: false } as any, 'den-1')).toBe('cargo_boxes_0');
-    expect(resolveCargoSpriteKey({ id: 4, p0: false, card: true } as any, 'slc-2')).toBe('cargo_plants_1');
-    expect(resolveCargoSpriteKey({ id: 5, p0: true, card: false } as any, 'phx-3')).toBe('cargo_tech_p0');
-    expect(resolveCargoSpriteKey({ id: 6, p0: false, card: false, isTransfer: true } as any, 'abq-4')).toBe(
-      'cargo_artisan_net',
-    );
+  it('steers the rear wheels of a counterbalance and spins rim markers with distance travelled', async () => {
+    const { vehicleParts } = await import('../src/render/vehicles.js');
+    const pose = { x: 10, y: 10, a: 0 };
+    const v: any = { id: 'FL-S', type: 'counterbalance', fork: 0, cargo: [], orders: [] };
+    const still = vehicleParts(v, pose, 0, 'den-1');
+    expect(still.some((q) => q.role === 'lug')).toBe(false);
+    const turning = vehicleParts(v, pose, 0, 'den-1', true, 0, { motion: { travel: 0.4, steer: 0.5 }, lugs: true });
+    const tyres = turning.filter((q) => q.role === 'wheel');
+    const rear = tyres.filter((q) => q.cx < pose.x);
+    const front = tyres.filter((q) => q.cx > pose.x);
+    expect(rear.every((q) => q.yaw === -0.5)).toBe(true); // rear-wheel steering turns opposite
+    expect(front.every((q) => (q.yaw ?? 0) === 0)).toBe(true);
+    const lugA = turning.filter((q) => q.role === 'lug').map((q) => q.z0);
+    const lugB = vehicleParts(v, pose, 0, 'den-1', true, 0, { motion: { travel: 0.5, steer: 0.5 }, lugs: true })
+      .filter((q) => q.role === 'lug')
+      .map((q) => q.z0);
+    expect(lugA).toHaveLength(tyres.length);
+    expect(lugB).not.toEqual(lugA);
+  });
 
-    expect(resolveConveyorSpriteKey(0, 'den-1')).toBe('conv_boxes_0');
-    expect(resolveConveyorSpriteKey(3, 'slc-2')).toBe('conv_plants_1');
-    expect(resolveConveyorSpriteKey(2, 'phx-3')).toBe('conv_tech_0');
-    expect(resolveConveyorSpriteKey(1, 'abq-4')).toBe('conv_artisan_1');
+  it('WheelOdometer accumulates signed travel and estimates steer from yaw rate', async () => {
+    const { WheelOdometer, MAX_STEER } = await import('../src/render/wheels.js');
+    const odo = new WheelOdometer();
+    odo.update('v', { x: 0, y: 0, a: 0 }, 0);
+    const fwd = odo.update('v', { x: 0.5, y: 0, a: 0 }, 100);
+    expect(fwd.travel).toBeCloseTo(0.5, 9);
+    expect(fwd.steer).toBeCloseTo(0, 9);
+    const back = odo.update('v', { x: 0.3, y: 0, a: 0 }, 200);
+    expect(back.travel).toBeCloseTo(0.3, 9); // reversing rolls the wheels backwards
+    let m = back;
+    for (let i = 1; i <= 20; i++) m = odo.update('v', { x: 0.3 + i * 0.05, y: 0, a: i * 0.05 }, 200 + i * 50);
+    expect(m.steer).toBeGreaterThan(0);
+    expect(m.steer).toBeLessThanOrEqual(MAX_STEER);
+    const jump = odo.update('v', { x: 50, y: 50, a: 1 }, 2000);
+    expect(jump.travel).toBeCloseTo(m.travel, 9); // teleports don't spin the wheels
+  });
 
-    const drawnImages: Array<{ sx: number; sy: number; sw: number; sh: number; dx: number; dy: number; dw: number; dh: number }> = [];
-    const mockCtx: any = {
-      drawImage: (_img: unknown, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, dw: number, dh: number) => {
-        drawnImages.push({ sx, sy, sw, sh, dx, dy, dw, dh });
+  it('Painter.wheel draws tread + sidewall, and drawVehicle grounds models with a footprint shadow', async () => {
+    const { Painter, convexHull } = await import('../src/render/painter.js');
+    const { drawVehicle } = await import('../src/render/vehicles.js');
+    expect(convexHull([[0, 0], [2, 0], [1, 1], [2, 2], [0, 2]])).toHaveLength(4);
+    let fills = 0;
+    const ctx: any = {
+      save() {},
+      restore() {},
+      setLineDash() {},
+      beginPath() {},
+      moveTo() {},
+      lineTo() {},
+      closePath() {},
+      stroke() {},
+      fill() {
+        fills++;
       },
+      ellipse() {},
+      createLinearGradient: () => ({ addColorStop() {} }),
+      globalAlpha: 1,
     };
-    const cam: Camera = { x: 500, y: 300, zoom: 1.25 };
-    const painter = new Painter(mockCtx, cam);
-
-    // Without atlas loaded, sprite() returns false so procedural 3D primitives run
-    expect(painter.hasSprite('cargo_boxes_0')).toBe(false);
-    expect(painter.sprite('cargo_boxes_0', 10, 5, 0)).toBe(false);
-
-    // Attach atlas frames and dummy image source
-    painter.setAtlas({} as any, {
-      cargo_boxes_0: { frame: { x: 96, y: 192, w: 96, h: 96 }, anchor: { x: 0.5, y: 0.62 } },
-      conv_plants_1: { frame: { x: 192, y: 288, w: 96, h: 96 }, anchor: { x: 0.5, y: 0.62 } },
+    const pt = new Painter(ctx, { x: 0, y: 0, zoom: 1 });
+    pt.wheel(5, 5, 0.36, 0.11, 0.4, 0, 5, '#111827');
+    expect(fills).toBe(2);
+    const wheelCalls: number[] = [];
+    const shadowCalls: number[] = [];
+    const spy = Object.assign(Object.create(pt), {
+      wheel: (...args: number[]) => wheelCalls.push(args[2]),
+      footprintShadow: (...args: number[]) => shadowCalls.push(args[2]),
     });
+    const v: any = { id: 'FL-D', type: 'counterbalance', fork: 0, cargo: [], orders: [], speedNow: 0 };
+    drawVehicle(spy, v, { x: 10, y: 10, a: 0 }, { worldT: 0, dim: false, emphasised: false, brainError: false, pulse: () => 0, nowMs: 0 });
+    expect(wheelCalls.length).toBe(8); // 4 tyres + 4 rims
+    expect(shadowCalls).toHaveLength(1);
+  });
 
-    expect(painter.hasSprite('cargo_boxes_0')).toBe(true);
-    drawCargoItem(painter, 9, 5, 0, { id: 3, p0: false, card: false } as any, 'den-1');
-    drawConveyorItem(painter, 12, 8, 8.5, 3, 'slc-2');
+  it('uses one cargo model for floor pallets and pallets carried on the forks', async () => {
+    const { cargoPrims, drawCargoItem } = await import('../src/render/scenery.js');
+    const { vehicleParts } = await import('../src/render/vehicles.js');
+    const o = { id: 7, p0: false, isTransfer: false };
+    for (const site of ['den-1', 'slc-2', 'phx-3', 'abq-4']) {
+      const { prims, height } = cargoPrims(o, site);
+      expect(prims.length).toBeGreaterThanOrEqual(5); // pallet base (3 runners + deck) + load
+      expect(height).toBeGreaterThan(10);
+      // Floor pallet: every primitive drawn, in model order.
+      const floor: string[] = [];
+      const pt: any = {
+        aaBox: (_x: number, _y: number, _w: number, _d: number, _z: number, _h: number, hex: string) => floor.push(hex),
+        cyl: (_x: number, _y: number, _r: number, _z: number, _h: number, hex: string) => floor.push(hex),
+      };
+      drawCargoItem(pt, 5, 5, 0, o, site);
+      expect(floor).toEqual(prims.map((q) => q.hex));
+      // Carried: the same primitives (cylinders stay cylinders), tagged as cargo.
+      const v: any = { id: 'FL-C', type: 'counterbalance', fork: 0.1, cargo: [o], orders: [] };
+      const carried = vehicleParts(v, { x: 10, y: 10, a: 0.4 }, 0, site).filter((q) => q.role === 'cargo');
+      expect(carried).toHaveLength(prims.length);
+      expect(carried.filter((q) => q.shape === 'cyl')).toHaveLength(prims.filter((q) => q.kind === 'cyl').length);
+    }
+  });
 
-    expect(drawnImages.length).toBe(2);
-    expect(drawnImages[0]!.sx).toBe(96);
-    expect(drawnImages[0]!.sy).toBe(192);
-    expect(drawnImages[0]!.dw).toBeCloseTo(96 * 1.25, 5);
-    expect(drawnImages[1]!.sx).toBe(192);
-    expect(drawnImages[1]!.sy).toBe(288);
+  it('splits wider strap bands so the iso painter never paints a band over the carton above it', async () => {
+    const { cargoPrims } = await import('../src/render/scenery.js');
+    const { prims } = cargoPrims({ id: 0, p0: false, isTransfer: false }, 'den-1');
+    // Walk the stack bottom-to-top: no primitive may start below the top of an earlier, wider one
+    // that it overlaps in plan (that ordering is what flattened the carton before).
+    for (let i = 0; i < prims.length; i++) {
+      for (let j = i + 1; j < prims.length; j++) {
+        const a = prims[i];
+        const b = prims[j];
+        const overlapsPlan = Math.abs(a.x - b.x) < (a.w + b.w) / 2 && Math.abs(a.y - b.y) < (a.d + b.d) / 2;
+        const aWider = a.w > b.w + 1e-9 || a.d > b.d + 1e-9;
+        if (overlapsPlan && aWider && b.z0 < a.z0 + a.h - 1e-9) expect(b.z0 + b.h).toBeLessThanOrEqual(a.z0 + 1e-9);
+      }
+    }
+  });
+
+  it('chargers and cones are shared procedural props (iso + cab)', async () => {
+    const { drawCharger, drawCone } = await import('../src/render/scenery.js');
+    const boxes: string[] = [];
+    const pt: any = {
+      aaBox: (...a: any[]) => boxes.push(a[6]),
+      cyl: (...a: any[]) => boxes.push(a[5]),
+    };
+    drawCharger(pt, 3, 3, false);
+    const idle = boxes.splice(0);
+    drawCharger(pt, 3, 3, true);
+    expect(boxes.length).toBe(idle.length);
+    expect(boxes).not.toEqual(idle); // busy lights up
+    boxes.length = 0;
+    drawCone(pt, 3, 3);
+    expect(boxes).toContain('#EA580C');
   });
 
   it('headingUpRotation keeps the forklift driving straight up on screen while rotating the board', async () => {

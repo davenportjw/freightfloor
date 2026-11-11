@@ -14,7 +14,6 @@ This guide applies across **Google Antigravity (`agy`)**, **OpenAI Codex CLI (`c
 - **`apps/lobby` (`@warehouse/lobby`)**: Public Fastify gateway (`POST /api/join`, `GET /api/network`, `/api/queue*`, static client assets, and authenticated `/ws?site=<siteId>` WebSocket reverse proxy).
 - **`apps/site` (`@warehouse/site`)**: Authoritative regional shard server (`site-den-1`, `site-slc-2`, `site-phx-3`, `site-abq-4`), Firestore persistence, Pub/Sub cross-site pallet transfers, and Vertex AI (`gemini-3.5-flash-lite`) brain loops.
 - **`apps/client` (`@warehouse/client`)**: Vite + hybrid 2:1 isometric Canvas2D renderer (`Painter`) and HUD v3 (`Drive` and `Floor` modes).
-- **`tools/sprites` (`@warehouse/sprites`)**: Pure-TypeScript 96×96 isometric 3D sprite atlas generator (`atlas.png` + `atlas.json`).
 - **`tools/loadtest` (`@warehouse/loadtest`)**: 128-client Cloud Run Job load harness (112 protocol bots + 16 Gemini 3.5 Flash-Lite pilots).
 - **`tools/smoke` (`@warehouse/smoke`)**: Live HTTP/WebSocket, prompt-armor, and Playwright UI verification probes.
 - **`tools/ast-sidecar` (`@warehouse/ast-sidecar`)**: Multi-compiler AST & Cross-Layer Lineage GraphDB Sidecar (`.ast-graph/ast.db`, SQLite LPG + Sourcegraph SCIP URIs).

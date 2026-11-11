@@ -12,12 +12,7 @@ import {
   validateClientDisplayName,
 } from '../src/main.js';
 import { InputController, PREDICTION_GRACE_MS, thumbstickDirsFromVector } from '../src/input.js';
-import {
-  headingToIndex16,
-  resolveVehicleSpriteKey,
-  type AtlasManifest,
-  type RenderVehicleOverlay,
-} from '../src/renderer.js';
+import { type RenderVehicleOverlay } from '../src/renderer.js';
 
 describe('@warehouse/client (M4)', () => {
   it('validates display names and rejects XSS payloads', () => {
@@ -46,40 +41,9 @@ describe('@warehouse/client (M4)', () => {
     expect(parseRunDisplayName(longFormatted).runNumber).toBe(12);
   });
 
-  it('resolves all 576 vehicle sprite keys against public/assets/atlas.json', () => {
-    const atlasPath = resolve(import.meta.dirname, '../public/assets/atlas.json');
-    expect(existsSync(atlasPath)).toBe(true);
-    const manifest = JSON.parse(readFileSync(atlasPath, 'utf8')) as AtlasManifest;
-
-    const types = ['reach', 'counterbalance', 'turret', 'pallet_jack', 'forklift', 'agv'];
-    const strategies = ['Sprinter', 'Steady', 'Batcher', 'Opportunist', 'Strategist'];
-
-    for (const vType of types) {
-      for (const strat of strategies) {
-        for (const human of [false, true]) {
-          for (const loaded of [false, true]) {
-            for (let h = 0; h < 16; h++) {
-              const angle = (h / 16) * Math.PI * 2;
-              expect(headingToIndex16(angle)).toBe(h);
-              const key = resolveVehicleSpriteKey(
-                vType,
-                strat,
-                human,
-                loaded,
-                angle,
-                manifest,
-              );
-              expect(manifest.sprites[key]).toBeDefined();
-            }
-          }
-        }
-      }
-    }
-
-    // Verify transfer bay and hazard sprites exist in atlas
-    expect(manifest.sprites.transfer_bay_net).toBeDefined();
-    expect(manifest.sprites.cone).toBeDefined();
-    expect(manifest.sprites.spill).toBeDefined();
+  it('no longer ships a baked sprite atlas (every model is procedural)', () => {
+    expect(existsSync(resolve(import.meta.dirname, '../public/assets/atlas.json'))).toBe(false);
+    expect(existsSync(resolve(import.meta.dirname, '../public/assets/atlas.png'))).toBe(false);
   });
 
   it('applies quantised deltas to AI vehicles while preserving local prediction on myVid', () => {
@@ -197,20 +161,21 @@ describe('@warehouse/client (M4)', () => {
     expect(v.forkTarget).toBe(0.3);
 
     // Stepping RackLiftController while disabled (the default) must not reset forkTarget to 0,
-    // and drawVehicle must keep using sprite cargo at travel fork height 0.3 without blinking.
+    // and drawVehicle must keep drawing the carried pallet at travel fork height 0.3 without blinking.
     const rackLift = new RackLiftController();
     const inputForward = { up: true, down: false, left: false, right: false };
-    const spriteFrames: number[] = [];
+    const cargoDraws: number[] = [];
+    let frameDraws = 0;
     const mockPt: any = {
       ctx: { save() {}, restore() {}, setLineDash() {}, globalAlpha: 1 },
       circleGrid: () => [],
       poly: () => {},
       P: (x: number, y: number, z = 0) => [x, y - z],
-      oBox: () => {},
-      hasSprite: (k: string) => k.startsWith('cargo_'),
-      sprite: () => {
-        spriteFrames.push(1);
-        return true;
+      oBox: () => {
+        frameDraws++;
+      },
+      cyl: () => {
+        frameDraws++;
       },
     };
     for (let i = 0; i < 10; i++) {
@@ -225,10 +190,13 @@ describe('@warehouse/client (M4)', () => {
         nowMs: i * 16,
         siteId: 'den-1',
       });
+      cargoDraws.push(frameDraws);
+      frameDraws = 0;
     }
     expect(v.fork).toBeCloseTo(0.3, 6);
     expect(v.forkTarget).toBe(0.3);
-    expect(spriteFrames).toHaveLength(10);
+    expect(cargoDraws).toHaveLength(10);
+    expect(new Set(cargoDraws).size).toBe(1); // same parts every frame: the load never blinks
 
     // dashView shows Battery immediately when boost is held and reflects fractional drain below 100%
     expect(dashView({ battery: 100, input: { boost: false } }).showBattery).toBe(false);

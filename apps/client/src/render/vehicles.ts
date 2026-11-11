@@ -1,21 +1,71 @@
 /** 3D vehicle models (AGV / counterbalance / reach) ported from the mock's vehicleParts/drawVehicle. */
-import { BOOST_COLLISION_SPEED, getSiteTheme, type Vehicle } from '@warehouse/sim';
+import { BOOST_COLLISION_SPEED, type Vehicle } from '@warehouse/sim';
 import { isoDepth } from './iso.js';
 import type { Pose } from './motion.js';
 import type { Painter } from './painter.js';
-import { resolveCargoSpriteKey, teamColor } from './scenery.js';
-import { forkHeightM, isoZ } from './liftGeometry.js';
+import { cargoPrims, teamColor } from './scenery.js';
+import { forkHeightM, isoZ, ISO_PX_PER_M, TILE_M } from './liftGeometry.js';
+import type { WheelMotion } from './wheels.js';
+
+/**
+ * Semantic tag for every part, so renderers can re-style parts by meaning instead of by colour /
+ * size (e.g. the Cab View splits the mast into rails, hides the overhead guard, ghosts the hood).
+ */
+export type PartRole =
+  | 'wheel'
+  | 'hub'
+  | 'lug'
+  | 'chassis'
+  | 'body'
+  | 'trim'
+  | 'counterweight'
+  | 'bumper'
+  | 'seat'
+  | 'console'
+  | 'guardPost'
+  | 'guardRoof'
+  | 'mast'
+  | 'mastTie'
+  | 'liftCylinder'
+  | 'backrest'
+  | 'fork'
+  | 'forkTip'
+  | 'leg'
+  | 'skirt'
+  | 'sensor'
+  | 'light'
+  | 'beacon'
+  | 'brake'
+  | 'cargo';
 
 export interface Part {
   cx: number;
   cy: number;
+  /** Box: length along the heading (tiles). Wheel: tyre diameter (tiles). */
   len: number;
+  /** Box: width across the heading (tiles). Wheel: tread width (tiles). */
   wid: number;
+  /** Bottom / height in iso-px. Wheels are drawn taller than true scale in iso for readability. */
   z0: number;
   h: number;
   hex: string;
-  /** Semantic tag for parts other renderers re-style (e.g. the Cab View splits mast stages into rails). */
-  role?: 'mast';
+  role?: PartRole;
+  /**
+   * `wheel` = cylinder whose axle runs across the heading; `cyl` = upright cylinder of diameter
+   * `len` (carried cargo); default is an oriented box.
+   */
+  shape?: 'box' | 'wheel' | 'cyl';
+  /** Yaw relative to the vehicle heading (rad), e.g. a steered wheel. */
+  yaw?: number;
+  /** Wheels only: true axle height in metres (the 3D Cab View draws true-scale round tyres). */
+  axleM?: number;
+}
+
+export interface VehiclePartsOptions {
+  /** Wheel roll / steer state (see `WheelOdometer`); wheels sit straight and still without it. */
+  motion?: WheelMotion;
+  /** Emit a rotating rim marker on each hub (3D only: sub-pixel in iso). */
+  lugs?: boolean;
 }
 
 /** Collapsed (fully lowered) mast height in iso-px for counterbalance trucks. */
@@ -24,6 +74,16 @@ export const MAST_COLLAPSED_COUNTERBALANCE = 18;
 export const MAST_COLLAPSED_REACH = 20;
 /** Fork carriage backrest height (iso-px) plus the clearance the inner mast keeps above it. */
 const CARRIAGE_TOP_CLEARANCE = 5.5 + 1.5;
+/** True-scale iso-px per tile of height (1 tile = TILE_M metres). */
+const PX_PER_TILE = TILE_M * ISO_PX_PER_M;
+/**
+ * Iso draws everything vertically compressed (6.5 px/m vs ~24 px/m across the floor), so a
+ * true-scale tyre would read as a sliver. Wheels get this extra vertical stretch in iso only.
+ */
+export const WHEEL_ISO_STRETCH = 1.6;
+/** Carried pallets are drawn smaller than floor pallets so they fit between mast and fork tips. */
+const CARRIED_XY = 0.66;
+const CARRIED_Z = 0.8;
 
 /** Top of the telescoping mast (iso-px): stays collapsed until the carriage needs to rise past it. */
 export function mastTopZ(forkZ: number, collapsed: number): number {
@@ -39,6 +99,14 @@ export function modelOf(type: string | undefined): ModelKind {
   return 'counterbalance';
 }
 
+const TYRE = '#111827';
+const RIM = '#CBD5E1';
+const RIM_MARK = '#F59E0B';
+const STEEL_DARK = '#1E293B';
+const STEEL = '#334155';
+const STEEL_MID = '#475569';
+const HAZARD = '#FBBF24';
+
 export function vehicleParts(
   v: Vehicle,
   p: Pose,
@@ -46,74 +114,171 @@ export function vehicleParts(
   siteId = 'den-1',
   includeCargo = true,
   camRot = 0,
+  opts: VehiclePartsOptions = {},
 ): Part[] {
   const ca = Math.cos(p.a);
   const sa = Math.sin(p.a);
   const team = teamColor(v);
-  const theme = getSiteTheme(siteId);
   const parts: Part[] = [];
   const model = modelOf(v.type);
-  const add = (ox: number, oy: number, len: number, wid: number, z0: number, h: number, hex: string, role?: Part['role']) =>
-    parts.push({ cx: p.x + ca * ox - sa * oy, cy: p.y + sa * ox + ca * oy, len, wid, z0, h, hex, ...(role ? { role } : {}) });
+  const travel = opts.motion?.travel ?? 0;
+  const steer = opts.motion?.steer ?? 0;
+  const add = (ox: number, oy: number, len: number, wid: number, z0: number, h: number, hex: string, role: PartRole) =>
+    parts.push({ cx: p.x + ca * ox - sa * oy, cy: p.y + sa * ox + ca * oy, len, wid, z0, h, hex, role });
+
+  /**
+   * Tyre + rim (+ optional rotating rim marker). `d` is the true tyre diameter in tiles; iso
+   * heights get `WHEEL_ISO_STRETCH`, the Cab View uses `axleM` for a true-scale round wheel.
+   */
+  const wheel = (ox: number, oy: number, d: number, tread: number, yaw = 0, rimHex = RIM) => {
+    const cx = p.x + ca * ox - sa * oy;
+    const cy = p.y + sa * ox + ca * oy;
+    const axleM = (d * TILE_M) / 2;
+    const hIso = d * PX_PER_TILE * WHEEL_ISO_STRETCH;
+    parts.push({ cx, cy, len: d, wid: tread, z0: 0, h: hIso, hex: TYRE, role: 'wheel', shape: 'wheel', yaw, axleM });
+    const dr = d * 0.56;
+    const hr = dr * PX_PER_TILE * WHEEL_ISO_STRETCH;
+    parts.push({
+      cx,
+      cy,
+      len: dr,
+      wid: tread + 0.016,
+      z0: (hIso - hr) / 2,
+      h: hr,
+      hex: rimHex,
+      role: 'hub',
+      shape: 'wheel',
+      yaw,
+      axleM,
+    });
+    if (opts.lugs) {
+      // Marker on the outboard rim face, rolling with distance travelled (true scale, 3D only).
+      const phi = -travel / (d / 2);
+      const r = (dr / 2) * 0.7;
+      const fx = Math.cos(phi) * r;
+      const lat = Math.sign(oy || 1) * (tread / 2 + 0.014);
+      const cy2 = Math.cos(yaw);
+      const sy2 = Math.sin(yaw);
+      const lx = ox + cy2 * fx - sy2 * lat;
+      const ly = oy + sy2 * fx + cy2 * lat;
+      const zPx = (axleM + Math.sin(phi) * r * TILE_M) * ISO_PX_PER_M;
+      const sz = 0.05 * TILE_M * ISO_PX_PER_M;
+      parts.push({
+        cx: p.x + ca * lx - sa * ly,
+        cy: p.y + sa * lx + ca * ly,
+        len: 0.05,
+        wid: 0.012,
+        z0: zPx - sz / 2,
+        h: sz,
+        hex: RIM_MARK,
+        role: 'lug',
+        yaw,
+      });
+    }
+  };
+
   const fork = Number.isFinite(v.fork) ? v.fork : 0;
   const forkZ = isoZ(forkHeightM(fork)); // blade bottom, shared with rack beams (liftGeometry)
   const cargo = includeCargo ? (v.cargo ?? []) : [];
-  const cargoAt = (ox: number, z: number) =>
-    cargo.forEach((o, i) => {
-      const zz = z + i * 13;
-      if (theme.cargoStyle === 'plants') {
-        add(ox, 0, 0.42, 0.4, zz, 2.5, '#A16207');
-        add(ox, 0, 0.3, 0.3, zz + 2.5, 4.5, o.p0 ? '#DC2626' : '#C2410C');
-        add(ox, 0, 0.38, 0.38, zz + 7.0, 5.5, '#16A34A');
-      } else if (theme.cargoStyle === 'tech') {
-        add(ox, 0, 0.42, 0.4, zz, 2.5, '#94A3B8');
-        add(ox, 0, 0.36, 0.34, zz + 2.5, 8.5, o.p0 ? '#991B1B' : '#1E293B');
-        add(ox, 0, 0.38, 0.36, zz + 6.5, 1.8, o.p0 ? '#F87171' : '#38BDF8');
-      } else if (theme.cargoStyle === 'artisan') {
-        add(ox, 0, 0.42, 0.4, zz, 2.5, '#A16207');
-        add(ox, 0, 0.34, 0.34, zz + 2.5, 9.0, o.p0 ? '#DC2626' : '#78350F');
-        add(ox, 0, 0.36, 0.36, zz + 6.2, 1.6, '#FBBF24');
-      } else {
-        add(ox, 0, 0.42, 0.4, zz, 3, '#C4A06B');
-        add(ox, 0, 0.36, 0.34, zz + 3, 9, o.p0 ? '#F59E0B' : '#D9B98A');
+  /** Carried loads: the shared `cargoPrims` model, scaled to sit on the forks, stacked upward. */
+  const cargoAt = (ox: number, z: number) => {
+    let zz = z;
+    for (const o of cargo) {
+      const { prims, height } = cargoPrims(o, siteId);
+      for (const q of prims) {
+        const lx = ox + q.x * CARRIED_XY;
+        const ly = q.y * CARRIED_XY;
+        const part: Part = {
+          cx: p.x + ca * lx - sa * ly,
+          cy: p.y + sa * lx + ca * ly,
+          len: q.w * CARRIED_XY,
+          wid: q.d * CARRIED_XY,
+          z0: zz + q.z0 * CARRIED_Z,
+          h: q.h * CARRIED_Z,
+          hex: q.hex,
+          role: 'cargo',
+        };
+        if (q.kind === 'cyl') part.shape = 'cyl';
+        parts.push(part);
       }
-    });
+      zz += height * CARRIED_Z;
+    }
+  };
+
+  /** Telescoping mast: twin rails per stage plus a tie bar across each stage's top. */
+  const mast = (x: number, wid: number, base: number) => {
+    const top = mastTopZ(forkZ, base);
+    const rail = (dx: number, w: number, z0: number, h: number, hex: string) => {
+      for (const sy of [-1, 1]) add(x + dx, sy * w, 0.07, 0.05, z0, h, hex, 'mast');
+      add(x + dx, 0, 0.05, w * 2 + 0.05, z0 + h - 1.4, 1.4, hex, 'mastTie');
+    };
+    const half = wid / 2 - 0.05;
+    rail(0, half, 0, base, STEEL);
+    // Inner stage: same length as the outer one, slid up so its top meets the carriage
+    // (previously a fixed 32/40 iso-px slab towered over the truck even with the forks down).
+    if (top > base + 0.25) rail(0.012, half - 0.035, top - base, base, '#3B4A61');
+    add(x - 0.02, 0, 0.05, 0.05, 2, top - 4, '#CBD5E1', 'liftCylinder');
+    // Fork carriage: backrest plate + high-vis load-backrest bar.
+    add(x + 0.04, 0, 0.04, wid - 0.06, forkZ, 5.5, STEEL_DARK, 'backrest');
+    add(x + 0.045, 0, 0.03, wid - 0.04, forkZ + 4.6, 1.0, HAZARD, 'backrest');
+    // Blades stop where the tips begin (overlapping coplanar boxes z-fight in the Cab View).
+    for (const sy of [-1, 1]) {
+      add(x + 0.18, sy * 0.12, 0.34, 0.06, forkZ, 2, STEEL_MID, 'fork');
+      add(x + 0.39, sy * 0.12, 0.08, 0.06, forkZ, 2, '#F59E0B', 'forkTip'); // high-vis fork tips
+    }
+  };
+
   if (model === 'agv') {
-    add(0, 0, 0.9, 0.52, 1.5, 6, '#E2E8F0');
-    add(0, 0, 0.84, 0.46, 7.5, 1.6, team);
-    add(0.38, 0, 0.1, 0.3, 7.5, 5, '#334155'); // LiDAR sensor bar
-    add(0.41, 0, 0.06, 0.22, 9.2, 1.6, '#38BDF8'); // LiDAR optical lens
+    // Differential-drive AGV: dark skirt, two centre drive wheels just proud of the body.
+    for (const sy of [-1, 1]) wheel(0, sy * 0.262, 0.2, 0.05, 0, '#64748B');
+    add(0, 0, 0.9, 0.5, 0.6, 1.4, STEEL_DARK, 'skirt');
+    add(0, 0, 0.9, 0.52, 1.8, 5.7, '#E2E8F0', 'body');
+    add(0, 0, 0.84, 0.46, 7.5, 1.6, team, 'trim');
+    for (const sy of [-1, 1]) add(0, sy * 0.262, 0.56, 0.008, 4.6, 0.8, '#38BDF8', 'light'); // status strip
+    for (const sx of [-1, 1]) add(sx * 0.455, 0, 0.02, 0.5, 2.2, 1.5, HAZARD, 'bumper');
+    add(0.38, 0, 0.1, 0.3, 7.5, 5, STEEL, 'sensor'); // LiDAR sensor bar
+    add(0.41, 0, 0.06, 0.22, 9.2, 1.6, '#38BDF8', 'sensor'); // LiDAR optical lens
     cargoAt(-0.02, 9.2);
   } else {
     const reach = model === 'reach';
     const wid = reach ? 0.38 : 0.48;
-    for (const sx of [-0.22, 0.24]) for (const sy of [-1, 1]) add(sx, sy * (wid / 2 + 0.02), 0.2, 0.1, 0, 5, '#1E293B');
-    add(-0.04, 0, reach ? 0.62 : 0.74, wid, 3, 7, '#94A3B8');
-    add(-0.36, 0, 0.26, wid, 3, reach ? 9 : 13, team); // counterweight carries the team colour
-    // Operator seat & console detail
-    add(-0.1, 0, 0.2, 0.22, 10, 4.5, '#0F172A');
-    if (!reach) {
-      for (const sx of [-0.22, 0.08]) for (const sy of [-1, 1]) add(sx, sy * 0.19, 0.04, 0.04, 10, 14, '#334155');
-      add(-0.07, 0, 0.4, 0.42, 24, 2, '#475569'); // overhead guard
+    if (reach) {
+      // Narrow-aisle reach truck: straddle legs with load wheels, steered rear drive wheel + caster.
+      for (const sy of [-1, 1]) {
+        add(0.2, sy * 0.2, 0.52, 0.06, 0.4, 1.8, STEEL_DARK, 'leg');
+        add(0.455, sy * 0.2, 0.02, 0.065, 0.4, 1.8, HAZARD, 'leg');
+        wheel(0.38, sy * 0.2, 0.12, 0.05);
+      }
+      wheel(-0.28, -0.07, 0.26, 0.09, -steer);
+      wheel(-0.28, 0.12, 0.15, 0.06);
+      add(-0.12, 0, 0.5, wid - 0.012, 2.4, 7.6, '#94A3B8', 'body'); // inset: no coplanar faces with the counterweight
+      add(-0.12, 0, 0.5, wid + 0.01, 7.2, 0.9, team, 'trim');
+      add(-0.36, 0, 0.24, wid, 2.4, 9.6, team, 'counterweight');
+      add(-0.485, 0, 0.012, wid - 0.04, 3.4, 1.2, HAZARD, 'bumper');
+      add(-0.1, 0, 0.3, 0.3, 10, 6, '#64748B', 'console');
+      add(-0.1, 0, 0.2, 0.22, 10, 4.5, '#0F172A', 'seat');
+      for (const sy of [-1, 1]) add(-0.3, sy * 0.16, 0.04, 0.04, 12, 12, STEEL, 'guardPost');
+      add(-0.16, 0, 0.34, 0.36, 24, 1.6, STEEL_MID, 'guardRoof');
     } else {
-      add(-0.1, 0, 0.3, 0.3, 10, 6, '#64748B');
+      // Counterbalance: big front drive tyres under the mast, smaller rear steer tyres.
+      for (const sy of [-1, 1]) {
+        wheel(0.22, sy * 0.25, 0.36, 0.11);
+        wheel(-0.27, sy * 0.225, 0.28, 0.09, -steer);
+      }
+      add(-0.04, 0, 0.72, wid - 0.08, 1.2, 2.4, STEEL_MID, 'chassis');
+      add(-0.04, 0, 0.66, wid - 0.012, 3.4, 6.6, '#94A3B8', 'body'); // inset: no coplanar faces with the counterweight
+      add(-0.04, 0, 0.6, wid + 0.012, 8.2, 1.0, team, 'trim');
+      add(-0.36, 0, 0.26, wid, 3, 13, team, 'counterweight'); // counterweight carries the team colour
+      add(-0.495, 0, 0.012, wid - 0.06, 4.2, 1.4, HAZARD, 'bumper');
+      // Operator seat (cushion + back) & steering console
+      add(-0.12, 0, 0.18, 0.22, 10, 2.2, '#0F172A', 'seat');
+      add(-0.21, 0, 0.05, 0.2, 10, 5, '#0F172A', 'seat');
+      add(0.08, 0, 0.08, 0.14, 10, 4, STEEL, 'console');
+      for (const sx of [-0.22, 0.08]) for (const sy of [-1, 1]) add(sx, sy * 0.19, 0.04, 0.04, 10, 14, STEEL, 'guardPost');
+      add(-0.07, 0, 0.4, 0.42, 24, 2, STEEL_MID, 'guardRoof'); // overhead guard
+      for (const sy of [-1, 1]) add(0.27, sy * 0.17, 0.02, 0.06, 8.6, 1.2, '#FEF9C3', 'light'); // headlights
     }
-    // Telescoping mast: a short fixed outer stage, plus an inner stage that only slides up once
-    // the carriage needs to rise past it (previously a fixed 32/40 iso-px slab towered over the
-    // truck even with the forks on the floor).
-    const mastBase = reach ? MAST_COLLAPSED_REACH : MAST_COLLAPSED_COUNTERBALANCE;
-    const mastTop = mastTopZ(forkZ, mastBase);
-    add(0.4, 0, 0.08, wid - 0.08, 0, mastBase, '#334155', 'mast');
-    if (mastTop > mastBase + 0.25) {
-      // Inner stage: same length as the outer one, slid up so its top meets the carriage.
-      add(0.41, 0, 0.06, wid - 0.12, mastTop - mastBase, mastBase, '#3B4A61', 'mast');
-    }
-    add(0.38, 0, 0.05, 0.05, 2, mastTop - 4, '#CBD5E1'); // hydraulic lift cylinder
-    add(0.44, 0, 0.04, wid - 0.06, forkZ, 5.5, '#1E293B'); // fork carriage backrest
-    for (const sy of [-1, 1]) {
-      add(0.62, sy * 0.12, 0.42, 0.06, forkZ, 2, '#475569');
-      add(0.79, sy * 0.12, 0.08, 0.06, forkZ, 2, '#F59E0B'); // high-vis fork tips
-    }
+    mast(0.4, wid, reach ? MAST_COLLAPSED_REACH : MAST_COLLAPSED_COUNTERBALANCE);
     cargoAt(0.62, forkZ + 2);
   }
   const blink = Math.floor(nowMs / 350) % 2 === 0 && (Math.abs(v.speedNow ?? 0) > 0.2 || v.state === 'picking');
@@ -122,14 +287,16 @@ export function vehicleParts(
     0,
     0.08,
     0.08,
-    model === 'agv' ? 9.5 : model === 'reach' ? 16 : 26,
+    model === 'agv' ? 9.5 : model === 'reach' ? 25.6 : 26,
     3,
     blink ? '#FBBF24' : '#92400E',
-  ); // beacon
-  if (v.braking) for (const sy of [-1, 1]) add(model === 'agv' ? -0.45 : -0.5, sy * 0.15, 0.04, 0.08, 6, 3, '#EF4444');
+    'beacon',
+  );
+  if (v.braking) for (const sy of [-1, 1]) add(model === 'agv' ? -0.45 : -0.5, sy * 0.15, 0.04, 0.08, 6, 3, '#EF4444', 'brake');
   parts.sort((a, b) => isoDepth(a.cx, a.cy, camRot) - isoDepth(b.cx, b.cy, camRot) || a.z0 - b.z0);
   return parts;
 }
+
 
 export const CHARGE_RATE_PER_MIN = 5;
 export const CHARGE_CUE_PERIOD_MS = 1200;
@@ -192,6 +359,15 @@ export interface VehicleDrawState {
   nowMs: number;
   reducedMotion?: boolean;
   siteId?: string;
+  /** Wheel roll / steer from the renderer's `WheelOdometer` (wheels sit still without it). */
+  motion?: WheelMotion;
+}
+
+/** Body footprint (tiles) for the ground shadow, centred `ox` ahead of the vehicle origin. */
+export function footprintOf(model: ModelKind): { len: number; wid: number; ox: number } {
+  if (model === 'agv') return { len: 0.94, wid: 0.58, ox: 0 };
+  if (model === 'reach') return { len: 0.98, wid: 0.5, ox: 0.0 };
+  return { len: 1.0, wid: 0.6, ox: -0.04 };
 }
 
 export function drawVehicle(
@@ -205,7 +381,13 @@ export function drawVehicle(
   const team = teamColor(v);
   ctx.save();
   ctx.globalAlpha = s.dim ? 0.4 : 1;
-  pt.poly(pt.circleGrid(p.x, p.y, 0.62), 'rgba(15,23,42,0.16)'); // contact shadow
+  const model = modelOf(v.type);
+  if (typeof (pt as Partial<Painter>).footprintShadow === 'function') {
+    const fp = footprintOf(model);
+    pt.footprintShadow(p.x + Math.cos(p.a) * fp.ox, p.y + Math.sin(p.a) * fp.ox, fp.len, fp.wid, p.a, 0.32);
+  } else {
+    pt.poly(pt.circleGrid(p.x, p.y, 0.62), 'rgba(15,23,42,0.16)'); // contact shadow
+  }
   pt.poly(pt.circleGrid(p.x, p.y, 0.72), null, team, s.emphasised ? 3 : 1.5); // team ring
   const speed = v.speedNow ?? 0;
   const stunned = s.worldT < (v.stunnedUntil ?? 0);
@@ -242,32 +424,13 @@ export function drawVehicle(
     pt.poly(pt.circleGrid(p.x, p.y, 0.8 + 0.08 * k), 'rgba(34,197,94,0.22)', '#16A34A', 2);
   }
 
-  const cargo = v.cargo ?? [];
-  const forkRaised = (v.fork ?? 0) > 0.35;
   const camRot = pt.cam?.rot ?? 0;
-  const useSpriteCargo =
-    !forkRaised &&
-    Math.abs(camRot) <= 1e-4 &&
-    cargo.length > 0 &&
-    typeof (pt as Partial<Painter>).hasSprite === 'function' &&
-    typeof (pt as Partial<Painter>).sprite === 'function' &&
-    pt.hasSprite(resolveCargoSpriteKey(cargo[0], siteId));
-
-  for (const q of vehicleParts(v, p, s.nowMs, siteId, !useSpriteCargo, camRot)) {
-    pt.oBox(q.cx, q.cy, q.len, q.wid, p.a, q.z0, q.h, q.hex, 'rgba(15,23,42,0.28)');
-  }
-
-  if (useSpriteCargo) {
-    const model = modelOf(v.type);
-    const fork = Number.isFinite(v.fork) ? v.fork : 0;
-    const forkZ = isoZ(forkHeightM(fork)); // blade bottom, shared with rack beams (liftGeometry)
-    const ox = model === 'agv' ? -0.02 : 0.62;
-    const baseZ = model === 'agv' ? 9.2 : forkZ + 2;
-    const gx = p.x + Math.cos(p.a) * ox;
-    const gy = p.y + Math.sin(p.a) * ox;
-    cargo.forEach((o, i) => {
-      pt.sprite(resolveCargoSpriteKey(o, siteId), gx, gy, baseZ + i * 13, 1.05);
-    });
+  const canWheel = typeof (pt as Partial<Painter>).wheel === 'function';
+  for (const q of vehicleParts(v, p, s.nowMs, siteId, true, camRot, { motion: s.motion })) {
+    const a = p.a + (q.yaw ?? 0);
+    if (q.shape === 'wheel' && canWheel) pt.wheel(q.cx, q.cy, q.len, q.wid, a, q.z0, q.h, q.hex, 'rgba(15,23,42,0.35)');
+    else if (q.shape === 'cyl' && typeof (pt as Partial<Painter>).cyl === 'function') pt.cyl(q.cx, q.cy, q.len / 2, q.z0, q.h, q.hex);
+    else pt.oBox(q.cx, q.cy, q.len, q.wid, a, q.z0, q.h, q.hex, 'rgba(15,23,42,0.28)');
   }
 
   if (cue.active) {

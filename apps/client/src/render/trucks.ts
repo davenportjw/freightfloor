@@ -12,6 +12,8 @@
  * rear roll-up doors, rubber dock bumpers and yellow wheel chocks while docked.
  */
 import { isoDepth } from './iso.js';
+import { ISO_PX_PER_M, TILE_M } from './liftGeometry.js';
+import { WHEEL_ISO_STRETCH } from './vehicles.js';
 import type { Painter, Pt } from './painter.js';
 import { interpAlpha } from './motion.js';
 
@@ -106,6 +108,12 @@ export interface RigBox {
   h: number;
   hex: string;
   stroke?: string;
+  /**
+   * Set on tyres / rims: draw as a wheel whose axle runs across x (rigs always drive along x),
+   * diameter `w`, tread `d`. `axleM` is the true axle height in metres for the 3D Cab View; iso
+   * uses `z0` / `h` (vertically stretched like the forklift wheels).
+   */
+  wheel?: { axleM: number; role: 'tyre' | 'rim' };
 }
 
 export type RigKind = 'ship' | 'net' | 'receive';
@@ -151,6 +159,8 @@ export const RIG_LEN = TRAILER_LEN + CAB_GAP + CAB_LEN + HOOD_LEN + 0.12;
 /** Iso-px height of the trailer roof. */
 export const TRAILER_TOP = 30;
 const OUTLINE = 'rgba(15,23,42,0.28)';
+/** Rig tyre diameter (tiles). */
+const WHEEL_D = 0.32;
 
 /** Livery per dock kind (shipping = blue stripe / red tractor, NET = indigo, receiving = teal / blue). */
 export function rigLivery(kind: RigKind): { body: string; roof: string; stripe: string; cab: string } {
@@ -189,10 +199,15 @@ export function rigParts(o: RigOpts): RigBox[] {
     (u: number, len: number, y: number, d: number, z0: number, h: number, hex: string, stroke?: string) =>
       out.push({ x: spanX(o.dockX, dir, u, len), y, w: len, d, z0, h, hex, stroke });
 
-  const wheelInto = (add: ReturnType<typeof box>, u: number, side: number, wid: number) => {
+  /** Round tyre + chrome rim (wheel shapes), centred `u` from the dock face. */
+  const wheelInto = (out: RigBox[], u: number, side: number, wid: number) => {
     const y = side < 0 ? y0 + 0.04 : y1 - 0.04 - wid;
-    add(u - 0.16, 0.32, y, wid, 0, 6, '#111827', OUTLINE);
-    if (side > 0) add(u - 0.07, 0.14, y + wid, 0.015, 1.8, 2.4, '#9CA3AF'); // hub
+    const axleM = (WHEEL_D * TILE_M) / 2;
+    const h = WHEEL_D * TILE_M * ISO_PX_PER_M * WHEEL_ISO_STRETCH;
+    out.push({ x: spanX(o.dockX, dir, u - WHEEL_D / 2, WHEEL_D), y, w: WHEEL_D, d: wid, z0: 0, h, hex: '#111827', stroke: OUTLINE, wheel: { axleM, role: 'tyre' } });
+    const rd = WHEEL_D * 0.5;
+    const rh = h * 0.5;
+    out.push({ x: spanX(o.dockX, dir, u - rd / 2, rd), y: y - 0.008, w: rd, d: wid + 0.016, z0: (h - rh) / 2, h: rh, hex: '#9CA3AF', wheel: { axleM, role: 'rim' } });
   };
 
   // --- trailer running gear ---
@@ -201,7 +216,7 @@ export function rigParts(o: RigOpts): RigBox[] {
     const add = box(trailerGear);
     add(u0 + 0.1, L - 0.2, o.cy - 0.32, 0.64, 3, deck - 3, '#334155'); // frame rails
     for (const side of [-1, 1]) {
-      for (const u of [u0 + 0.45, u0 + 0.82]) wheelInto(add, u, side, 0.22); // tandem
+      for (const u of [u0 + 0.45, u0 + 0.82]) wheelInto(trailerGear, u, side, 0.22); // tandem
       add(uf - 1.05, 0.06, side < 0 ? y0 + 0.2 : y1 - 0.26, 0.06, 0, deck, '#475569'); // landing gear legs
     }
     add(u0 + 0.18, 0.04, y1 - 0.26, 0.22, 0.8, 5, '#0F172A'); // mud flap behind the tandem
@@ -216,8 +231,8 @@ export function rigParts(o: RigOpts): RigBox[] {
     const add = box(tractorGear);
     add(uf - 0.75, noseU - (uf - 0.75), o.cy - 0.3, 0.6, 2.5, 4.5, '#1F2937'); // frame + fifth wheel
     for (const side of [-1, 1]) {
-      for (const u of [uf - 0.55, uf - 0.18]) wheelInto(add, u, side, 0.2); // drive tandem under the kingpin
-      wheelInto(add, hoodU + 0.24, side, 0.18); // steer axle under the hood
+      for (const u of [uf - 0.55, uf - 0.18]) wheelInto(tractorGear, u, side, 0.2); // drive tandem under the kingpin
+      wheelInto(tractorGear, hoodU + 0.24, side, 0.18); // steer axle under the hood
     }
   }
 
@@ -364,7 +379,11 @@ export function drawDockRig(pt: Painter, s: DrawRigState): void {
             isoDepth(b.x + b.w / 2, b.y + b.d / 2, camRot) || a.z0 - b.z0,
       );
     }
-    for (const b of parts) pt.aaBox(b.x, b.y, b.w, b.d, b.z0, b.h, b.hex, b.stroke);
+    const canWheel = typeof (pt as Partial<Painter>).wheel === 'function';
+    for (const b of parts) {
+      if (b.wheel && canWheel) pt.wheel(b.x + b.w / 2, b.y + b.d / 2, b.w, b.d, 0, b.z0, b.h, b.hex, b.stroke);
+      else pt.aaBox(b.x, b.y, b.w, b.d, b.z0, b.h, b.hex, b.stroke);
+    }
     if (frame.gear !== 0 && !s.reducedMotion) {
       const sx = x(frame.dx + TRAILER_LEN + CAB_GAP - 0.06, 0);
       for (let i = 0; i < 3; i++) {

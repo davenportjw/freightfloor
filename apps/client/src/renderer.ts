@@ -46,6 +46,7 @@ import {
 } from './render/iso.js';
 export { headingUpRotation, type DriveCameraMode };
 import { pickNearest, PoseTracker, wrapAngle, type Pose } from './render/motion.js';
+import { WheelOdometer, type WheelMotion } from './render/wheels.js';
 import { PointerSet, pinchStep, type Pt } from './render/gestures.js';
 import { watchDevicePixelRatio, watchElementSize } from './render/dpr.js';
 import { Painter } from './render/painter.js';
@@ -71,8 +72,8 @@ import {
   KFLOOR,
   KOUT,
   NET_COLOR,
-  resolveCargoSpriteKey,
-  resolveConveyorSpriteKey,
+  drawCharger,
+  drawCone,
   teamColor,
 } from './render/scenery.js';
 import {
@@ -90,69 +91,8 @@ export {
   CHARGE_RATE_PER_MIN,
   computeChargeVisualCue,
   isVehicleCharging,
-  resolveCargoSpriteKey,
-  resolveConveyorSpriteKey,
   type ChargeCueFrame,
 };
-
-// ---------------------------------------------------------------------------
-// Isometric sprite-atlas manifest & helpers
-// ---------------------------------------------------------------------------
-
-export interface AtlasFrameRect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-export interface AtlasManifest {
-  version: number;
-  tileSize: number;
-  vehicleCellSize: number;
-  strategyTintMap: Record<string, string>;
-  vehicleTypeAliases: Record<string, string>;
-  sprites: Record<string, AtlasFrameRect>;
-  frames: Record<string, { frame: AtlasFrameRect; anchor?: { x: number; y: number } }>;
-}
-
-export function headingToIndex16(angleRad: number): number {
-  const twoPi = Math.PI * 2;
-  const norm = ((angleRad % twoPi) + twoPi) % twoPi;
-  return Math.round((norm / twoPi) * 16) % 16;
-}
-
-export function resolveVehicleSpriteKey(
-  vType: string | undefined,
-  strategy: string | undefined,
-  human: boolean | undefined,
-  loaded: boolean,
-  angleRad: number,
-  manifest?: AtlasManifest | null,
-): string {
-  const canonicalType =
-    (vType && manifest?.vehicleTypeAliases?.[vType]) ||
-    (vType === 'reach' || vType === 'counterbalance' || vType === 'turret'
-      ? vType
-      : 'counterbalance');
-  const stratKey = human ? 'Human' : strategy || 'Steady';
-  const tint =
-    manifest?.strategyTintMap?.[stratKey] ||
-    (stratKey === 'Sprinter'
-      ? 'rose'
-      : stratKey === 'Steady'
-        ? 'indigo'
-        : stratKey === 'Batcher'
-          ? 'emerald'
-          : stratKey === 'Opportunist'
-            ? 'amber'
-            : stratKey === 'Strategist'
-              ? 'slate'
-              : 'teal');
-  const loadState = loaded ? 'loaded' : 'empty';
-  const h = headingToIndex16(angleRad);
-  return `vehicle_${canonicalType}_${tint}_${loadState}_h${h}`;
-}
 
 // ---------------------------------------------------------------------------
 // Public renderer API (see contracts.md)
@@ -266,6 +206,8 @@ export class WarehouseRenderer {
   /** Smoothed world time for the east-dock truck cycle (avoids 10 Hz stepping). */
   private readonly dockClock = new SimClock();
   private poses = new Map<string, Pose>();
+  private readonly wheels = new WheelOdometer();
+  private wheelMotion = new Map<string, WheelMotion>();
   /** Poses drawn last frame (motion diagnostics via `?motionlog=1`). */
   renderedPoses(): ReadonlyMap<string, Pose> {
     return this.poses;
@@ -329,39 +271,6 @@ export class WarehouseRenderer {
     if (typeof window !== 'undefined') {
       this.cleanup.push(watchDevicePixelRatio(window, () => this.resize()));
     }
-    this.loadAtlasAsync();
-  }
-
-  /** Provide a pre-loaded sprite sheet image and manifest to the underlying Painter. */
-  setAtlas(image: CanvasImageSource | null, manifest: AtlasManifest | null): void {
-    this.painter.setAtlas(image, manifest?.frames ?? null);
-  }
-
-  /** Asynchronously load `/assets/atlas.json` and `/assets/atlas.png` in browser environments. */
-  private loadAtlasAsync(): void {
-    if (typeof window === 'undefined' || typeof fetch !== 'function' || typeof Image === 'undefined') {
-      return;
-    }
-    let cancelled = false;
-    this.cleanup.push(() => {
-      cancelled = true;
-    });
-    fetch('/assets/atlas.json')
-      .then((res) => (res.ok ? (res.json() as Promise<AtlasManifest>) : null))
-      .then((manifest) => {
-        if (cancelled || !manifest || !manifest.frames) return;
-        const img = new Image();
-        img.decoding = 'async';
-        img.onload = () => {
-          if (!cancelled) {
-            this.painter.setAtlas(img, manifest.frames);
-          }
-        };
-        img.src = '/assets/atlas.png';
-      })
-      .catch(() => {
-        // Non-fatal in headless or offline test environments; procedural 3D fallback remains active.
-      });
   }
 
   get zoom(): number {
@@ -648,6 +557,9 @@ export class WarehouseRenderer {
       poses.set(v.id, p ?? { x: v.px, y: v.py, a: v.angle });
     }
     this.poses = poses;
+    const wheelMotion = new Map<string, WheelMotion>();
+    for (const [id, p] of poses) wheelMotion.set(id, this.wheels.update(id, p, nowMs));
+    this.wheelMotion = wheelMotion;
 
     // Camera follow: the vehicle this client drives, else the floor-view Follow target
     // (set via follow(), cleared by a drag or panTo()), with frame-rate-independent smoothing.
@@ -1134,9 +1046,7 @@ export class WarehouseRenderer {
       items.push({
         d: depth(c.x, c.y, 0.6),
         fn: () => {
-          if (!pt.sprite(busy ? 'charger_busy' : 'charger', c.x + 0.5, c.y + 0.85, 0)) {
-            pt.aaBox(c.x + 0.3, c.y + 0.82, 0.4, 0.14, 0, 16, busy ? '#22C55E' : '#16A34A');
-          }
+          drawCharger(pt, c.x, c.y, busy);
         },
       });
     }
@@ -1173,11 +1083,7 @@ export class WarehouseRenderer {
       items.push({
         d: depth(x, y, 1),
         fn: () => {
-          if (!pt.sprite('cone', x + 0.5, y + 0.5, 0)) {
-            pt.aaBox(x + 0.25, y + 0.25, 0.5, 0.5, 0, 2, '#334155');
-            pt.aaBox(x + 0.36, y + 0.36, 0.28, 0.28, 2, 9, '#F97316');
-            pt.aaBox(x + 0.4, y + 0.4, 0.2, 0.2, 7, 2, '#FFFFFF');
-          }
+          drawCone(pt, x, y);
         },
       });
     }
@@ -1199,6 +1105,7 @@ export class WarehouseRenderer {
             nowMs: this.nowMs,
             reducedMotion: this.reducedMotion,
             siteId: world.siteId,
+            motion: this.reducedMotion ? undefined : this.wheelMotion.get(v.id),
           }),
       });
     }

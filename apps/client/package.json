@@ -16,8 +16,7 @@
       "dependencies": [
         "../../packages/armor:build",
         "../../packages/protocol:build",
-        "../../packages/sim:build",
-        "../../:sprites"
+        "../../packages/sim:build"
       ],
       "files": [
         "src/**",

@@ -106,7 +106,7 @@ describe('render/trucks rig model', () => {
     expect(body).toBeGreaterThan(0);
     const wheels = parts
       .map((p, i) => ({ p, i }))
-      .filter(({ p }) => p.z0 === 0 && p.h === 6 && p.hex === '#111827');
+      .filter(({ p }) => p.wheel?.role === 'tyre');
     expect(wheels.length).toBe(10); // 2 trailer + 2 drive + 1 steer axle, both sides
     for (const w of wheels) expect(w.i).toBeLessThan(body);
   });
