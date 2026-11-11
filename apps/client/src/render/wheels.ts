@@ -10,6 +10,11 @@ export interface WheelMotion {
   travel: number;
   /** Steering angle (rad, + = turning toward +heading rotation); 0 when driving straight. */
   steer: number;
+  /**
+   * Body pitch (rad, + = nose down): the truck dips forward when braking and squats back when
+   * accelerating, and the mast sways with it. Derived from the smoothed longitudinal acceleration.
+   */
+  pitch?: number;
 }
 
 /** Wheelbase used to turn yaw rate into an Ackermann steer angle (tiles). */
@@ -22,6 +27,12 @@ const TELEPORT_TILES = 1.5;
 const STEER_TAU_MS = 140;
 /** Drop vehicles not seen for this long (ms). */
 const STALE_MS = 5000;
+/** Pitch per tile/s² of deceleration (rad), clamped to ±MAX_PITCH. */
+const PITCH_PER_ACCEL = 0.012;
+export const MAX_PITCH = 0.06;
+/** Speed / pitch smoothing time constants (ms): speed is noisy at 10 Hz, pitch should feel springy. */
+const SPEED_TAU_MS = 90;
+const PITCH_TAU_MS = 160;
 
 interface Entry {
   x: number;
@@ -29,6 +40,8 @@ interface Entry {
   a: number;
   travel: number;
   steer: number;
+  speed: number;
+  pitch: number;
   ms: number;
 }
 
@@ -40,9 +53,9 @@ export class WheelOdometer {
   update(id: string, p: Pose, nowMs: number): WheelMotion {
     const e = this.s.get(id);
     if (!e) {
-      this.s.set(id, { x: p.x, y: p.y, a: p.a, travel: 0, steer: 0, ms: nowMs });
+      this.s.set(id, { x: p.x, y: p.y, a: p.a, travel: 0, steer: 0, speed: 0, pitch: 0, ms: nowMs });
       this.maybePrune(nowMs);
-      return { travel: 0, steer: 0 };
+      return { travel: 0, steer: 0, pitch: 0 };
     }
     const dtMs = nowMs - e.ms;
     if (dtMs > 0) {
@@ -61,6 +74,15 @@ export class WheelOdometer {
         target = Math.max(-MAX_STEER, Math.min(MAX_STEER, target));
         const k = 1 - Math.exp(-dtMs / STEER_TAU_MS);
         e.steer += (target - e.steer) * k;
+        // Longitudinal speed (tiles/s, signed) → acceleration → pitch (braking dips the nose).
+        const sec = dtMs / 1000;
+        const prevSpeed = e.speed;
+        e.speed += (ds / sec - e.speed) * (1 - Math.exp(-dtMs / SPEED_TAU_MS));
+        const accel = (e.speed - prevSpeed) / sec;
+        // Inertia pitches the body against the acceleration: braking forward (or speeding up in
+        // reverse) dips the nose; accelerating forward (or braking in reverse) squats the rear.
+        const pitchTarget = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, -accel * PITCH_PER_ACCEL));
+        e.pitch += (pitchTarget - e.pitch) * (1 - Math.exp(-dtMs / PITCH_TAU_MS));
       }
       e.x = p.x;
       e.y = p.y;
@@ -68,7 +90,7 @@ export class WheelOdometer {
       e.ms = nowMs;
     }
     this.maybePrune(nowMs);
-    return { travel: e.travel, steer: e.steer };
+    return { travel: e.travel, steer: e.steer, pitch: e.pitch };
   }
 
   private maybePrune(nowMs: number): void {

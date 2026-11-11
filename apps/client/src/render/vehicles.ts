@@ -57,6 +57,8 @@ export interface Part {
   shape?: 'box' | 'wheel' | 'cyl';
   /** Yaw relative to the vehicle heading (rad), e.g. a steered wheel. */
   yaw?: number;
+  /** Body pitch (rad, + = nose down) for renderers that can tilt boxes (the 3D Cab View). */
+  pitch?: number;
   /** Wheels only: true axle height in metres (the 3D Cab View draws true-scale round tyres). */
   axleM?: number;
 }
@@ -293,6 +295,25 @@ export function vehicleParts(
     'beacon',
   );
   if (v.braking) for (const sy of [-1, 1]) add(model === 'agv' ? -0.45 : -0.5, sy * 0.15, 0.04, 0.08, 6, 3, '#EF4444', 'brake');
+  // Braking / acceleration pitch: rotate everything sprung (not the tyres, which stay on the floor)
+  // about the front axle line. Iso can't tilt boxes, so it gets the rotation's displacement: front
+  // parts dip, and tall parts (mast, carriage, load) sway forward in proportion to their height.
+  const pitch = opts.motion?.pitch ?? 0;
+  if (Math.abs(pitch) > 1e-4) {
+    const sp = Math.sin(pitch);
+    const cp = Math.cos(pitch);
+    for (const q of parts) {
+      if (q.role === 'wheel' || q.role === 'hub' || q.role === 'lug') continue;
+      const lx = (q.cx - p.x) * ca + (q.cy - p.y) * sa; // tiles ahead of the vehicle centre
+      const zMid = (q.z0 + q.h / 2) / PX_PER_TILE; // part centre height in tiles
+      const nx = lx * cp + zMid * sp; // rotate (lx, z) about the origin by -pitch
+      const nz = -lx * sp + zMid * cp;
+      q.cx += ca * (nx - lx);
+      q.cy += sa * (nx - lx);
+      q.z0 = Math.max(0, q.z0 + (nz - zMid) * PX_PER_TILE);
+      q.pitch = pitch;
+    }
+  }
   parts.sort((a, b) => isoDepth(a.cx, a.cy, camRot) - isoDepth(b.cx, b.cy, camRot) || a.z0 - b.z0);
   return parts;
 }

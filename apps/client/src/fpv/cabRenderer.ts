@@ -46,9 +46,13 @@ import { resolveLiftTarget, type LiftTarget } from './liftTarget.js';
 const M_PER_PX = 1 / ISO_PX_PER_M;
 const FLOOR_PX_PER_TILE = 32;
 const GRADE_COL = { perfect: '#34d399', clean: '#fbbf24', scrape: '#f87171' } as const;
+/** Half-size (m) of the square the sun's shadow map covers around the view (a 32 m window). */
+const SHADOW_HALF_M = 16;
+/** Direction toward the sun (normalised in use): high and from the north-west, like the iso light. */
+const SUN_DIR = new THREE.Vector3(-0.6, 1, -0.35).normalize();
 
 /**
- * Lambert material with two cheap, instancing-aware shading terms patched into the stock shader:
+ * Phong material with two cheap, instancing-aware shading terms patched into the stock shader:
  * - edge ink: darkens texels within a few cm of a box edge (measured in metres via the instance
  *   scale, so a 6 m rack upright and a 3 cm fork tip get the same line weight), echoing the iso
  *   painter's outlined faces;
@@ -56,9 +60,13 @@ const GRADE_COL = { perfect: '#34d399', clean: '#fbbf24', scrape: '#f87171' } as
  *   floating.
  * Cylinders / wheels skip the edge term (their unit-cube coordinates aren't box edges).
  */
-function shadedMaterial(o: { edges: boolean; transparent?: boolean; opacity?: number }): THREE.MeshLambertMaterial {
-  const mat = new THREE.MeshLambertMaterial({
+function shadedMaterial(o: { edges: boolean; transparent?: boolean; opacity?: number }): THREE.MeshPhongMaterial {
+  // Phong keeps Lambert's diffuse term (so site palettes match the iso view exactly) and adds a
+  // faint specular sheen that reads the shape of rounded metal / plastic parts.
+  const mat = new THREE.MeshPhongMaterial({
     color: 0xffffff,
+    specular: o.transparent ? 0x000000 : 0x1c1c1c, // no sheen on see-through parts (it reads as a pane)
+    shininess: 28,
     transparent: Boolean(o.transparent),
     opacity: o.opacity ?? 1,
     depthWrite: !o.transparent,
@@ -98,7 +106,13 @@ function shadedMaterial(o: { edges: boolean; transparent?: boolean; opacity?: nu
                 'float eMn = min(dEdge.x, min(dEdge.y, dEdge.z));',
                 'float eMx = max(dEdge.x, max(dEdge.y, dEdge.z));',
                 'float eMid = dEdge.x + dEdge.y + dEdge.z - eMn - eMx;',
-                'diffuseColor.rgb *= mix(0.7, 1.0, smoothstep(0.008, 0.03, eMid));',
+                'float eInk = smoothstep(0.008, 0.03, eMid);',
+                'diffuseColor.rgb *= mix(0.7, 1.0, eInk);',
+                // See-through parts read as outlines: edges are at least 35 % opaque, faces stay faint.
+                // (narrow 0.4–1.2 cm band: the own-truck hood sits right under the eye).
+                o.transparent
+                  ? 'diffuseColor.a = mix(max(diffuseColor.a, 0.35), diffuseColor.a, smoothstep(0.004, 0.012, eMid));'
+                  : '',
               ].join('\n')
             : '',
           'diffuseColor.rgb *= mix(0.68, 1.0, smoothstep(0.0, 0.35, vWorldY));',
@@ -201,7 +215,7 @@ function recordPart(rec: PrimRecorder, q: Part, a: number): void {
   const ya = a + (q.yaw ?? 0);
   if (q.shape === 'wheel' && q.axleM !== undefined) rec.axleWheel(q.cx, q.cy, q.len, q.wid, ya, q.axleM, q.hex);
   else if (q.shape === 'cyl') rec.cyl(q.cx, q.cy, q.len / 2, q.z0, q.h, q.hex);
-  else rec.oBox(q.cx, q.cy, q.len, q.wid, ya, q.z0, q.h, q.hex);
+  else rec.oBox(q.cx, q.cy, q.len, q.wid, ya, q.z0, q.h, q.hex, q.pitch ?? 0);
 }
 
 /** Record one dock-rig box (tyres / rims as true-scale wheels; rigs always drive along x). */
@@ -220,6 +234,8 @@ class Batch {
   private readonly s = new THREE.Vector3();
   private readonly c = new THREE.Color();
   private readonly up = new THREE.Vector3(0, 1, 0);
+  private readonly side = new THREE.Vector3(0, 0, 1);
+  private readonly qp = new THREE.Quaternion();
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -232,8 +248,20 @@ class Batch {
     this.mesh = this.make(cap);
   }
 
+  /** Cast / receive real (shadow-map) shadows; kept across capacity regrowth. */
+  shadows = false;
+
+  setShadows(on: boolean): this {
+    this.shadows = on;
+    this.mesh.castShadow = on;
+    this.mesh.receiveShadow = on;
+    return this;
+  }
+
   private make(cap: number): THREE.InstancedMesh {
     const mesh = new THREE.InstancedMesh(this.geo, this.mat, cap);
+    mesh.castShadow = this.shadows;
+    mesh.receiveShadow = this.shadows;
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.count = 0;
     mesh.frustumCulled = false;
@@ -256,6 +284,8 @@ class Batch {
       const hM = pr.h * M_PER_PX;
       this.p.set(pr.cx * TILE_M, pr.z0 * M_PER_PX + hM / 2, pr.cy * TILE_M);
       this.q.setFromAxisAngle(this.up, objectYaw(pr.a));
+      // Nose-down pitch tips the box's +X (forward) end toward the floor: rotate about local +Z.
+      if (pr.pitch) this.q.multiply(this.qp.setFromAxisAngle(this.side, -pr.pitch));
       this.s.set(pr.sx * TILE_M, hM, pr.sz * TILE_M);
       this.m.compose(this.p, this.q, this.s);
       this.mesh.setMatrixAt(i, this.m);
@@ -347,9 +377,11 @@ export class CabRenderer {
   private readonly roundMat = shadedMaterial({ edges: false });
   private readonly glassMat = shadedMaterial({ edges: true, transparent: true, opacity: 0.4 });
   private readonly glassRoundMat = shadedMaterial({ edges: false, transparent: true, opacity: 0.4 });
-  /** Fainter glass for my own chassis (the hood must not hide the forks). */
-  private readonly faintMat = shadedMaterial({ edges: true, transparent: true, opacity: 0.2 });
+  /** Near-invisible faces with outlined edges for my own chassis (the hood must not hide the forks). */
+  private readonly faintMat = shadedMaterial({ edges: true, transparent: true, opacity: 0.025 });
   private readonly wheels = new WheelOdometer();
+  private readonly sun = new THREE.DirectionalLight(0xffffff, 1.1);
+  private shadowCatcher: THREE.Mesh | null = null;
 
   private staticBox: Batch;
   private staticCyl: Batch;
@@ -420,9 +452,22 @@ export class CabRenderer {
 
     // Soft, near-flat lighting so faces read like the iso painter's top/left/right shading.
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a94a6, 2.1));
-    const sun = new THREE.DirectionalLight(0xffffff, 1.1);
-    sun.position.set(-0.6, 1, -0.35);
-    this.scene.add(sun);
+    // The sun casts real shadows from a shadow map that follows the camera (see placeSun()).
+    this.gl.shadowMap.enabled = true;
+    this.gl.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.sun.castShadow = true;
+    this.sun.shadow.mapSize.set(2048, 2048);
+    const sc = this.sun.shadow.camera;
+    sc.left = -SHADOW_HALF_M;
+    sc.right = SHADOW_HALF_M;
+    sc.top = SHADOW_HALF_M;
+    sc.bottom = -SHADOW_HALF_M;
+    sc.near = 1;
+    sc.far = 80;
+    this.sun.shadow.bias = -0.0006;
+    this.sun.shadow.normalBias = 0.02;
+    this.scene.add(this.sun);
+    this.scene.add(this.sun.target);
 
     this.staticBox = new Batch(this.scene, this.boxGeo, this.opaqueMat, 4096);
     this.staticCyl = new Batch(this.scene, this.cylGeo, this.roundMat, 1024);
@@ -437,6 +482,7 @@ export class CabRenderer {
     this.meCyl = new Batch(this.scene, this.cylGeo, this.roundMat, 32, 1);
     this.meWheel = new Batch(this.scene, this.wheelGeo, this.roundMat, 16, 1);
     this.shadows = new ShadowBatch(this.scene);
+    for (const b of [this.staticBox, this.staticCyl, this.dynBox, this.dynCyl, this.dynWheel]) b.setShadows(true);
     this.meGlass = new Batch(this.scene, this.boxGeo, this.glassMat, 64, 1);
     this.meFaint = new Batch(this.scene, this.boxGeo, this.faintMat, 64, 1);
     this.rings = new FlatBatch(this.scene, new THREE.RingGeometry(0.82, 1, 40), 0.9);
@@ -620,6 +666,22 @@ export class CabRenderer {
     this.floor.rotation.x = -Math.PI / 2;
     this.floor.position.set((map.w * TILE_M) / 2, 0, (map.h * TILE_M) / 2);
     this.scene.add(this.floor);
+    // The floor is an unlit texture, so a transparent shadow-catcher just above it shows the sun's
+    // shadows without changing the painted floor colours.
+    if (this.shadowCatcher) {
+      this.scene.remove(this.shadowCatcher);
+      this.shadowCatcher.geometry.dispose();
+    } else {
+      this.cleanup.push(() => (this.shadowCatcher?.material as THREE.Material | undefined)?.dispose());
+    }
+    this.shadowCatcher = new THREE.Mesh(
+      new THREE.PlaneGeometry(map.w * TILE_M, map.h * TILE_M),
+      (this.shadowCatcher?.material as THREE.ShadowMaterial | undefined) ?? new THREE.ShadowMaterial({ opacity: 0.22 }),
+    );
+    this.shadowCatcher.rotation.x = -Math.PI / 2;
+    this.shadowCatcher.position.set((map.w * TILE_M) / 2, 0.004, (map.h * TILE_M) / 2);
+    this.shadowCatcher.receiveShadow = true;
+    this.scene.add(this.shadowCatcher);
   }
 
   /** Top-down replica of the iso `drawFloor` static layers (same palette & markings). */
@@ -810,6 +872,7 @@ export class CabRenderer {
     );
     this.camera.updateMatrixWorld();
 
+    this.placeSun(eye.x, eye.z, eye.yaw);
     this.gl.setViewport(0, 0, this.VW, this.VH);
     this.gl.setScissorTest(false);
     this.gl.clear();
@@ -902,13 +965,14 @@ export class CabRenderer {
       drawCone(rec.asPainter(), x, y);
       this.shadows.add(x + 0.5, y + 0.5, 0.5, 0.5, 0);
     }
-    // Vehicles: soft footprint shadows for everyone (mine included), full models for rivals.
+    // Rival vehicles: soft footprint shadows + full models.
     for (const v of world.vehicles) {
       const p = this.poses.get(v.id);
       if (!p) continue;
+      // No blob under my own truck: from the seat it reads as a grey pane over the floor.
+      if (v.id === me.id) continue;
       const fp = footprintOf(modelOf(v.type));
       this.shadows.add(p.x + Math.cos(p.a) * fp.ox, p.y + Math.sin(p.a) * fp.ox, fp.len, fp.wid, p.a);
-      if (v.id === me.id) continue;
       const motion = this.motionFor(v.id, p, nowMs);
       for (const q of vehicleParts(v, p, nowMs, world.siteId, true, 0, { motion, lugs: Boolean(motion) })) recordPart(rec, q, p.a);
     }
@@ -921,6 +985,23 @@ export class CabRenderer {
     this.dynGlass.fill(glass.filter((p) => p.kind === 'box'));
     this.dynGlassCyl.fill(glass.filter((p) => p.kind === 'cyl'));
     this.dynGlassWheel.fill(glass.filter((p) => p.kind === 'wheel'));
+  }
+
+  /**
+   * Centre the sun's shadow window a little ahead of the eye (where the player is looking) and
+   * snap it to shadow-map texels, so shadows don't shimmer as the camera moves.
+   */
+  private placeSun(ex: number, ez: number, yaw: number): void {
+    // Camera looks along -Z rotated by yaw (three.js); push the window ~10 m ahead.
+    const ahead = 10;
+    let tx = ex - Math.sin(yaw) * ahead;
+    let tz = ez - Math.cos(yaw) * ahead;
+    const texel = (SHADOW_HALF_M * 2) / this.sun.shadow.mapSize.x;
+    tx = Math.round(tx / texel) * texel;
+    tz = Math.round(tz / texel) * texel;
+    this.sun.target.position.set(tx, 0, tz);
+    this.sun.position.set(tx + SUN_DIR.x * 40, SUN_DIR.y * 40, tz + SUN_DIR.z * 40);
+    this.sun.target.updateMatrixWorld();
   }
 
   /** Wheel roll / steer for a vehicle (none under reduced motion: wheels sit still and straight). */

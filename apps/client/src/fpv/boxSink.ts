@@ -22,6 +22,8 @@ export interface Prim {
   h: number;
   /** Heading in radians (sim convention); 0 for axis-aligned. */
   a: number;
+  /** Optional pitch about the box's lateral axis (rad, + = nose down). */
+  pitch?: number;
   r: number;
   g: number;
   b: number;
@@ -76,9 +78,9 @@ export class PrimRecorder {
     this.push({ kind: 'box', cx: x + w / 2, cy: y + d / 2, sx: w, sz: d, z0, h, a: 0 }, hex);
   }
 
-  oBox(cx: number, cy: number, len: number, wid: number, a: number, z0: number, h: number, hex: string): void {
+  oBox(cx: number, cy: number, len: number, wid: number, a: number, z0: number, h: number, hex: string, pitch = 0): void {
     if (!(len > 0 && wid > 0 && h > 0)) return;
-    this.push({ kind: 'box', cx, cy, sx: len, sz: wid, z0, h, a }, hex);
+    this.push({ kind: 'box', cx, cy, sx: len, sz: wid, z0, h, a, ...(pitch ? { pitch } : {}) }, hex);
   }
 
   cyl(cx: number, cy: number, r: number, z0: number, h: number, hex: string): void {

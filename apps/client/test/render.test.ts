@@ -378,6 +378,32 @@ describe('render/scenery & multi-site visual themes', () => {
     expect(jump.travel).toBeCloseTo(m.travel, 9); // teleports don't spin the wheels
   });
 
+  it('braking dips the nose and sways the mast forward; tyres stay planted', async () => {
+    const { WheelOdometer, MAX_PITCH } = await import('../src/render/wheels.js');
+    const { vehicleParts } = await import('../src/render/vehicles.js');
+    // Odometer: cruise forward, then brake hard → positive (nose-down) pitch, clamped.
+    const odo = new WheelOdometer();
+    let x = 0;
+    let m = odo.update('b', { x, y: 0, a: 0 }, 0);
+    for (let i = 1; i <= 20; i++) m = odo.update('b', { x: (x += 0.2), y: 0, a: 0 }, i * 50); // 4 tiles/s
+    for (let i = 21; i <= 26; i++) m = odo.update('b', { x: (x += 0.01), y: 0, a: 0 }, i * 50); // stop
+    expect(m.pitch).toBeGreaterThan(0.005);
+    expect(m.pitch).toBeLessThanOrEqual(MAX_PITCH);
+    // Model: same truck level vs pitched.
+    const v: any = { id: 'FL-P', type: 'counterbalance', fork: 0.6, cargo: [], orders: [] };
+    const pose = { x: 10, y: 10, a: 0 };
+    const level = vehicleParts(v, pose, 0, 'den-1', true, 0, { motion: { travel: 0, steer: 0, pitch: 0 } });
+    const dipped = vehicleParts(v, pose, 0, 'den-1', true, 0, { motion: { travel: 0, steer: 0, pitch: 0.05 } });
+    const byRole = (ps: typeof level, role: string) => ps.filter((q) => q.role === role);
+    const tips0 = byRole(level, 'forkTip')[0];
+    const tips1 = byRole(dipped, 'forkTip')[0];
+    expect(tips1.z0).toBeLessThan(tips0.z0); // nose dips
+    const mastTop = (ps: typeof level) => ps.filter((q) => q.role === 'mastTie').sort((a, b) => b.z0 - a.z0)[0];
+    expect(mastTop(dipped).cx).toBeGreaterThan(mastTop(level).cx); // tall parts sway forward
+    expect(byRole(dipped, 'wheel').map((q) => [q.cx, q.cy, q.z0])).toEqual(byRole(level, 'wheel').map((q) => [q.cx, q.cy, q.z0]));
+    expect(dipped.filter((q) => q.role !== 'wheel' && q.role !== 'hub').every((q) => q.pitch === 0.05)).toBe(true);
+  });
+
   it('Painter.wheel draws tread + sidewall, and drawVehicle grounds models with a footprint shadow', async () => {
     const { Painter } = await import('../src/render/painter.js');
     const { drawVehicle } = await import('../src/render/vehicles.js');

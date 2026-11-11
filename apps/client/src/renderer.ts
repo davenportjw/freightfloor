@@ -633,12 +633,16 @@ export class WarehouseRenderer {
     this.drawFloor(world, opts);
     if (opts.dispatchPreview) this.drawDispatchPreview(world, opts.dispatchPreview);
     if (opts.layers.routes) this.drawRoutes(world, opts);
+    // The ghost path is floor paint: draw it before the scene so trucks and racks cover it (it used
+    // to be drawn last, so the dashes crossed over the player's own forklift). Its label stays on top.
+    const showGhost = Boolean(me && opts.layers.ghost && opts.ghost && opts.ghost.points.length >= 2);
+    if (showGhost) this.drawGhostPath(opts.ghost!);
     const items = this.sceneItems(world, opts);
     items.sort((a, b) => a.d - b.d);
     for (const it of items) it.fn();
     this.drawConeOverlay(world, opts);
     this.drawLabels(world, opts);
-    if (me && opts.layers.ghost && opts.ghost) this.drawGhost(opts.ghost);
+    if (showGhost) this.drawGhostLabel(opts.ghost!);
     if (me) this.drawGuide(world, me, opts);
     if (me) this.drawCallouts(me);
     this.drawBubbles(world);
@@ -1665,9 +1669,8 @@ export class WarehouseRenderer {
     ctx.restore();
   }
 
-  /** Ghost planner: faint dashed line along the sim planner's cells + a hollow ghost marker at the end. */
-  private drawGhost(g: RenderGhost): void {
-    if (g.points.length < 2) return;
+  /** Ghost planner (floor layer): faint dashed line along the planner's cells + a hollow end marker. */
+  private drawGhostPath(g: RenderGhost): void {
     const pt = this.painter;
     const ctx = this.ctx;
     const z = this.cam.zoom;
@@ -1689,6 +1692,15 @@ export class WarehouseRenderer {
     ctx.setLineDash([]);
     const end = g.points[g.points.length - 1];
     pt.poly(pt.circleGrid(end.x, end.y, 0.42), 'rgba(107,91,149,0.14)', '#6B5B95', 2);
+    ctx.restore();
+  }
+
+  /** Ghost planner (overlay layer): the target label above the path's end, drawn over the scene. */
+  private drawGhostLabel(g: RenderGhost): void {
+    const pt = this.painter;
+    const ctx = this.ctx;
+    const end = g.points[g.points.length - 1];
+    ctx.save();
     ctx.globalAlpha = 0.85;
     const [lx, ly] = pt.P(end.x, end.y, 34);
     if (g.label) {
