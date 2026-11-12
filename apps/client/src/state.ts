@@ -974,7 +974,7 @@ export class ClientStore {
     fareSel: 0,
     fareKey: null,
     runEnd: null,
-    runMode: 'blitz',
+    runMode: 'daily',
     relocationOffer: null,
     dealMinimizedKey: null,
     runEndDismissedVid: null,

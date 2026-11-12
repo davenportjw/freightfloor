@@ -1266,8 +1266,8 @@ function boot(): void {
         }
         refreshDriveFirst();
         refreshDaily(true);
-        // Run 1 is a timed run: Blitz, or the Daily Shift when the player picked it on the intro.
-        if (store.driveFirst && store.ui.runMode === 'freerange') actions.setRunMode('blitz');
+        // Run 1 is a timed run: Daily Shift by default, or Blitz when toggled off on the intro.
+        if (store.driveFirst && store.ui.runMode === 'freerange') actions.setRunMode('daily');
         noteRunStart();
         maybeAutoKeep();
         checkRunEnd();

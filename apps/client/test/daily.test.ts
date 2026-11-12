@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { dailyInfo } from '@warehouse/sim';
+import { ClientStore } from '../src/state.js';
 import {
   DAILY_BEST_KEY,
   dailyBest,
@@ -75,5 +76,9 @@ describe('Daily Shift client helpers', () => {
     expect(dailyLeaderText({ ...board, top: [], total: 0, you: null }, '2026-11-12')).toBe('🏆 No scores yet today: set the pace');
     expect(dailyYouText({ ...board, you: null }, '2026-11-12')).toBeNull();
     expect(dailyBoardKey(board)).not.toBe(dailyBoardKey({ ...board, total: 3 }));
+  });
+
+  it('defaults new client sessions to Daily Shift mode', () => {
+    expect(new ClientStore().ui.runMode).toBe('daily');
   });
 });
