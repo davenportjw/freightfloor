@@ -2595,3 +2595,6 @@ body.hud-minimal #dash .hints { display: none; }
 .ai-recap h4 { margin: 0; font-size: 14px; }
 .ai-recap ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
 .ai-recap .sub { color: var(--muted); }
+
+/* Inline SVG forklift (ui/forkliftIcon.ts) used in place of the 🚜 emoji on Drive buttons. */
+.forklift-icon { display: inline-block; vertical-align: -0.2em; flex: none; }

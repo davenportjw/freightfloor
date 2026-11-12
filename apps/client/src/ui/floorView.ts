@@ -1,7 +1,7 @@
 /**
  * FLOOR view chrome (shown when not driving, or after "Watch the floor"):
  *  - `#kpis` strip (left:70 top:12): site · Day/Shift clock, Shipped, On-time, Backlog.
- *  - `#floorBanner` (top-right): "Floor view · …" + teal "🚜 Drive F" (`driveFromFloor`); after a
+ *  - `#floorBanner` (top-right): "Floor view · …" + teal "<forklift> Drive F" (`driveFromFloor`); after a
  *    run it reads "your run is over · N pts" (the run summary lives here, not in a notification).
  *  - `#feed` (right:12 top:80): the FLOOR mode's only notification stream — the last ≤3 live sim
  *    events merged with client notices (`store.ui.feedNotes`, ui/notify.ts), deduped by text, each
@@ -12,6 +12,7 @@ import type { SimEvent } from '@warehouse/sim';
 import type { UiCtx, UiModule } from './context.js';
 import { el, kbd, KeyedView } from './dom.js';
 import { DASH, shiftLeft } from './format.js';
+import { forkliftIcon } from './forkliftIcon.js';
 import { kpiView } from './kpiBar.js';
 import { presenceView } from './presence.js';
 
@@ -161,7 +162,7 @@ export function mountFloorView(kpis: HTMLElement, banner: HTMLElement, feed: HTM
                 attrs: { type: 'button', 'data-role': 'claim-seat' },
                 onClick: () => actions.claimQueueSeat(),
               },
-              ['🚜 Take the Wheel ', kbd('↵')],
+              [forkliftIcon(), ' Take the Wheel ', kbd('↵')],
             );
             return [
               el('span', { text: `● Forklift Ready on ${targetSite}` }),
@@ -191,7 +192,7 @@ export function mountFloorView(kpis: HTMLElement, banner: HTMLElement, feed: HTM
               attrs: { type: 'button', 'data-role': 'drive-floor' },
               onClick: () => actions.driveFromFloor(),
             },
-            [runOver ? '🚜 Play again ' : '🚜 Drive ', kbd('F')],
+            [forkliftIcon(), runOver ? ' Play again ' : ' Drive ', kbd('F')],
           );
           return [el('span', { text: `Floor view · ${status}` }), drive];
         },
