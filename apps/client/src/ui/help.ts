@@ -6,10 +6,20 @@
 import type { UiCtx, UiModule } from './context.js';
 import { button, el, kbd } from './dom.js';
 import { HOTKEYS } from './hotkeys.js';
+import { forkliftIcon } from './forkliftIcon.js';
 import { createFocusTrap, type TrapContainer } from './focusTrap.js';
 import type { StorageLike } from './panel.js';
 
 export const HELP_SEEN_KEY = 'warehouse.help.seen';
+
+/** Sentinel for the "Drive" step icon — rendered as the inline SVG forklift (no forklift emoji exists). */
+const FORKLIFT_ICON = 'forklift';
+
+function forkliftIconEl(): HTMLElement {
+  const wrap = el('div', { class: 'intro-step__icon', attrs: { 'aria-hidden': 'true' } });
+  wrap.append(forkliftIcon());
+  return wrap;
+}
 
 /** `ai` and `lifecycle` both open the single "How the AI works" view (both panes stacked). */
 export type IntroTab = 'play' | 'ai' | 'lifecycle';
@@ -212,7 +222,9 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
   // ---- How to Play ----
   const step = (n: string, icon: string, title: string, body: Array<Node | string> | HTMLElement): HTMLElement =>
     el('li', { class: 'intro-step' }, [
-      el('div', { class: 'intro-step__icon', text: icon, attrs: { 'aria-hidden': 'true' } }),
+      icon === FORKLIFT_ICON
+        ? forkliftIconEl()
+        : el('div', { class: 'intro-step__icon', text: icon, attrs: { 'aria-hidden': 'true' } }),
       el('div', { class: 'intro-step__num', text: n }),
       el('h3', { class: 'intro-step__title', text: title }),
       Array.isArray(body) ? el('p', { class: 'intro-step__body' }, body) : body,
@@ -567,7 +579,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     { class: 'intro-pane', attrs: { 'data-pane': 'rules', role: 'region', 'aria-label': 'How to Play' } },
     [
       el('ol', { class: 'intro-steps' }, [
-        step('1', '🚜', 'Drive', step1Body),
+        step('1', FORKLIFT_ICON, 'Drive', step1Body),
         step('2', '📦', 'Pick up', step2Body),
         step('3', '🏁', 'Deliver', step3Body),
       ]),

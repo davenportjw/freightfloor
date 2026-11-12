@@ -12,6 +12,7 @@
 import { isLeaseEvictionReason, type RunEndLeaderboardRow, type RunEndSummary } from '../state.js';
 import type { UiCtx, UiModule } from './context.js';
 import { button, el, kbd } from './dom.js';
+import { forkliftIcon } from './forkliftIcon.js';
 import { presenceView } from './presence.js';
 import { createFocusTrap, type TrapContainer } from './focusTrap.js';
 import { recapDecisionText, recapDirectiveText } from './aiInsight.js';
@@ -406,7 +407,7 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
         () => actions.claimQueueSeat(),
         `Claim your reserved driver seat on ${targetSite}`,
       );
-      claimBtn.append('🚜 Take the Wheel ', kbd('↵'));
+      claimBtn.append(forkliftIcon(), ' Take the Wheel ', kbd('↵'));
       claimBtn.dataset.role = 'claim-seat';
       queueRowEl = el(
         'div',

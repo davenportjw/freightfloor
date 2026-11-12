@@ -1272,7 +1272,7 @@ describe('Shift Briefing / Help modal (mountHelp, How to Play + "How the AI work
       floorView.update();
       expect(banner.textContent).toContain('Forklift Ready on SLC-2');
       const claimBtn = banner.queryAll((e) => e.dataset.role === 'claim-seat')[0]!;
-      expect(claimBtn.textContent).toContain('🚜 Take the Wheel ↵');
+      expect(claimBtn.textContent).toContain('Take the Wheel ↵');
       claimBtn.click();
       expect(claimed).toBe(1);
 
