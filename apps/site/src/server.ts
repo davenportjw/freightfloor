@@ -20,6 +20,11 @@ import {
   BOARD_INTERVAL_MS,
   DISPATCH_MAX_COUNT,
   isTimedRun,
+  addDays,
+  dailyModifierFor,
+  dayKeyToMs,
+  DAILY_SCORE_TTL_DAYS,
+  type DailyScoreDoc,
   type EvictionReason,
   type SiteId,
   type ServerMessage,
@@ -462,6 +467,59 @@ export function fareStats(
   };
 }
 
+/** "Alex Run 3" -> "Alex": leaderboard rows show the callsign, not the run counter. */
+export function dailyBoardName(name: string): string {
+  const trimmed = name.trim().replace(/\s+/g, ' ');
+  const m = /^(.*?)\s+Run\s+\d+$/i.exec(trimmed);
+  return ((m ? m[1] : trimmed) || 'Driver').slice(0, 40);
+}
+
+/**
+ * The Daily leaderboard entry for a finished human Daily run, or null when the run does not
+ * count (not daily, not finished, a bot / AI, or no stamped day).
+ */
+export function dailyScoreDoc(
+  v: Vehicle,
+  clientId: string,
+  publicId: string,
+  name: string,
+  isBot: boolean,
+  siteId: string,
+  nowMs: number,
+): DailyScoreDoc | null {
+  if (v.runMode !== 'daily' || !v.runFinished || !v.human || isBot || v.isBot || !v.dailyKey) return null;
+  let modifier;
+  try {
+    modifier = v.dailyMod ?? dailyModifierFor(v.dailyKey).id;
+  } catch {
+    return null;
+  }
+  return {
+    dayKey: v.dailyKey,
+    clientId,
+    publicId,
+    name: dailyBoardName(name),
+    pts: Math.round(v.runPts ?? 0),
+    deliveries: Math.max(0, Math.round(v.runDeliveries ?? 0)),
+    onTime: Math.max(0, Math.round(v.runOnTime ?? 0)),
+    incidents: Math.max(0, Math.round(v.runIncidents ?? 0)),
+    tape: (v.runTape ?? '').slice(0, 40),
+    modifier,
+    siteId,
+    updatedAt: nowMs,
+    expireAt: dayKeyToMs(addDays(v.dailyKey, DAILY_SCORE_TTL_DAYS)),
+  };
+}
+
+/** Daily Shift day + run tape for human drivers (the client shows the modifier and tape). */
+export function dailyStats(v: Vehicle): Pick<QuantisedVehicleDelta, 'dailyKey' | 'runTape'> {
+  if (!v.human || v.isBot) return {};
+  return {
+    ...(v.runMode === 'daily' && v.dailyKey ? { dailyKey: v.dailyKey } : {}),
+    ...(v.runTape !== undefined ? { runTape: v.runTape } : {}),
+  };
+}
+
 /** Inbound putaway guide extras: `stow` flag and the open cross-dock bay target (`alt`). */
 export function guideExtras(g: {
   stow?: boolean;
@@ -520,6 +578,8 @@ export type VehicleDetail = Pick<
   | 'runDeliveries'
   | 'runOnTime'
   | 'runIncidents'
+  | 'dailyKey'
+  | 'runTape'
   | 'streak'
   | 'bestStreak'
   | 'combo'
@@ -580,6 +640,7 @@ export function vehicleDetail(v: Vehicle): VehicleDetail {
           ...(v.bestStreak !== undefined ? { bestStreak: v.bestStreak } : {}),
           ...fareStats(v),
           ...choiceStats(v),
+          ...dailyStats(v),
           ...(v.runFinished !== undefined ? { runFinished: Boolean(v.runFinished) } : {}),
         }
       : {}),
@@ -843,6 +904,14 @@ export async function createSiteServer(
     }
     if (v.runFinished) {
       persistedFinishedRuns.add(runKey);
+    }
+    // Snapshot the Daily entry before any await (the vehicle may be released meanwhile) and write
+    // it independently of the profile upsert so one failing never drops the other.
+    const daily = extraPts === 0 ? dailyScoreDoc(v, cid, toPublicId(cid), playerName, isBotFlag, siteId, nowMs) : null;
+    if (daily && persistence.recordDailyScore) {
+      void persistence.recordDailyScore(daily).catch((err: unknown) => {
+        console.error('daily score write failed', err);
+      });
     }
     const score = Math.round(v.sPts) + extraPts;
     const runPts = Math.round(v.runPts ?? v.sPts) + extraPts;
@@ -1136,6 +1205,7 @@ export async function createSiteServer(
           ...(v.bestStreak !== undefined ? { bestStreak: v.bestStreak } : {}),
           ...fareStats(v),
           ...choiceStats(v),
+          ...dailyStats(v),
           ...(v.runFinished !== undefined ? { runFinished: Boolean(v.runFinished) } : {}),
           inRange: Boolean(g?.inRange),
           guide: g

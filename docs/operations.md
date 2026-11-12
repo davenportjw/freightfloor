@@ -196,6 +196,7 @@ In accordance with the resource lifecycle policy, every staging load test or smo
 | **Artifact Registry (`warehouse`)** | Keep last **5 image versions**, delete anything older than **7 days** | Terraform `cleanup_policies` `keep-recent-5` (KEEP, wins) + `delete-older-than-7d` (DELETE). A KEEP rule alone deletes nothing. |
 | **Project spend** | **\$400 / month** budget alert | `google_billing_budget.monthly` (50/90/100% actual, 100% forecast). Detailed cost data comes from the Cloud Billing BigQuery export (see §7). |
 | **Firestore `journal` Collection** | **7-day TTL** | Enforced via Terraform `google_firestore_field.journal_ttl` on `expireAt`. |
+| **Firestore `daily_scores` Collection** (`daily/{dayKey}/daily_scores/{clientId}`) | **30-day TTL** after the day | Enforced via Terraform `google_firestore_field.daily_scores_ttl` on `expireAt`. One doc per player per day (best run only); `GET /api/daily` reads top 10 + a count aggregation, cached 15 s per lobby instance. |
 
 ---
 

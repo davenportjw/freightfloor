@@ -872,6 +872,10 @@ export const QuantisedVehicleDeltaSchema = z.object({
   runDeliveries: z.number().int().optional(),
   runOnTime: z.number().int().optional(),
   runIncidents: z.number().int().optional(),
+  /** Daily Shift day key (`YYYY-MM-DD`, UTC) the run belongs to; daily runs only. */
+  dailyKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  /** Run event tape (`O` on-time, `L` late, `X` incident), max 40 chars; human runs only. */
+  runTape: z.string().max(40).optional(),
   streak: z.number().int().optional(),
   bestStreak: z.number().int().optional(),
   /** Current fare combo multiplier (1.0 / 1.2 / 1.5 / 2.0). */
@@ -1941,7 +1945,7 @@ export function nextVisitLedger(prev: Partial<VisitLedger> | null | undefined, t
 // driver, never the shared floor. Effects live in @warehouse/sim; this is the metadata.
 
 /** Day key of Daily #1. */
-export const DAILY_EPOCH_DAY = '2026-11-10';
+export const DAILY_EPOCH_DAY = '2026-11-12';
 
 /** 1-based Daily number for a day key (≤ 0 before the epoch). */
 export function dailyNumber(key: string): number {
@@ -2058,3 +2062,56 @@ export const DailyInfoSchema = z.object({
   resetsAt: z.number().int(),
 });
 export type DailyInfo = z.infer<typeof DailyInfoSchema>;
+
+/** Daily scores expire (Firestore TTL on `expireAt`) this many days after their day. */
+export const DAILY_SCORE_TTL_DAYS = 30;
+/** Rows returned by `GET /api/daily`. */
+export const DAILY_BOARD_LIMIT = 10;
+
+/**
+ * One player's best Daily Shift run for a day, written by the site when a daily run finishes
+ * (Firestore `daily{suffix}/{dayKey}/daily_scores/{clientId}`, kept only when it beats the
+ * stored score). `clientId` never leaves the server; boards expose `publicId` only.
+ */
+export const DailyScoreDocSchema = z.object({
+  dayKey: DayKeySchema,
+  clientId: z.string().min(1),
+  /** Opaque `p1_…` id (same derivation as the site / lobby), used for own-row matching. */
+  publicId: z.string().regex(PUBLIC_ID_PATTERN),
+  name: z.string().min(1).max(40),
+  pts: z.number().int(),
+  deliveries: z.number().int().nonnegative(),
+  onTime: z.number().int().nonnegative(),
+  incidents: z.number().int().nonnegative(),
+  tape: z.string().max(40),
+  modifier: DailyModifierIdSchema,
+  siteId: z.string(),
+  updatedAt: z.number().int(),
+  expireAt: z.number().int(),
+});
+export type DailyScoreDoc = z.infer<typeof DailyScoreDocSchema>;
+
+export const DailyBoardRowSchema = z.object({
+  rank: z.number().int().positive(),
+  name: z.string(),
+  pts: z.number().int(),
+  tape: z.string(),
+  siteId: z.string(),
+  /** Opaque player id; compare with `welcome.you.clientId` to find your own row. */
+  publicId: z.string(),
+});
+export type DailyBoardRow = z.infer<typeof DailyBoardRowSchema>;
+
+/** `GET /api/daily[?publicId=p1_…]`: today's Daily Shift leaderboard (best run per player). */
+export const DailyBoardResponseSchema = z.object({
+  dayKey: DayKeySchema,
+  number: z.number().int(),
+  modifier: DailyModifierSchema,
+  resetsAt: z.number().int(),
+  /** Players with a recorded score today. */
+  total: z.number().int().nonnegative(),
+  top: z.array(DailyBoardRowSchema),
+  /** The `publicId` player's best today and rank (null without a score or publicId). */
+  you: z.object({ rank: z.number().int().positive(), pts: z.number().int(), tape: z.string() }).nullable(),
+});
+export type DailyBoardResponse = z.infer<typeof DailyBoardResponseSchema>;

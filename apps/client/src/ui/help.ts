@@ -1,6 +1,7 @@
 /**
  * Intro modal (`#help`): "How to Play" (default view) with a single "🧠 How the AI works" link that
- * swaps to the AI Inside + Decision Lifecycle explainer (and "← How to Play" back). Shown on load (unless `warehouse.help.seen === 'skip'`)
+ * swaps to the AI Inside + Decision Lifecycle explainer (and "← How to Play" back), plus a "✨ What's new"
+ * changelog view (src/changelog.ts) with a NEW dot until the latest release has been opened. Shown on load (unless `warehouse.help.seen === 'skip'`)
  * and reopened anytime via `?` or the top-right `Intro & Rules ?` toolbar button.
  */
 import type { UiCtx, UiModule } from './context.js';
@@ -9,6 +10,8 @@ import { HOTKEYS } from './hotkeys.js';
 import { forkliftIcon } from './forkliftIcon.js';
 import { createFocusTrap, type TrapContainer } from './focusTrap.js';
 import type { StorageLike } from './panel.js';
+import { dailyBest, dailyLeaderText, dailyResetText, dailyYouText, todayDaily } from './daily.js';
+import { CHANGE_KIND_LABEL, CHANGELOG, formatReleaseDate, hasUnseenChanges, markChangelogSeen } from '../changelog.js';
 
 export const HELP_SEEN_KEY = 'warehouse.help.seen';
 
@@ -21,8 +24,11 @@ function forkliftIconEl(): HTMLElement {
   return wrap;
 }
 
-/** `ai` and `lifecycle` both open the single "How the AI works" view (both panes stacked). */
-export type IntroTab = 'play' | 'ai' | 'lifecycle';
+/**
+ * `ai` and `lifecycle` both open the single "How the AI works" view (both panes stacked).
+ * `whatsnew` opens the changelog (src/changelog.ts).
+ */
+export type IntroTab = 'play' | 'ai' | 'lifecycle' | 'whatsnew';
 
 export interface HelpModule extends UiModule {
   switchTab(tab: IntroTab): void;
@@ -94,6 +100,8 @@ export interface HelpMountOptions {
   getCallsign?: () => string;
   /** Optional override for whether mobile/touch joystick controls are active. */
   isMobile?: boolean | (() => boolean);
+  /** Where the "What's new" seen marker lives (localStorage in the browser). */
+  storage?: StorageLike | null;
 }
 
 /** Touch / mobile controls shown in "All controls" when on a mobile / coarse-pointer viewport. */
@@ -219,6 +227,19 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
   backLink.dataset.introTab = 'play';
   backLink.hidden = true;
 
+  const newDot = el('span', { class: 'intro-new-dot', text: 'NEW', attrs: { 'data-role': 'whats-new-dot' } });
+  newDot.hidden = !hasUnseenChanges(opts.storage);
+  const whatsNewLink = el(
+    'button',
+    {
+      class: 'btn intro-ai-link intro-whatsnew-link',
+      attrs: { type: 'button' },
+      onClick: () => switchTab('whatsnew'),
+    },
+    ["✨ What's new", newDot],
+  );
+  whatsNewLink.dataset.introTab = 'whatsnew';
+
   // ---- How to Play ----
   const step = (n: string, icon: string, title: string, body: Array<Node | string> | HTMLElement): HTMLElement =>
     el('li', { class: 'intro-step' }, [
@@ -323,6 +344,46 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       liftExplainer,
     ],
   );
+
+  // ---- Daily Shift: today's shared run (same contracts for everyone + one personal modifier) ----
+  const dailyBtn = el('button', {
+    class: 'btn intro-lift-toggle',
+    attrs: { type: 'button', 'data-role': 'intro-daily-toggle', 'data-action': 'toggle-daily' },
+    onClick: () => {
+      const next = ctx.store.ui.runMode === 'daily' ? 'blitz' : 'daily';
+      if (typeof ctx.actions.setRunMode === 'function') ctx.actions.setRunMode(next);
+      else ctx.store.ui.runMode = next;
+      syncDailyHelp();
+    },
+  });
+  const dailyTitleEl = el('span', { class: 'intro-lift-mode__title' });
+  const dailySubEl = el('span', { class: 'intro-lift-mode__sub' });
+  const dailyBox = el('div', { class: 'intro-lift-mode intro-daily', attrs: { 'data-role': 'intro-daily' } }, [
+    el('div', { class: 'intro-lift-mode__bar' }, [
+      el('div', { class: 'intro-lift-mode__info' }, [dailyTitleEl, dailySubEl]),
+      dailyBtn,
+    ]),
+  ]);
+  let dailySyncKey = '';
+  const syncDailyHelp = (): void => {
+    const info = todayDaily();
+    const on = ctx.store.ui.runMode === 'daily';
+    const best = dailyBest(opts.storage, info.dayKey);
+    const reset = dailyResetText(info);
+    const leader = dailyLeaderText(ctx.store.dailyBoard, info.dayKey);
+    const you = dailyYouText(ctx.store.dailyBoard, info.dayKey);
+    const key = JSON.stringify([info.dayKey, on, best, reset, leader, you]);
+    if (key === dailySyncKey) return;
+    dailySyncKey = key;
+    dailyTitleEl.replaceChildren('📅 ', b(`Daily Shift #${info.number}`), ` · ${info.modifier.label}`);
+    dailySubEl.textContent = `${info.modifier.blurb} Same 3 contracts for everyone today · ${reset}${best !== null ? ` · your best ${best} pts` : ''}.${leader ? ` ${leader}${you ? ` · ${you}` : ''}.` : ''}`;
+    dailyBtn.textContent = on ? 'Daily: ON' : 'Play the Daily';
+    dailyBtn.setAttribute('aria-pressed', String(on));
+    dailyBtn.classList.toggle('active', on);
+    dailyBox.dataset.enabled = on ? 'true' : 'false';
+    dailyBox.classList.toggle('active', on);
+  };
+  syncDailyHelp();
 
   const getDriveCameraMode = () =>
     typeof ctx.store.driveCameraMode === 'function'
@@ -591,6 +652,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
         boostChip,
         chargeChip,
       ]),
+      dailyBox,
       liftModeBox,
       cameraBox,
       el('p', { class: 'intro-goal' }, ['Out-ship the AI forklifts and finish the shift ', b('#1'), '.']),
@@ -1184,14 +1246,53 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
   );
   lifecyclePane.hidden = true;
 
+  // ---- What's new: player-facing changelog curated from commits (src/changelog.ts) ----
+  const whatsNewPane = el(
+    'section',
+    { class: 'intro-pane whatsnew-pane', attrs: { 'data-intro-pane': 'whatsnew', 'aria-label': "What's new" } },
+    [
+      el('p', { class: 'intro-subtitle muted', text: 'Recent features, upgrades and fixes on the floor.' }),
+      ...CHANGELOG.map((rel) =>
+        el('article', { class: 'whatsnew-release', attrs: { 'data-release': rel.date } }, [
+          el('header', { class: 'whatsnew-release__head' }, [
+            el('h3', { class: 'whatsnew-release__title', text: rel.title }),
+            el('time', { class: 'whatsnew-release__date muted num', text: formatReleaseDate(rel.date), attrs: { datetime: rel.date } }),
+          ]),
+          el(
+            'ul',
+            { class: 'whatsnew-items' },
+            rel.items.map((it) =>
+              el('li', { class: `whatsnew-item whatsnew-item--${it.kind}` }, [
+                el('span', { class: `whatsnew-kind whatsnew-kind--${it.kind}`, text: CHANGE_KIND_LABEL[it.kind] }),
+                el('div', { class: 'whatsnew-item__text' }, [
+                  el('b', { text: it.title }),
+                  it.soon ? el('span', { class: 'intro-chip accent whatsnew-soon', text: 'Coming soon' }) : null,
+                  el('p', { class: 'whatsnew-item__body', text: it.body }),
+                ]),
+              ]),
+            ),
+          ),
+        ]),
+      ),
+    ],
+  );
+  whatsNewPane.hidden = true;
+
   function switchTab(tab: IntroTab): void {
-    const ai = tab !== 'play';
-    playPane.hidden = ai;
+    const view = tab === 'play' ? 'play' : tab === 'whatsnew' ? 'whatsnew' : 'ai';
+    const ai = view === 'ai';
+    playPane.hidden = view !== 'play';
     aiPane.hidden = !ai;
     lifecyclePane.hidden = !ai;
+    whatsNewPane.hidden = view !== 'whatsnew';
     aiLink.hidden = ai;
     aiLink.setAttribute('aria-expanded', String(ai));
-    backLink.hidden = !ai;
+    whatsNewLink.hidden = view === 'whatsnew';
+    backLink.hidden = view === 'play';
+    if (view === 'whatsnew') {
+      markChangelogSeen(opts.storage);
+      newDot.hidden = true;
+    }
   }
 
   // ---- cold-start / floor spin-up ticker ----
@@ -1315,10 +1416,11 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
           ],
         ),
       ]),
-      el('div', { class: 'intro-tabs', attrs: { 'aria-label': 'Intro sections' } }, [aiLink, backLink]),
+      el('div', { class: 'intro-tabs', attrs: { 'aria-label': 'Intro sections' } }, [aiLink, whatsNewLink, backLink]),
       playPane,
       aiPane,
       lifecyclePane,
+      whatsNewPane,
       spinupBox,
       footer,
     ],
@@ -1338,6 +1440,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       syncRackLiftHelp(ctx.store.isRackLiftEnabled(), isTouchControlsEnvironment(opts.isMobile));
       syncDriveCameraHelp();
       syncCabViewHelp();
+      syncDailyHelp();
       syncSpinup();
       const pending = Boolean(ctx.store.ui.pendingDrive);
       const label = introStartLabel(pending);

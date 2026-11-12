@@ -24,7 +24,8 @@
     "ast:analyze": "node --no-warnings tools/ast-sidecar/dist/cli.js analyze",
     "ast:benchmark": "node --no-warnings tools/ast-sidecar/dist/cli.js benchmark",
     "ast:export": "node --no-warnings tools/ast-sidecar/dist/cli.js export",
-    "report:retention": "npm run build -w @warehouse/smoke && node tools/smoke/dist/retention.js"
+    "report:retention": "npm run build -w @warehouse/smoke && node tools/smoke/dist/retention.js",
+    "changelog:draft": "node scripts/changelog-draft.mjs"
   },
   "wireit": {
     "build": {

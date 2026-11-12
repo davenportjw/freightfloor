@@ -895,17 +895,21 @@ describe('Shift Briefing / Help modal (mountHelp, How to Play + "How the AI work
         },
       } as unknown as import('../../src/ui/context.js').UiCtx;
 
+      const seenStore = new Map<string, string>();
+      const storage = { getItem: (k: string) => seenStore.get(k) ?? null, setItem: (k: string, v: string) => void seenStore.set(k, v) };
       const help = mountHelp(overlay as unknown as HTMLElement, ctx, {
         getCallsign: () => 'Forklift-Ace',
+        storage,
       });
       help.update();
 
-      // One "🧠 How the AI works" link (data-intro-tab="ai") + a hidden "← How to Play" back link.
+      // "🧠 How the AI works" (data-intro-tab="ai"), "✨ What's new", and a hidden "← How to Play" back link.
       const links = overlay.queryAll((e) => e.dataset.introTab !== undefined);
-      expect(links.map((t) => t.dataset.introTab)).toEqual(['ai', 'play']);
-      const [aiLink, backLink] = links as [MiniElement, MiniElement];
+      expect(links.map((t) => t.dataset.introTab)).toEqual(['ai', 'whatsnew', 'play']);
+      const [aiLink, whatsNewLink, backLink] = links as [MiniElement, MiniElement, MiniElement];
       expect(aiLink.textContent).toBe('🧠 How the AI works');
       expect(aiLink.hidden).toBe(false);
+      expect(whatsNewLink.hidden).toBe(false);
       expect(backLink.hidden).toBe(true);
       expect(overlay.queryAll((e) => e.getAttribute('role') === 'tab')).toHaveLength(0);
 
@@ -1000,6 +1004,28 @@ describe('Shift Briefing / Help modal (mountHelp, How to Play + "How the AI work
       expect(lifecyclePane.hidden).toBe(true);
       expect(aiLink.hidden).toBe(false);
       expect(backLink.hidden).toBe(true);
+
+      // "✨ What's new": NEW dot until opened, renders every curated release, marks the latest seen.
+      const { CHANGELOG, CHANGELOG_SEEN_KEY } = await import('../../src/changelog.js');
+      const newDot = overlay.queryAll((e) => e.getAttribute('data-role') === 'whats-new-dot')[0]!;
+      expect(newDot.hidden).toBe(false);
+      const whatsNewPane = overlay.queryAll((e) => e.getAttribute('data-intro-pane') === 'whatsnew')[0]!;
+      expect(whatsNewPane.hidden).toBe(true);
+      whatsNewLink.click();
+      expect(whatsNewPane.hidden).toBe(false);
+      expect(playPane.hidden).toBe(true);
+      expect(aiPane.hidden).toBe(true);
+      expect(whatsNewLink.hidden).toBe(true);
+      expect(aiLink.hidden).toBe(false);
+      expect(backLink.hidden).toBe(false);
+      expect(newDot.hidden).toBe(true);
+      expect(seenStore.get(CHANGELOG_SEEN_KEY)).toBe(CHANGELOG[0]!.date);
+      expect(whatsNewPane.queryAll((e) => e.classList.contains('whatsnew-release'))).toHaveLength(CHANGELOG.length);
+      expect(whatsNewPane.textContent).toContain('Daily Shift');
+      expect(whatsNewPane.textContent).not.toContain('Coming soon');
+      help.switchTab('play');
+      expect(whatsNewPane.hidden).toBe(true);
+      expect(playPane.hidden).toBe(false);
     } finally {
       (globalThis as Record<string, unknown>).document = prevDoc;
     }

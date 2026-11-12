@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { QuantisedVehicleDeltaSchema } from '@warehouse/protocol';
+import { DailyScoreDocSchema, QuantisedVehicleDeltaSchema } from '@warehouse/protocol';
 import {
   createWorld,
   dealShiftCards,
@@ -10,7 +10,7 @@ import {
   spawnPlayerVehicle,
   type CardOption,
 } from '@warehouse/sim';
-import { fareStats, guideExtras, HUMAN_ONLY_CARD_TYPES, renderDecisionPrompt, vehicleDetail } from '../src/index.js';
+import { dailyBoardName, dailyScoreDoc, dailyStats, fareStats, InMemoryPersistenceStore, guideExtras, HUMAN_ONLY_CARD_TYPES, renderDecisionPrompt, vehicleDetail } from '../src/index.js';
 
 describe('site: fare & card wiring (Phases 1-2)', () => {
   it('AI card prompt hides humanOnly cards and shows rarity/perk', () => {
@@ -56,6 +56,58 @@ describe('site: fare & card wiring (Phases 1-2)', () => {
     const detail = vehicleDetail(v);
     expect(detail).toMatchObject(stats);
     expect(QuantisedVehicleDeltaSchema.parse({ id: v.id, ...stats })).toMatchObject(stats);
+  });
+
+  it('daily runs carry dailyKey and the run tape on the wire; Blitz runs carry only the tape', () => {
+    const world = createWorld({ seed: 8103, agents: 0 });
+    world.wallMs = Date.UTC(2026, 10, 12, 15);
+    const v = spawnPlayerVehicle(world, 'daily-wire', 'Day', 'daily')!;
+    expect(v.runMode).toBe('daily');
+    v.runTape = 'OLX';
+    const stats = dailyStats(v);
+    expect(stats).toEqual({ dailyKey: '2026-11-12', runTape: 'OLX' });
+    expect(vehicleDetail(v)).toMatchObject(stats);
+    expect(QuantisedVehicleDeltaSchema.parse({ id: v.id, ...stats })).toMatchObject(stats);
+    v.runMode = 'blitz';
+    expect(dailyStats(v)).toEqual({ runTape: 'OLX' });
+  });
+
+  it('finished human Daily runs become one best-per-day leaderboard entry', async () => {
+    const world = createWorld({ seed: 8104, agents: 0 });
+    world.wallMs = Date.UTC(2026, 10, 12, 15);
+    const v = spawnPlayerVehicle(world, 'daily-board', 'Ace Run 3', 'daily')!;
+    v.runPts = 240;
+    v.runDeliveries = 6;
+    v.runOnTime = 5;
+    v.runIncidents = 1;
+    v.runTape = 'OOLOOX';
+    const pid = 'p1_' + 'a'.repeat(22);
+    expect(dailyScoreDoc(v, 'daily-board', pid, 'Ace Run 3', false, 'den-1', 1)).toBeNull(); // not finished
+    v.runFinished = true;
+    const doc = dailyScoreDoc(v, 'daily-board', pid, 'Ace Run 3', false, 'den-1', 1)!;
+    expect(doc).toMatchObject({
+      dayKey: '2026-11-12',
+      publicId: pid,
+      name: 'Ace',
+      pts: 240,
+      deliveries: 6,
+      onTime: 5,
+      incidents: 1,
+      tape: 'OOLOOX',
+      siteId: 'den-1',
+      expireAt: Date.UTC(2026, 11, 12),
+    });
+    expect(DailyScoreDocSchema.parse(doc)).toEqual(doc);
+    expect(dailyScoreDoc(v, 'daily-board', pid, 'Ace', true, 'den-1', 1)).toBeNull(); // bot
+    expect(dailyScoreDoc({ ...v, runMode: 'blitz' }, 'daily-board', pid, 'Ace', false, 'den-1', 1)).toBeNull();
+
+    const store = new InMemoryPersistenceStore();
+    expect(await store.recordDailyScore(doc)).toBe(true);
+    expect(await store.recordDailyScore({ ...doc, pts: 100 })).toBe(false);
+    expect(await store.recordDailyScore({ ...doc, pts: 240 })).toBe(false);
+    expect(await store.recordDailyScore({ ...doc, pts: 300 })).toBe(true);
+    expect(store.dailyScores.get('2026-11-12/daily-board')?.pts).toBe(300);
+    expect(dailyBoardName('  Swift  Pallet Run 12 ')).toBe('Swift Pallet');
   });
 });
 

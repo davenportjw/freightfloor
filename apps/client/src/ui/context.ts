@@ -6,6 +6,7 @@ import type { AgentDirective, DifficultyLevel, DispatchParams, ManagerOp, RunMod
 import type { ClientStore, DrawerTab, DriveCameraMode, FlyoutId, LeaderboardModalTab, UiOverlay } from '../state.js';
 import type { RenderLayers } from '../renderer.js';
 import type { NoticeKind } from './notify.js';
+import type { IntroTab } from './help.js';
 
 export interface Actions {
   select(vid: string | null): void;
@@ -28,7 +29,8 @@ export interface Actions {
   zoomBy(factor: number): void;
   fit(): void;
   setDrawer(open: boolean, tab?: DrawerTab): void;
-  showHelp(open: boolean): void;
+  /** Open or close the intro modal (#help); `tab` jumps to a view (e.g. 'whatsnew'). */
+  showHelp(open: boolean, tab?: IntroTab): void;
   /** Open or close the full-screen Leaderboard & Silly Superlatives modal (#leaderboardModal). */
   showLeaderboardModal(open: boolean, tab?: LeaderboardModalTab): void;
   /** Open or close the Co-Pilot & Agent Designer modal (#agent-designer-modal). */

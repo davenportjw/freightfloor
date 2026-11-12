@@ -90,6 +90,18 @@ describe('run capsule', () => {
     expect(v.delta).toBeNull();
     expect(v.overdrive).toBe(false);
   });
+
+  it('labels a Daily Shift with its number and modifier and keeps the timed clock', () => {
+    const v = runCapsuleView(me({ runMode: 'daily', dailyKey: '2026-11-12' }), { t: 340 }, rows, 3);
+    expect(v.mode).toBe('daily');
+    expect(v.clock).toBe('01:00');
+    expect(v.overdrive).toBe(true);
+    expect(v.clockSub).toMatch(/^Daily #1 · /);
+    expect(v.dailyTip).toContain('Daily Shift #1');
+    const pending = runCapsuleView(me({ runMode: 'daily', dailyKey: '2026-11-12', runEndsAt: null as never }), { t: 0 }, rows, null);
+    expect(pending.clockSub).toBe('Daily #1 · starts on move');
+    expect(runCapsuleView(me({}), { t: 340 }, rows, 3).dailyTip).toBeNull();
+  });
 });
 
 describe('Team Standings (per-truck ranking)', () => {

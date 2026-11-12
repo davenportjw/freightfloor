@@ -389,6 +389,42 @@ canvas.cab-overlay { pointer-events: none; }
 /* ---- Intro: panes ---- */
 .intro-pane { display: flex; flex-direction: column; gap: 16px; }
 
+/* What's new (src/changelog.ts) */
+.intro-new-dot {
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #fff;
+  background: var(--violet);
+  border-radius: 999px;
+}
+.whatsnew-pane .intro-subtitle { margin: 0; text-align: center; }
+.whatsnew-release {
+  padding: 12px 14px;
+  background: var(--soft-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.whatsnew-release__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.whatsnew-release__title { margin: 0; font-size: 15px; }
+.whatsnew-release__date { font-size: 12px; white-space: nowrap; }
+.whatsnew-items { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.whatsnew-item { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 10px; align-items: start; }
+.whatsnew-kind {
+  justify-self: start;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.whatsnew-kind--new { color: var(--violet); background: #f5f3ff; border-color: #ddd6fe; }
+.whatsnew-kind--improved { color: var(--blue-d); background: var(--blue-l); border-color: #bfdbfe; }
+.whatsnew-kind--fixed { color: var(--green); background: #f0fdf4; border-color: #bbf7d0; }
+.whatsnew-item__body { margin: 2px 0 0; color: var(--ink-2); line-height: 1.45; }
+.whatsnew-soon { margin-left: 8px; padding: 1px 8px; font-size: 11px; }
+
 /* How to Play: 3 big steps */
 .intro-steps {
   list-style: none;
@@ -1761,6 +1797,7 @@ canvas#world.cone-mode { cursor: crosshair; }
 #run .seg-mode .big { font-size: 18px; }
 #run .seg-mode.blitz .big { color: var(--blue-d); }
 #run .seg-mode.freerange .big { color: var(--teal-d); }
+#run .seg-mode.daily .big { color: var(--violet); }
 #run .seg-mode.overdrive .big { color: var(--violet); }
 #run .streak.hot .big, #run .seg.max .big { color: var(--amber); }
 #run .pips { display: flex; gap: 3px; align-items: center; height: 16px; }
@@ -1924,6 +1961,24 @@ canvas#world.cone-mode { cursor: crosshair; }
 .sheet-head h2 { font-size: 20px; }
 .sheet-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .sheet.pick { width: min(720px, calc(100vw - 32px)); }
+.daily-note,
+.results .daily-note {
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ink-2);
+  background: #f5f3ff;
+  border: 1px solid #ddd6fe;
+  border-radius: 8px;
+}
+.daily-note b { color: var(--violet); }
+.daily-tape { letter-spacing: 1px; }
+.daily-board { margin-top: 8px; }
+.daily-board .sub { font-size: 12px; color: var(--muted); }
+.daily-board__rows { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.daily-board__row { display: flex; align-items: center; gap: 8px; padding: 2px 6px; border-radius: 6px; }
+.daily-board__row .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.daily-board__row.you { background: #ede9fe; font-weight: 600; }
 .pcards { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
 .pcard {
   width: 210px; text-align: left; border: 2px solid var(--line-2); border-radius: 12px; background: #fff;

@@ -43,7 +43,7 @@ export function leaderboardHeader(myRank: number | null, t: number): string {
 export function leaderRowEl(r: { rank: number; row: LeaderRow; mine: boolean }, onClick: () => void): HTMLElement {
   const who = r.row.human && r.row.driver ? ` · ${r.row.driver}` : '';
   const modeTag = r.row.human
-    ? `${r.row.runMode === 'freerange' ? '🌐 Free' : '⏱️ Blitz'}${r.row.streak && r.row.streak >= 3 ? ` · 🔥×${r.row.streak}` : ''}`
+    ? `${r.row.runMode === 'freerange' ? '🌐 Free' : r.row.runMode === 'daily' ? '📅 Daily' : '⏱️ Blitz'}${r.row.streak && r.row.streak >= 3 ? ` · 🔥×${r.row.streak}` : ''}`
     : r.row.strat;
   return el(
     'button',

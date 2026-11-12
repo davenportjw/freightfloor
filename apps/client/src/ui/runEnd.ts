@@ -6,7 +6,8 @@
  * - Progression & rival callout bar (PB / delta vs previous run, and next rival or #1 status)
  * - Compact embedded leaderboard table with filter tabs (All: Humans + AI vs Human Runs Only)
  * - AI telemetry coach line and contracts outcome line
- * - Footer actions: Full Standings, Watch the floor, Play again ↵
+ * - Daily Shift line (day, modifier, this browser's best today) and the run tape (🟩 on-time, 🟨 late, 🟥 incident)
+ * - Footer actions: Full Standings, Watch the floor, Free Range, Daily Shift / Blitz, Play again ↵ (same mode)
  * Every number comes from `ui.runEnd` (built from the live vehicle and world in main.ts checkRunEnd).
  */
 import { isLeaseEvictionReason, type RunEndLeaderboardRow, type RunEndSummary } from '../state.js';
@@ -17,6 +18,7 @@ import { presenceView } from './presence.js';
 import { createFocusTrap, type TrapContainer } from './focusTrap.js';
 import { recapDecisionText, recapDirectiveText } from './aiInsight.js';
 import { runDeltaHeadline } from './runOne.js';
+import { dailyBoardKey, tapeEmoji, todayDaily } from './daily.js';
 
 export type RunEndFilterTab = 'all' | 'humans';
 
@@ -419,10 +421,11 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
       );
     }
 
+    const againMode = s.runMode === 'daily' ? 'daily' : 'blitz';
     const again = button(
       '',
       'go',
-      () => actions.retryNewRun('blitz'),
+      () => actions.retryNewRun(againMode),
       isQueuedOrFull
         ? `Join the FIFO waiting line for ${s.nextRunName}`
         : `Start ${s.nextRunName} with a fresh vehicle and new contracts`,
@@ -442,6 +445,62 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
     freeRangeBtn.dataset.role = 'go-freerange';
     freeRangeBtn.setAttribute('data-role', 'go-freerange');
 
+    // Daily runs offer a regular Blitz; every other run offers today's Daily Shift.
+    const today = todayDaily();
+    const otherTimedBtn =
+      s.runMode === 'daily'
+        ? button('Blitz', 'ghost', () => actions.retryNewRun('blitz'), 'Start a regular 3-Minute Blitz')
+        : button(
+            `📅 Daily #${today.number}`,
+            'ghost',
+            () => actions.retryNewRun('daily'),
+            `Today's Daily Shift: ${today.modifier.label}. ${today.modifier.blurb}`,
+          );
+    otherTimedBtn.dataset.role = s.runMode === 'daily' ? 'go-blitz' : 'go-daily';
+
+    const board = s.daily && store.dailyBoard?.dayKey === s.daily.dayKey ? store.dailyBoard : null;
+    const selfId = store.you?.clientId ?? null;
+    const boardEl = board
+      ? el('div', { class: 'daily-board', attrs: { 'data-role': 'results-daily-board' } }, [
+          el('div', {
+            class: 'sub',
+            text: `Daily #${board.number} leaderboard · ${board.total} driver${board.total === 1 ? '' : 's'}${
+              board.you ? ` · you #${board.you.rank} (${board.you.pts} pts)` : ' · saving your score…'
+            }`,
+          }),
+          board.top.length
+            ? el(
+                'ol',
+                { class: 'daily-board__rows' },
+                board.top.slice(0, 5).map((r) =>
+                  el('li', { class: `daily-board__row${r.publicId === selfId ? ' you' : ''}` }, [
+                    el('span', { class: 'num', text: `#${r.rank}` }),
+                    el('span', { class: 'grow', text: r.name }),
+                    el('span', { class: 'daily-tape', text: tapeEmoji(r.tape, 10) }),
+                    el('b', { class: 'num', text: `${r.pts}` }),
+                  ]),
+                ),
+              )
+            : el('div', { class: 'muted', text: 'No scores recorded yet today.' }),
+        ])
+      : null;
+    const dailyEl = s.daily
+      ? el('div', { class: 'daily-note', attrs: { 'data-role': 'results-daily' } }, [
+          el('b', { text: `📅 Daily #${s.daily.number} · ${s.daily.label}` }),
+          el('span', {
+            text: s.daily.isNewBest ? ` — new best today: ${s.daily.best} pts!` : ` — your best today: ${s.daily.best} pts`,
+          }),
+          boardEl,
+        ])
+      : null;
+    const tape = tapeEmoji(s.tape);
+    const tapeEl = tape
+      ? el('div', { class: 'ct-line', attrs: { 'data-role': 'results-tape', title: '🟩 on-time · 🟨 late · 🟥 incident' } }, [
+          el('span', { class: 'muted', text: 'Run tape ' }),
+          el('span', { class: 'daily-tape', text: tape }),
+        ])
+      : null;
+
     const watch = button(
       'Watch the floor',
       'ghost',
@@ -459,7 +518,9 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
             ? '⏱ Lease Complete'
             : s.runMode === 'freerange'
               ? '🏁 Run over'
-              : '🏁 Blitz complete';
+              : s.runMode === 'daily'
+                ? `📅 Daily #${s.daily?.number ?? today.number} complete`
+                : '🏁 Blitz complete';
 
     const card = el(
       'div',
@@ -475,6 +536,7 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
         ]),
         slotStatusEl,
         ...(queueRowEl ? [queueRowEl] : []),
+        ...(dailyEl ? [dailyEl] : []),
         el('div', { class: 'stats4' }, [
           box(String(s.score), ptsSub, 'accent'),
           box(pos.value, pos.sub),
@@ -492,11 +554,13 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
         ...(aiCoachEl ? [aiCoachEl] : []),
         ...(recapEl ? [recapEl] : []),
         el('div', { class: 'ct-line', attrs: { 'data-role': 'results-contracts' }, text: contractsLine(cards) }),
+        ...(tapeEl ? [tapeEl] : []),
         el('div', { class: 'sheet-foot' }, [
           fullStandingsBtn,
           el('span', { class: 'grow' }),
           watch,
           freeRangeBtn,
+          otherTimedBtn,
           again,
         ]),
       ],
@@ -538,6 +602,7 @@ export function mountRunEnd(overlay: HTMLElement, ctx: UiCtx): UiModule {
         q?.totalQueued ?? q?.queueSize,
         q?.estimatedWaitSec,
         q?.seatLeaseId,
+        summary.daily ? dailyBoardKey(ctx.store.dailyBoard) : '',
       ]);
       if (summary !== lastRenderedSummary || renderKey !== lastRenderKey) {
         if (summary !== lastRenderedSummary) activeTab = 'all';

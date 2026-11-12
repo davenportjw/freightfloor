@@ -5,7 +5,7 @@
  * Everything shown comes from the live site. When a call fails the real error is surfaced
  * (alert line / floor feed / connection pill); nothing is simulated locally.
  */
-import type { ClientMessage, ServerMessage, SiteId } from '@warehouse/protocol';
+import { isTimedRun, type ClientMessage, type ServerMessage, type SiteId } from '@warehouse/protocol';
 import {
   blitzLeaderboard,
   dayIndex,
@@ -16,7 +16,7 @@ import {
   type Vehicle,
 } from '@warehouse/sim';
 import { InputController } from './input.js';
-import { fetchNetwork, isStaleJoin, NetClient, type NetStatus } from './net.js';
+import { fetchDaily, fetchNetwork, isStaleJoin, NetClient, type NetStatus } from './net.js';
 import { guardedFrame } from './frameLoop.js';
 import { NetworkPoller } from './networkPoller.js';
 import { blocksDriving } from './ui/modal.js';
@@ -33,7 +33,9 @@ import {
   nextRunDisplayName,
   parseRunDisplayName,
   saveHudMinimal,
+  type RunEndSummary,
 } from './state.js';
+import { dailyOf, recordDailyBest, todayDaily } from './ui/daily.js';
 import { mountA2ui } from './ui/a2ui.js';
 import { formatDirectiveSummary, mountAgentDesigner } from './ui/agentDesigner.js';
 import { offerKey } from './ui/cards.js';
@@ -113,6 +115,12 @@ const DISPLAY_NAME_REGEX = /^[A-Za-z0-9 _.-]{2,18}$/;
 export const DISPLAY_NAME_KEY = 'warehouse_display_name';
 export const CLIENT_ID_KEY = 'warehouse_client_id';
 export const NETWORK_POLL_MS = 5_000;
+/** Daily leaderboard refresh cadence while the intro or a Daily run is in view. */
+export const DAILY_POLL_MS = 60_000;
+/** Minimum gap between non-forced Daily leaderboard fetches. */
+export const DAILY_MIN_REFETCH_MS = 10_000;
+/** Delay before re-reading the board after a Daily run ends (the site's write must land first). */
+export const DAILY_AFTER_RUN_MS = 2_500;
 const UI_TICK_MS = 250;
 
 /** 2..18 chars of letters, digits, space, `_`, `.`, `-` (the lobby accepts 2..20). */
@@ -359,6 +367,32 @@ function boot(): void {
   });
   const pollNetwork = (): Promise<void> => poller.poll();
 
+  // Daily Shift leaderboard (`GET /api/daily`): fetched on welcome, when the Daily is picked,
+  // after a Daily run ends, and every DAILY_POLL_MS while the intro or a Daily is in view.
+  let dailyFetchedAt = 0;
+  let dailyInFlight = false;
+  function refreshDaily(force = false): void {
+    const now = Date.now();
+    if (dailyInFlight || (!force && now - dailyFetchedAt < DAILY_MIN_REFETCH_MS)) return;
+    dailyInFlight = true;
+    dailyFetchedAt = now;
+    void fetchDaily(store.you?.clientId ?? null)
+      .then((r) => {
+        if (r.ok) {
+          store.dailyBoard = r.data;
+          store.changed();
+        }
+      })
+      .finally(() => {
+        dailyInFlight = false;
+      });
+  }
+  setInterval(() => {
+    if (document.hidden) return;
+    if (store.ui.helpOpen || store.ui.runMode === 'daily' || store.ui.runEnd?.runMode === 'daily') refreshDaily();
+  }, DAILY_POLL_MS);
+  refreshDaily(true);
+
   const rackLift = new RackLiftController();
 
   // ---- Cab View (first-person) ----------------------------------------------
@@ -471,9 +505,10 @@ function boot(): void {
       if (open) void pollNetwork();
       store.changed();
     },
-    showHelp(open) {
+    showHelp(open, tab) {
       const wasOpen = store.ui.helpOpen;
       store.ui.helpOpen = open;
+      if (open && tab) help.switchTab(tab);
       if (!open) {
         store.ui.pendingDrive = false;
         markHelpSeen(safeStorage());
@@ -741,7 +776,7 @@ function boot(): void {
         fullShard ? `Joining waiting line as ${displayName}…` : `Starting ${displayName}…`,
         fullShard
           ? 'All 32 driver slots are full; requesting a FIFO waiting-line seat.'
-          : `Spawning a fresh vehicle with 100% battery${store.ui.runMode === 'freerange' ? ' in Free Range (no timer)' : ' for a 3-minute Blitz'}.`,
+          : `Spawning a fresh vehicle with 100% battery${store.ui.runMode === 'freerange' ? ' in Free Range (no timer)' : store.ui.runMode === 'daily' ? ` for Daily Shift #${todayDaily().number}` : ' for a 3-minute Blitz'}.`,
       );
       store.changed();
       // A fresh socket + requeue: true so evicted / spectator players or full shards enter the FIFO line or get a fresh slot.
@@ -786,6 +821,7 @@ function boot(): void {
     },
     setRunMode(mode) {
       store.ui.runMode = mode;
+      if (mode === 'daily') refreshDaily();
       const me = store.myVehicle();
       if (me) me.runMode = mode;
       send({ type: 'setRunMode', mode }, true);
@@ -859,6 +895,7 @@ function boot(): void {
   modules.push(mountShieldCard(shieldEl, ctx));
   const help = mountHelp(byId('help'), ctx, {
       getCallsign: () => store.you?.name || displayName || 'Assigning…',
+      storage: safeStorage(),
   });
   modules.push(help);
 
@@ -975,12 +1012,33 @@ function boot(): void {
     return finishedRunPrev.get(key) ?? null;
   }
 
+  /** Daily result per finished run (recorded once, so re-renders keep the "new best" flag). */
+  const dailyResults = new Map<string, NonNullable<RunEndSummary['daily']>>();
+  function dailyResult(runKey: string, me: Vehicle, pts: number): NonNullable<RunEndSummary['daily']> {
+    const cached = dailyResults.get(runKey);
+    if (cached) return cached;
+    // The site writes the score when the run finishes; read the board back once it has landed.
+    setTimeout(() => refreshDaily(true), DAILY_AFTER_RUN_MS);
+    const info = dailyOf(me);
+    const { best, isNew } = recordDailyBest(safeStorage(), info.dayKey, pts);
+    const out = {
+      dayKey: info.dayKey,
+      number: info.number,
+      label: info.modifier.label,
+      blurb: info.modifier.blurb,
+      best,
+      isNewBest: isNew && pts > 0,
+    };
+    dailyResults.set(runKey, out);
+    return out;
+  }
+
   function checkRunEnd(): void {
     const me = store.myVehicle();
     if (!me || !store.isDriving()) return;
     if (
       !me.runFinished &&
-      me.runMode === 'blitz' &&
+      isTimedRun(me.runMode) &&
       me.runEndsAt != null &&
       store.world.t >= me.runEndsAt
     ) {
@@ -992,7 +1050,7 @@ function boot(): void {
       return;
     }
     if (store.ui.helpOpen) {
-      if (me.runMode === 'blitz') {
+      if (isTimedRun(me.runMode)) {
         store.ui.helpOpen = false;
       } else {
         return;
@@ -1105,6 +1163,8 @@ function boot(): void {
       onTimePct,
       ppm,
       runMode: me.runMode ?? store.ui.runMode,
+      ...(me.runMode === 'daily' ? { daily: dailyResult(runEndKey, me, finalScore) } : {}),
+      ...(me.runTape ? { tape: me.runTape } : {}),
       // The sim ends runs only on the Blitz clock (a flat battery just limps the forklift).
       reason: 'timer',
       comboBest: me.comboBest,
@@ -1205,7 +1265,9 @@ function boot(): void {
           });
         }
         refreshDriveFirst();
-        if (store.driveFirst && store.ui.runMode !== 'blitz') actions.setRunMode('blitz');
+        refreshDaily(true);
+        // Run 1 is a timed run: Blitz, or the Daily Shift when the player picked it on the intro.
+        if (store.driveFirst && store.ui.runMode === 'freerange') actions.setRunMode('blitz');
         noteRunStart();
         maybeAutoKeep();
         checkRunEnd();
@@ -1412,7 +1474,7 @@ function boot(): void {
     const me = store.isDriving() ? store.myVehicle() : null;
     if (
       me &&
-      me.runMode === 'blitz' &&
+      isTimedRun(me.runMode) &&
       (me.runFinished || (me.runEndsAt != null && store.world.t >= me.runEndsAt)) &&
       !store.ui.runEnd &&
       store.ui.runEndDismissedVid !== me.id
@@ -1610,7 +1672,7 @@ function boot(): void {
         break;
       case 'results:again':
         // Only from the visible results sheet (never an invisible / suspended one).
-        if (store.activeOverlay() === 'results') actions.retryNewRun('blitz');
+        if (store.activeOverlay() === 'results') actions.retryNewRun(store.ui.runEnd?.runMode === 'daily' ? 'daily' : 'blitz');
         break;
       case 'closeDispatchersCall':
         store.dispatchersCall = null;

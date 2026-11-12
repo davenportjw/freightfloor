@@ -16,7 +16,7 @@ Authenticates display name hygiene, enforces per-IP connection rate limits, sele
 | `name` | `string` | No | Optional retry run callsign (`2..20` chars after NFKC normalization). For human drivers, the lobby assigns or preserves an official `Adjective-Noun-NN` callsign (`generateDriverCallsign`) and never adds custom user-defined names. |
 | `resume` | `string` | No | Optional **resume code** (`wr1_` + 32 base64url chars, the `resumeToken` returned by a previous join) or **existing driver callsign** to find and switch to an existing driver identity in the game. Unknown callsigns, raw `clientId`s, and invalid resume codes are rejected (`404 invalid_resume_code`) and never create a new name. |
 | `prefer` | `SiteId` (`^(den\|slc\|phx\|abq)-[1-9]\d*$`) | No | Optional preferred canonical or overflow regional site ID (used when reconnecting or transferring sites). |
-| `mode` | `RunMode` (`'blitz' \| 'freerange' \| 'daily'`) | No | Optional driver run mode (`'blitz'` for 3-Minute Blitz scored runs; `'freerange'` for open-ended continuous runs routed below the 26-driver soft cap; `'daily'` for the Daily Shift, a timed run like Blitz). The lobby join schema accepts `'daily'` once `/api/daily` ships; the shared `RunModeSchema` and the site already accept it. |
+| `mode` | `RunMode` (`'blitz' \| 'freerange' \| 'daily'`) | No | Optional driver run mode (`'blitz'` for 3-Minute Blitz scored runs; `'freerange'` for open-ended continuous runs routed below the 26-driver soft cap; `'daily'` for the Daily Shift, a timed run like Blitz). The lobby join schema, the shared `RunModeSchema` and the site all accept it. |
 | `runMode` | `RunMode` (`'blitz' \| 'freerange' \| 'daily'`) | No | Alias for `mode` accepted on both Lobby and Site `POST /api/join` endpoints and embedded into the signed HMAC ticket. |
 | `requeue` | `boolean` | No | Optional flag requesting re-entry into the FIFO driver seat queue after a completed or evicted run. |
 | `seatLeaseId` | `string` | No | Optional active or promoted seat lease ID (`4..64` chars) when claiming a reserved driver seat. |
@@ -67,6 +67,19 @@ Returns aggregated live status for all warehouse shards (from Firestore heartbea
 | `queueSize` | `number?` | Current number of players waiting in the global FIFO driver seat queue. |
 | `maxTotalDrivers` | `number?` | Network-wide human driver cap across all active shards. |
 | `maxWarehouses` | `number?` | Maximum number of active warehouse shards in the network. |
+
+### `GET /api/daily[?publicId=p1_…]`
+Today's (UTC) Daily Shift leaderboard: each player's best finished Daily run, across every shard. The top `DAILY_BOARD_LIMIT` (10) rows and the total are cached per lobby instance for `DAILY_BOARD_CACHE_TTL_MS` (15 s); the optional `publicId` (must match `^p1_…`, anything else is ignored) adds that player's rank (2 Firestore reads, uncached). `Cache-Control: no-store`. 503 `daily_unavailable` when the store read fails.
+
+**Response Body (`DailyBoardResponseSchema`)**
+| Field | Type | Description |
+|---|---|---|
+| `dayKey`, `number`, `modifier`, `resetsAt` | | The day (`YYYY-MM-DD`), its Daily number, modifier (`{ id, label, blurb }`) and next UTC midnight (epoch ms). |
+| `total` | `int` | Players with a recorded score today. |
+| `top` | `DailyBoardRow[]` | `{ rank, name, pts, tape, siteId, publicId }`, pts desc (ties: earlier run first). Competition ranking: tied scores share a rank. `name` is the callsign without the "Run N" suffix. No raw clientIds. |
+| `you` | `{ rank, pts, tape } \| null` | The `publicId` player's best today; `rank` = 1 + players with strictly more points. |
+
+Scores are written by the site, not the lobby: when a human (non-bot) Daily run finishes, `persistVehicleStats` builds a `DailyScoreDoc` (`dailyScoreDoc(v, …)`) and calls `PersistenceStore.recordDailyScore`, a Firestore transaction on `daily{suffix}/{dayKey}/daily_scores/{clientId}` that keeps only a strictly higher score. `expireAt` (a Timestamp, `dayKey + DAILY_SCORE_TTL_DAYS` = 30 days) drives the `daily_scores` TTL policy.
 
 ---
 
@@ -239,6 +252,13 @@ See `docs/gameplay.md` §2–3 for the rules.
 | `fareTrips` | `int ≥ 0` | Fares (delivered pallets) rated this run. |
 | `speedyTrips` | `int ≥ 0` | Speedy-rated fares this run. |
 
+**Daily Shift & run tape** (`QuantisedVehicleDeltaSchema`, optional, human non-bot drivers only, same full + light deltas; site `dailyStats(v)`):
+
+| Field | Shape | Semantics |
+|---|---|---|
+| `dailyKey` | `YYYY-MM-DD` \| `null` | UTC day the Daily run belongs to (sent only while `runMode === 'daily'`). The client derives the number, modifier and reset time with `@warehouse/sim` `dailyInfo(dailyKey)`. |
+| `runTape` | `string` (≤ 40) | Run event tape: `O` on-time delivery, `L` late delivery, `X` incident. Shown as 🟩🟨🟥 on the results sheet. |
+
 **Cards** (`CardSchema`, passthrough): new optional `rarity: 'common' | 'wild'`, `humanOnly: boolean`, `perk: Record<string, number>` (keys `speedMul`, `reachBonus`, `batteryDrainMul`, `forkLiftMul`, `comboFloor`; applies only once `status === 'done'`) and `completedAt`. `modifiers` mirrors `perk` for older clients. `type` is one of the 21 `CARD_TYPES`. **`CardHandSchema`** gains optional `pick: int > 0`: when present (1 on replacement draws), `keepCards` rejects more than `pick` ids. The hand limit is 3 active cards, with at most one wild.
 
 **AI card decisions:** `CardOption` (in `DecisionRequest.options` for `kind: 'cards'`) also carries `rarity` and `perk`. humanOnly cards are never offered to agents.
@@ -334,7 +354,7 @@ Shared by the sim, site, lobby and client so every shard agrees on the day's Dai
 |---|---|
 | `RUN_MODES` / `RunModeSchema` | `'blitz' \| 'freerange' \| 'daily'`. |
 | `isTimedRun(mode)` | `true` for `'blitz'` and `'daily'`. Use it wherever behaviour depends on the personal run clock. |
-| `DAILY_EPOCH_DAY` | Day key of Daily #1 (`'2026-11-10'`, set to the launch day before the client ships). |
+| `DAILY_EPOCH_DAY` | Day key of Daily #1 (`'2026-11-12'`, the launch day). |
 | `dailyNumber(dayKey)` | 1-based Daily number (≤ 0 before the epoch). |
 | `dailySeed(dayKey)` | FNV-1a of `'ff-daily:' + dayKey`; throws on a malformed key. |
 | `mulberry32(seed)` / `fnv1a(s)` | Deterministic PRNG and hash, independent of any world RNG. |
@@ -342,6 +362,8 @@ Shared by the sim, site, lobby and client so every shard agrees on the day's Dai
 | `DAILY_MODIFIERS` / `DailyModifierSchema` | `{ id, label, blurb }` player-facing copy per modifier. Effects live in `@warehouse/sim` `DAILY_EFFECTS`. |
 | `dailyModifierFor(dayKey)` | The day's modifier: a seeded permutation per 7-day block from the epoch, never the same modifier two days running. |
 | `DailyInfoSchema` | `{ dayKey, number, modifier: DailyModifier, cards: string[], resetsAt }`. `cards` are the opening-hand titles in deal order; `resetsAt` is the next UTC midnight (epoch ms). Built by `@warehouse/sim` `dailyInfo(dayKey)`. |
+| `DailyScoreDocSchema` | Firestore leaderboard row `{ dayKey, clientId, publicId, name, pts, deliveries, onTime, incidents, tape, modifier, siteId, updatedAt, expireAt }` (server-only; `clientId` never leaves the server). |
+| `DailyBoardRowSchema` / `DailyBoardResponseSchema` | `GET /api/daily` payload (§1). `DAILY_BOARD_LIMIT = 10`, `DAILY_SCORE_TTL_DAYS = 30`. |
 
 `CompletedRunRecord` (sim, persisted with completed runs) gains `dailyKey?: string \| null` on daily runs and `tape?: string` on every run (`O` on-time, `L` late, `X` incident; max `RUN_TAPE_MAX = 40`).
 

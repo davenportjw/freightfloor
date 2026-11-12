@@ -1,7 +1,7 @@
 /**
  * Start-of-run contract pick sheet (centred, over a scrim): the real offer from `hand.offer` as up
- * to three cards (kbd badge 1/2/3, rarity line, `.sel` state), a Blitz / Free Range toggle
- * (`setRunMode`) and "Start run · keep N ↵" (`keepCards`). Esc minimises the sheet
+ * to three cards (kbd badge 1/2/3, rarity line, `.sel` state), a Blitz / Daily Shift / Free Range toggle
+ * (`setRunMode`; the Daily shows the day's shared modifier) and "Start run · keep N ↵" (`keepCards`). Esc minimises the sheet
  * (`ui.dealMinimizedKey`) — the contracts card then shows "offer waiting".
  */
 import type { Card } from '@warehouse/sim';
@@ -9,6 +9,8 @@ import { canKeep, cardKind, initialOfferSel, keepIds, offerKey, perkText, toggle
 import type { UiCtx, UiModule } from './context.js';
 import { el, kbd, KeyedView } from './dom.js';
 import { ALERT_MS } from './notify.js';
+import { dailyBest, dailyBoardKey, dailyLeaderText, dailyOf, dailyResetText } from './daily.js';
+import { browserStorage } from '../changelog.js';
 
 /**
  * Why the last pick action was refused. Shown inline in the sheet foot (the HUD alert line sits
@@ -85,7 +87,7 @@ export function mountContractPick(root: HTMLElement, ctx: UiCtx): UiModule {
       const mode = store.ui.runMode;
       if (pickNote && Date.now() >= pickNote.until) pickNote = null;
       const note = pickNote?.text ?? null;
-      view.render(JSON.stringify([o.key, [...sel].sort(), mode, o.pick, note]), () => {
+      view.render(JSON.stringify([o.key, [...sel].sort(), mode, o.pick, note, mode === 'daily' ? dailyBoardKey(store.dailyBoard) : '']), () => {
         const cards = o.offer.map((c, i) => {
           const on = sel.has(c.id);
           const perk = perkText(c);
@@ -106,7 +108,22 @@ export function mountContractPick(root: HTMLElement, ctx: UiCtx): UiModule {
             ],
           );
         });
-        const modeBtn = (m: 'blitz' | 'freerange', label: string, tip: string): HTMLElement =>
+        const daily = dailyOf(mode === 'daily' ? store.myVehicle() : null);
+        const best = dailyBest(browserStorage(), daily.dayKey);
+        const leader = dailyLeaderText(store.dailyBoard, daily.dayKey);
+        const dailyNote =
+          mode === 'daily'
+            ? el('div', { class: 'daily-note', attrs: { 'data-role': 'daily-note' } }, [
+                el('b', { text: `📅 Daily #${daily.number} · ${daily.modifier.label}` }),
+                el('span', { text: ` — ${daily.modifier.blurb}` }),
+                el('span', {
+                  class: 'muted',
+                  text: ` Same contracts for everyone today · ${dailyResetText(daily)}${best !== null ? ` · your best ${best} pts` : ''}`,
+                }),
+                leader ? el('div', { class: 'muted', text: leader, attrs: { 'data-role': 'daily-leader' } }) : null,
+              ])
+            : null;
+        const modeBtn = (m: 'blitz' | 'freerange' | 'daily', label: string, tip: string): HTMLElement =>
           el('button', {
             class: `seg-btn${mode === m ? ' on' : ''}`,
             text: label,
@@ -131,10 +148,12 @@ export function mountContractPick(root: HTMLElement, ctx: UiCtx): UiModule {
             el('h2', { text: o.pick != null ? `Pick ${o.pick} of ${o.offer.length}` : 'Pick your contracts' }),
             el('span', { class: 'muted', text: 'Esc to decide later' }),
           ]),
+          dailyNote,
           el('div', { class: 'pcards' }, cards),
           el('div', { class: 'sheet-foot' }, [
             el('div', { class: 'seg-toggle', attrs: { 'data-role': 'deal-mode-selector' } }, [
               modeBtn('blitz', '⏱ Blitz', '3-minute timed run'),
+              modeBtn('daily', `📅 Daily #${daily.number}`, `Today's Daily Shift: ${daily.modifier.label}. ${daily.modifier.blurb}`),
               modeBtn('freerange', '🌐 Free Range', 'No timer — scored by pallets per minute'),
             ]),
             el('span', { class: 'grow' }),

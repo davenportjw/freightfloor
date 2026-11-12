@@ -29,11 +29,18 @@ import {
   verifyTicket,
   WS_PER_MESSAGE_DEFLATE,
   dayKey,
+  addDays,
+  dailyModifierFor,
+  dailyNumber,
+  dayKeyToMs,
+  DAILY_BOARD_LIMIT,
+  type DailyBoardResponse,
   nextVisitLedger,
   type LeaderboardEntry,
   type Phase,
   type QueueStatus,
   type RunMode,
+  RunModeSchema,
   type SiteId,
   type SiteStatus,
   type VisitUpdate,
@@ -54,6 +61,8 @@ export const MAX_DRIVERS_PER_SITE = 32;
 export const TICKET_TTL_MS = 60_000;
 /** `/api/network` leaderboard cache TTL; the board only changes when a run ends. */
 export const TOP_PLAYERS_CACHE_TTL_MS = 30_000;
+/** How long the lobby reuses the Daily top-N read (per instance). */
+export const DAILY_BOARD_CACHE_TTL_MS = 15_000;
 /** Extra ranked docs fetched so bot / reserved-prefix filtering still fills the board. */
 const TOP_PLAYERS_OVERFETCH = 10;
 /** Candidate callsigns probed with point lookups before falling back to a bounded scan. */
@@ -259,6 +268,36 @@ export interface LobbyStore {
    * must be atomic across lobby instances (Firestore: `runTransaction`).
    */
   recordVisit?(clientId: string, nowMs: number): Promise<VisitUpdate>;
+  /** Today's Daily Shift leaderboard: top `limit` best runs (pts desc) and the player count. */
+  getDailyTop?(dayKey: string, limit: number): Promise<{ total: number; top: StoredDailyScore[] }>;
+  /** One player's Daily entry (by opaque publicId) and its 1-based rank, or null. */
+  getDailyEntry?(dayKey: string, publicId: string): Promise<{ rank: number; entry: StoredDailyScore } | null>;
+}
+
+/** Public fields of a `daily{suffix}/{dayKey}/daily_scores/{clientId}` doc (written by the site). */
+export interface StoredDailyScore {
+  publicId: string;
+  name: string;
+  pts: number;
+  tape: string;
+  siteId: string;
+  updatedAt: number;
+}
+
+function toStoredDailyScore(data: Record<string, unknown>): StoredDailyScore {
+  return {
+    publicId: typeof data.publicId === 'string' ? data.publicId : '',
+    name: typeof data.name === 'string' && data.name ? data.name : 'Driver',
+    pts: typeof data.pts === 'number' ? Math.round(data.pts) : 0,
+    tape: typeof data.tape === 'string' ? data.tape.slice(0, 40) : '',
+    siteId: typeof data.siteId === 'string' ? data.siteId : '',
+    updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : 0,
+  };
+}
+
+/** Higher score first; ties go to the earlier run. */
+function compareDaily(a: StoredDailyScore, b: StoredDailyScore): number {
+  return b.pts - a.pts || a.updatedAt - b.updatedAt;
 }
 
 // ---------------------------------------------------------------------------
@@ -723,6 +762,30 @@ export class FirestoreLobbyStore implements LobbyStore {
     return [];
   }
 
+  private dailyCol(dayKey: string) {
+    return this.db.collection(this.colName('daily')).doc(dayKey).collection('daily_scores');
+  }
+
+  async getDailyTop(dayKey: string, limit: number): Promise<{ total: number; top: StoredDailyScore[] }> {
+    const col = this.dailyCol(dayKey);
+    const [snap, count] = await Promise.all([
+      col.orderBy('pts', 'desc').limit(Math.max(1, limit)).get(),
+      col.count().get(),
+    ]);
+    const top = snap.docs.map((d) => toStoredDailyScore(d.data())).sort(compareDaily);
+    return { total: count.data().count, top };
+  }
+
+  async getDailyEntry(dayKey: string, publicId: string): Promise<{ rank: number; entry: StoredDailyScore } | null> {
+    const col = this.dailyCol(dayKey);
+    const snap = await col.where('publicId', '==', publicId).limit(1).get();
+    const doc = snap.docs[0];
+    if (!doc) return null;
+    const entry = toStoredDailyScore(doc.data());
+    const above = await col.where('pts', '>', entry.pts).count().get();
+    return { rank: above.data().count + 1, entry };
+  }
+
   async recordVisit(clientId: string, nowMs: number): Promise<VisitUpdate> {
     const ref = this.db.collection(this.colName('players')).doc(clientId);
     const today = dayKey(nowMs);
@@ -1053,6 +1116,26 @@ export class InMemoryLobbyStore implements LobbyStore {
   private players = new Map<string, StoredPlayerDoc>();
   private queue = new Map<string, QueueEntry>();
   public wokenSites: SiteId[] = [];
+  /** Daily scores per day key (tests seed them with `setDailyScore`). */
+  private daily = new Map<string, StoredDailyScore[]>();
+
+  setDailyScore(dayKey: string, row: StoredDailyScore): void {
+    const rows = (this.daily.get(dayKey) ?? []).filter((r) => r.publicId !== row.publicId);
+    rows.push({ ...row });
+    this.daily.set(dayKey, rows);
+  }
+
+  async getDailyTop(dayKey: string, limit: number): Promise<{ total: number; top: StoredDailyScore[] }> {
+    const rows = [...(this.daily.get(dayKey) ?? [])].sort(compareDaily);
+    return { total: rows.length, top: rows.slice(0, Math.max(1, limit)) };
+  }
+
+  async getDailyEntry(dayKey: string, publicId: string): Promise<{ rank: number; entry: StoredDailyScore } | null> {
+    const rows = this.daily.get(dayKey) ?? [];
+    const entry = rows.find((r) => r.publicId === publicId);
+    if (!entry) return null;
+    return { rank: rows.filter((r) => r.pts > entry.pts).length + 1, entry: { ...entry } };
+  }
 
   constructor(initialSites?: StoredSiteDoc[], initialPlayers?: StoredPlayerDoc[]) {
     if (initialSites) {
@@ -1555,7 +1638,7 @@ type LobbyQueueStatus = z.infer<typeof LobbyQueueStatusSchema>;
 
 const ExtendedJoinRequestSchema = JoinRequestSchema.extend({
   preferredSite: SiteIdSchema.optional(),
-  runMode: z.enum(['blitz', 'freerange']).optional(),
+  runMode: RunModeSchema.optional(),
 });
 
 const ExtendedJoinResponseSchema = JoinResponseSchema.extend({
@@ -2820,6 +2903,61 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
     });
     return value;
   }
+
+  // ---- Daily Shift leaderboard (best run per player per UTC day, written by the site) ----
+  let dailyTopCache: {
+    dayKey: string;
+    atMs: number;
+    value: Promise<{ total: number; top: StoredDailyScore[] }>;
+  } | null = null;
+  function getCachedDailyTop(key: string, nowMs: number): Promise<{ total: number; top: StoredDailyScore[] }> {
+    if (!store.getDailyTop) return Promise.resolve({ total: 0, top: [] });
+    if (dailyTopCache && dailyTopCache.dayKey === key && nowMs - dailyTopCache.atMs < DAILY_BOARD_CACHE_TTL_MS) {
+      return dailyTopCache.value;
+    }
+    const value = store.getDailyTop(key, DAILY_BOARD_LIMIT);
+    const entry = { dayKey: key, atMs: nowMs, value };
+    dailyTopCache = entry;
+    value.catch(() => {
+      if (dailyTopCache === entry) dailyTopCache = null; // never cache a failure
+    });
+    return value;
+  }
+
+  app.get('/api/daily', async (req, reply) => {
+    const nowMs = nowFn();
+    const key = dayKey(nowMs);
+    const q = (req.query ?? {}) as Record<string, unknown>;
+    const publicId = typeof q.publicId === 'string' && PUBLIC_ID_PATTERN.test(q.publicId) ? q.publicId : null;
+    try {
+      const [board, mine] = await Promise.all([
+        getCachedDailyTop(key, nowMs),
+        publicId && store.getDailyEntry ? store.getDailyEntry(key, publicId) : Promise.resolve(null),
+      ]);
+      const body: DailyBoardResponse = {
+        dayKey: key,
+        number: dailyNumber(key),
+        modifier: dailyModifierFor(key),
+        resetsAt: dayKeyToMs(addDays(key, 1)),
+        total: board.total,
+        // Competition ranking (ties share a rank), matching `getDailyEntry`'s count-above rank.
+        top: board.top.map((r) => ({
+          rank: board.top.findIndex((x) => x.pts === r.pts) + 1,
+          name: r.name,
+          pts: r.pts,
+          tape: r.tape,
+          siteId: r.siteId,
+          publicId: r.publicId,
+        })),
+        you: mine ? { rank: mine.rank, pts: mine.entry.pts, tape: mine.entry.tape } : null,
+      };
+      reply.header('Cache-Control', 'no-store');
+      return body;
+    } catch (err) {
+      req.log.error({ err }, 'daily board read failed');
+      return reply.code(503).send({ error: 'daily_unavailable', message: 'Daily leaderboard is unavailable right now.' });
+    }
+  });
 
   app.get('/api/network', async (req, reply) => {
     const nowMs = nowFn();

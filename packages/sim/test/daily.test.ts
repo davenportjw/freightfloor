@@ -126,7 +126,7 @@ describe('Daily Shift: seeded hand and day attribution', () => {
     expect(hands.size).toBeGreaterThan(3);
 
     const info = dailyInfo('2026-11-12');
-    expect(info.number).toBe(3);
+    expect(info.number).toBe(1); // launch day = Daily #1
     expect(info.cards).toEqual(a.cards);
     expect(info.resetsAt).toBe(dayKeyToMs('2026-11-13'));
     expect(w.rngState).toBe(rng);

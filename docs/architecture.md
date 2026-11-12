@@ -201,6 +201,8 @@ When the client loads (`apps/client/src/ui/help.ts`), the **Intro Page** (`#help
 2. **Multi-Agent Strategy Evaluation**: Continuously benchmarks the AI driving styles (sim `Archetype`: `Sprinter`, `Steady`, `Batcher`, `Opportunist`, `Strategist`) alongside `Human` drivers on **Team Standings** (☰ → Team Standings / `B`; data from `stats.board`, ranked by orders/hr per truck) and the `Value Created` chart.
 3. **Real-Time Observability & Cost/Security Guardrails**: Exposes every agent's active thought reason, path, and token/latency metrics in the Inspector and History Drawer (`Brain log`), while protecting inference via Model Armor prompt screening, per-player governance cooldowns, and the Firestore daily budget ledger.
 
+A **✨ What's new** tab (also ☰ → Game → What's new, which calls `showHelp(true, 'whatsnew')`) renders the player-facing changelog from `apps/client/src/changelog.ts` (`CHANGELOG`, newest release first, each item citing its source commits; items with `soon: true` show a *Coming soon* chip). A purple **NEW** badge shows on the tab and menu item until the latest release date is stored in `localStorage['warehouse.changelog.seen']`. The changelog is curated by hand: `npm run changelog:draft` lists `feat` / `fix` / `perf` commits not yet cited (infra, cost, SEO, analytics, docs and tooling commits are filtered out) to rewrite in player terms.
+
 ---
 
 ## Client HUD (v3) Module Layout

@@ -35,6 +35,8 @@ import {
   type ValueSample,
   type VehicleDecision,
   type WelcomeMessage,
+  type DailyBoardResponse,
+  isTimedRun,
 } from '@warehouse/protocol';
 import {
   dcVisible,
@@ -319,6 +321,8 @@ export function makeClientVehicle(d: QuantisedVehicleDelta): Vehicle {
     comboBest: d.comboBest,
     fareTrips: d.fareTrips,
     speedyTrips: d.speedyTrips,
+    ...(d.dailyKey !== undefined ? { dailyKey: d.dailyKey } : {}),
+    ...(d.runTape !== undefined ? { runTape: d.runTape } : {}),
   };
 }
 
@@ -406,14 +410,16 @@ export function applyQuantisedDelta(
     if (typeof d.skids === 'number') v.skids = d.skids;
     if (typeof d.palletDrops === 'number') v.palletDrops = d.palletDrops;
     if (typeof d.deliveries === 'number') v.deliveries = d.deliveries;
-    if (d.runMode === 'blitz' || d.runMode === 'freerange') v.runMode = d.runMode;
+    if (d.runMode === 'blitz' || d.runMode === 'freerange' || d.runMode === 'daily') v.runMode = d.runMode;
+    if (d.dailyKey !== undefined) v.dailyKey = d.dailyKey;
+    if (d.runTape !== undefined) v.runTape = d.runTape;
     if (d.runStartedAt !== undefined) {
-      if (!(v.id === myVid && v.runMode === 'blitz' && v.runStartedAt !== null && d.runStartedAt === null)) {
+      if (!(v.id === myVid && isTimedRun(v.runMode) && v.runStartedAt !== null && d.runStartedAt === null)) {
         v.runStartedAt = d.runStartedAt;
       }
     }
     if (d.runEndsAt !== undefined) {
-      if (!(v.id === myVid && v.runMode === 'blitz' && v.runEndsAt !== null && d.runEndsAt === null)) {
+      if (!(v.id === myVid && isTimedRun(v.runMode) && v.runEndsAt !== null && d.runEndsAt === null)) {
         v.runEndsAt = d.runEndsAt;
       }
     }
@@ -427,7 +433,7 @@ export function applyQuantisedDelta(
       if (
         !(
           v.id === myVid &&
-          v.runMode === 'blitz' &&
+          isTimedRun(v.runMode) &&
           v.runFinished &&
           !d.runFinished &&
           v.runEndsAt != null &&
@@ -573,6 +579,10 @@ export interface RunEndSummary {
   shift: number;
   day: number;
   runMode?: RunMode;
+  /** Daily Shift details (daily runs only); `best` is this browser's best score for the day. */
+  daily?: { dayKey: string; number: number; label: string; blurb: string; best: number; isNewBest: boolean };
+  /** Run event tape (`O` on-time, `L` late, `X` incident). */
+  tape?: string;
   /** Why the run-over modal opened: the blitz clock expired, battery depleted, or server evicted the slot. */
   reason?: 'timer' | 'battery' | EvictionReason;
   bestStreak: number;
@@ -672,7 +682,7 @@ export interface UiState {
   fareKey: string | null;
   /** Populated when the player's 3-Minute Blitz run finishes (`runFinished === true`). */
   runEnd: RunEndSummary | null;
-  /** Selected driver play mode ('blitz' | 'freerange'). */
+  /** Selected driver play mode ('blitz' | 'freerange' | 'daily'). */
   runMode: RunMode;
   /** Active cross-site surge relocation offer (+75 pts) when current shard is crowded. */
   relocationOffer: RelocationOfferMessage | null;
@@ -878,6 +888,8 @@ export class ClientStore {
   welcomed = false;
   /** Active FIFO queue status when all driver slots are full (or null when not queued). */
   queue: QueueStatus | null = null;
+  /** Today's Daily Shift leaderboard from `GET /api/daily` (null until fetched / on error). */
+  dailyBoard: DailyBoardResponse | null = null;
   /** Whether to automatically claim the seat as soon as our queue lease becomes 'ready'. */
   autoClaimSeat = true;
   /** Reason the server evicted our driver slot at run end / idle / contention lease expiry. */

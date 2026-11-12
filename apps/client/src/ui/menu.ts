@@ -4,7 +4,7 @@
  *   Floor   — Team Standings (B) · Fleet · Drivers (online count) · Value created · Network
  *   View    — Layers ▸ · Day history (H) · HUD Full / Minimal (V)
  *   Co-Pilot— Tune Co-Pilot (G)
- *   Game    — Settings · Leaderboard & awards (L) · How to play (?)
+ *   Game    — Settings · Leaderboard & awards (L) · How to play (?) · What's new
  *
  * Team Standings has its own flyout element (`#standFly`, ui/teamStandings.ts). The other flyouts
  * reuse the existing panel modules (fleet, presence, value chart, network) mounted into sections
@@ -12,6 +12,7 @@
  */
 import type { FlyoutId } from '../state.js';
 import type { RenderLayers } from '../renderer.js';
+import { browserStorage, hasUnseenChanges } from '../changelog.js';
 import type { UiCtx, UiModule } from './context.js';
 import { el, kbd, KeyedView } from './dom.js';
 import { mountFleet } from './fleet.js';
@@ -168,6 +169,16 @@ export function mountMenu(menuBtn: HTMLElement, root: HTMLElement, ctx: UiCtx): 
               onClick: () => {
                 actions.setOverlay(null);
                 actions.showHelp(true);
+              },
+            },
+            {
+              label: "What's new",
+              detail: hasUnseenChanges(browserStorage()) ? 'NEW' : undefined,
+              attrs: { 'data-action': 'open-whats-new' },
+              title: 'Recent features, upgrades and fixes',
+              onClick: () => {
+                actions.setOverlay(null);
+                actions.showHelp(true, 'whatsnew');
               },
             },
           ],

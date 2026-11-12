@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LeaderboardEntrySchema, SiteStatusSchema, verifyTicket } from '@warehouse/protocol';
+import { DailyBoardResponseSchema, LeaderboardEntrySchema, SiteStatusSchema, verifyTicket } from '@warehouse/protocol';
 import {
   buildLobbyServer,
   CSP_HEADER,
@@ -500,6 +500,49 @@ describe('@warehouse/lobby — M6 placement, ticket signing, and network directo
     }
     expect(lookups).toBe(0);
 
+    await app.close();
+  });
+
+  it('10b. Daily Shift joiners (runMode: daily) get a driver ticket stamped with the daily mode', async () => {
+    const store = new InMemoryLobbyStore([makeSite('den-1', { drivers: 3 })]);
+    const app = await buildLobbyServer({ store, ticketSecret: TEST_SECRET, now: () => NOW });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/join',
+      payload: { clientId: 'client-daily-1', preferredSite: 'den-1', mode: 'daily', runMode: 'daily' },
+    });
+    expect(res.statusCode).toBe(200);
+    const verified = verifyTicket(res.json().ticket, TEST_SECRET, NOW + 1_000);
+    expect(verified.ok).toBe(true);
+    if (verified.ok) expect(verified.payload.runMode).toBe('daily');
+    await app.close();
+  });
+
+  it('10c. GET /api/daily returns the day board (pts desc), totals and the publicId rank', async () => {
+    const key = new Date(NOW).toISOString().slice(0, 10);
+    const store = new InMemoryLobbyStore([makeSite('den-1', { drivers: 1 })]);
+    const pid = (c: string) => 'p1_' + c.repeat(22);
+    store.setDailyScore(key, { publicId: pid('a'), name: 'Ace', pts: 120, tape: 'OO', siteId: 'den-1', updatedAt: 2 });
+    store.setDailyScore(key, { publicId: pid('b'), name: 'Bo', pts: 300, tape: 'OOO', siteId: 'slc-2', updatedAt: 1 });
+    store.setDailyScore(key, { publicId: pid('c'), name: 'Cy', pts: 120, tape: 'X', siteId: 'den-1', updatedAt: 1 });
+    store.setDailyScore('2000-01-01', { publicId: pid('d'), name: 'Old', pts: 999, tape: '', siteId: 'den-1', updatedAt: 0 });
+    const app = await buildLobbyServer({ store, ticketSecret: TEST_SECRET, now: () => NOW });
+
+    const res = await app.inject({ method: 'GET', url: `/api/daily?publicId=${pid('a')}` });
+    expect(res.statusCode).toBe(200);
+    const body = DailyBoardResponseSchema.parse(res.json());
+    expect(body.dayKey).toBe(key);
+    expect(body.total).toBe(3);
+    expect(body.top.map((r) => [r.rank, r.name, r.pts])).toEqual([
+      [1, 'Bo', 300],
+      [2, 'Cy', 120],
+      [2, 'Ace', 120],
+    ]);
+    expect(body.you).toEqual({ rank: 2, pts: 120, tape: 'OO' });
+    expect(JSON.stringify(body)).not.toContain('clientId');
+
+    const anon = DailyBoardResponseSchema.parse((await app.inject({ method: 'GET', url: '/api/daily?publicId=raw-client-id' })).json());
+    expect(anon.you).toBeNull();
     await app.close();
   });
 

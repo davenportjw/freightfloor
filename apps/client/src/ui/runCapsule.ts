@@ -1,5 +1,6 @@
 /**
- * DRIVE HUD → `#run` capsule (top centre): run clock (Blitz) or PPM (Free Range) · points + 🔥 streak ·
+ * DRIVE HUD → `#run` capsule (top centre): run clock (Blitz / Daily Shift, with the day's modifier) or
+ * PPM (Free Range) · points + 🔥 streak ·
  * combo multiplier with 4 pips · position P n/total with ▲/▼ vs the start of the run.
  * Every number is read from the driven vehicle / live leaderboard; nothing is invented.
  */
@@ -9,12 +10,15 @@ import type { UiCtx, UiModule } from './context.js';
 import { el, KeyedView } from './dom.js';
 import { DASH } from './format.js';
 import { showComboMeter } from './runOne.js';
+import { dailyOf, dailyTitle } from './daily.js';
 
 export interface RunCapsuleView {
-  mode: 'blitz' | 'freerange';
+  mode: 'blitz' | 'freerange' | 'daily';
   /** Big text of the first segment: "04:12" (Blitz) or "3.4" (PPM). */
   clock: string;
   clockSub: string;
+  /** Daily Shift modifier tooltip (daily runs only). */
+  dailyTip: string | null;
   /** Last minute of a Blitz. */
   overdrive: boolean;
   pts: string;
@@ -35,7 +39,9 @@ export function runCapsuleView(
   rows: ReadonlyArray<{ id: string }>,
   startRank: number | null,
 ): RunCapsuleView {
-  const mode = me.runMode === 'freerange' ? 'freerange' : 'blitz';
+  const mode = me.runMode === 'freerange' ? 'freerange' : me.runMode === 'daily' ? 'daily' : 'blitz';
+  const timed = mode !== 'freerange';
+  const daily = mode === 'daily' ? dailyOf(me) : null;
   const rem = me.runEndsAt != null ? Math.max(0, me.runEndsAt - w.t) : null;
   const idx = rows.findIndex((r) => r.id === me.id);
   const rank = idx >= 0 ? idx + 1 : null;
@@ -43,9 +49,18 @@ export function runCapsuleView(
   const combo = comboMeter(me.combo);
   return {
     mode,
-    clock: mode === 'blitz' ? (me.runEndsAt != null ? formatBlitzRemaining(me, w.t) : DASH) : computeDriverPpm(me, w.t).toFixed(1),
-    clockSub: mode === 'blitz' ? (me.runEndsAt != null ? 'Blitz' : 'Blitz · starts on move') : 'PPM · Free Range',
-    overdrive: mode === 'blitz' && rem != null && rem <= 60,
+    clock: timed ? (me.runEndsAt != null ? formatBlitzRemaining(me, w.t) : DASH) : computeDriverPpm(me, w.t).toFixed(1),
+    clockSub: daily
+      ? me.runEndsAt != null
+        ? dailyTitle(daily)
+        : `Daily #${daily.number} · starts on move`
+      : timed
+        ? me.runEndsAt != null
+          ? 'Blitz'
+          : 'Blitz · starts on move'
+        : 'PPM · Free Range',
+    dailyTip: daily ? `Daily Shift #${daily.number} · ${daily.modifier.label}: ${daily.modifier.blurb}` : null,
+    overdrive: timed && rem != null && rem <= 60,
     pts: String(Math.round(me.runPts ?? me.sPts ?? 0)),
     streak,
     showCombo: showComboMeter(me),
@@ -71,18 +86,21 @@ export function mountRunCapsule(root: HTMLElement, ctx: UiCtx): UiModule {
       const rows = leaderboard(store.world);
       const start = store.ui.runStartRank?.vid === me.id ? store.ui.runStartRank.rank : null;
       const v = runCapsuleView(me, store.world, rows, start);
-      // Run 1 (drive-first onboarding) is Blitz only: the mode toggle is locked until Run 2.
+      // Run 1 (drive-first onboarding) keeps the timed mode it started in (Blitz, or the Daily
+      // Shift when picked on the intro): the mode toggle is locked until Run 2.
       const modeLocked = Boolean(store.driveFirst);
       view.render(JSON.stringify([v, modeLocked]), () => {
         const modeSeg = el(
           'button',
           {
             class: `seg seg-mode ${v.mode}${v.overdrive ? ' overdrive' : ''}`,
-            title: modeLocked
-              ? '3-Minute Blitz — Free Range unlocks after your first run'
-              : v.mode === 'blitz'
-                ? '3-Minute Blitz — click to switch to open-ended Free Range'
-                : 'Free Range (no timer, scored by pallets per minute) — click to start a 3-Minute Blitz',
+            title: v.dailyTip
+              ? `${v.dailyTip}${modeLocked ? '' : ' — click to switch to a regular 3-Minute Blitz'}`
+              : modeLocked
+                ? '3-Minute Blitz — Free Range unlocks after your first run'
+                : v.mode === 'blitz'
+                  ? '3-Minute Blitz — click to switch to open-ended Free Range'
+                  : 'Free Range (no timer, scored by pallets per minute) — click to start a 3-Minute Blitz',
             attrs: { type: 'button', 'data-role': 'run-mode-pill', ...(modeLocked ? { disabled: '' } : {}) },
             onClick: () => {
               if (!modeLocked) actions.setRunMode(v.mode === 'blitz' ? 'freerange' : 'blitz');

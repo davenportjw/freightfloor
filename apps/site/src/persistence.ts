@@ -3,6 +3,7 @@ import { PubSub, type Message, type Subscription } from '@google-cloud/pubsub';
 import type { ArmorReasonCode } from '@warehouse/armor';
 import {
   GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS,
+  type DailyScoreDoc,
   type DecisionKind,
   type Phase,
   type SiteId,
@@ -194,6 +195,16 @@ export interface PersistenceStore {
   subscribeTransfers?(siteId: SiteId, onTransfer: (payload: unknown) => boolean): () => Promise<void>;
   /** Flush any locally buffered budget usage to durable storage (no-op for in-memory stores). */
   flushUsage?(): Promise<void>;
+  /**
+   * Record a finished Daily Shift run. Keeps only the player's best score for the day; returns
+   * true when this run became (or tied) the stored best.
+   */
+  recordDailyScore?(doc: DailyScoreDoc): Promise<boolean>;
+}
+
+/** A higher score wins; ties keep the earlier run. */
+export function isBetterDailyScore(next: DailyScoreDoc, prev: DailyScoreDoc | null | undefined): boolean {
+  return !prev || next.pts > prev.pts;
 }
 
 /** How often buffered Gemini usage is written to the shared budget doc. */
@@ -257,6 +268,8 @@ export class InMemoryPersistenceStore implements PersistenceStore {
   private readonly snapshots = new Map<SiteId, { snapshot: WorldSnapshot; updatedAt: number }>();
   private readonly hallOfFame: HallOfFameEntry[] = [];
   private readonly players = new Map<string, PlayerProfileDoc>();
+  /** Daily scores keyed by `${dayKey}/${clientId}`. */
+  public readonly dailyScores = new Map<string, DailyScoreDoc>();
   private readonly decisionJournals = new Map<SiteId, DecisionJournalEntry[]>();
   private readonly armorJournals = new Map<SiteId, ArmorJournalEntry[]>();
   private readonly budgets = new Map<string, BudgetDayDoc>();
@@ -341,6 +354,13 @@ export class InMemoryPersistenceStore implements PersistenceStore {
   async getPlayerStats(clientId: string): Promise<PlayerProfileDoc | null> {
     const doc = this.players.get(clientId);
     return doc ? { ...doc } : null;
+  }
+
+  async recordDailyScore(doc: DailyScoreDoc): Promise<boolean> {
+    const key = `${doc.dayKey}/${doc.clientId}`;
+    if (!isBetterDailyScore(doc, this.dailyScores.get(key))) return false;
+    this.dailyScores.set(key, { ...doc });
+    return true;
   }
 
   async appendDecisionJournal(siteId: SiteId, entry: DecisionJournalEntry): Promise<void> {
@@ -577,6 +597,22 @@ export class CloudPersistenceStore implements PersistenceStore {
     const doc = await this.db.collection(this.colName('players')).doc(clientId).get();
     if (!doc.exists) return null;
     return doc.data() as PlayerProfileDoc;
+  }
+
+  async recordDailyScore(doc: DailyScoreDoc): Promise<boolean> {
+    const ref = this.db
+      .collection(this.colName('daily'))
+      .doc(doc.dayKey)
+      .collection('daily_scores')
+      .doc(doc.clientId);
+    return this.db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const prev = snap.exists ? (snap.data() as DailyScoreDoc) : null;
+      if (!isBetterDailyScore(doc, prev)) return false;
+      // `expireAt` is a Firestore Timestamp so the `daily_scores` TTL policy can delete it.
+      tx.set(ref, { ...doc, expireAt: Timestamp.fromMillis(doc.expireAt) });
+      return true;
+    });
   }
 
   async appendDecisionJournal(siteId: SiteId, entry: DecisionJournalEntry): Promise<void> {

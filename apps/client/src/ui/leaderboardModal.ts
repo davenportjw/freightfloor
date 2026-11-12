@@ -396,7 +396,9 @@ export function mountLeaderboardModal(overlay: HTMLElement, ctx: UiCtx): UiModul
       const teamLabel = r.human
         ? r.runMode === 'freerange'
           ? '🌐 Free Range'
-          : '⏱️ 3m Blitz'
+          : r.runMode === 'daily'
+            ? '📅 Daily Shift'
+            : '⏱️ 3m Blitz'
         : r.strat;
       return el(
         'tr',
