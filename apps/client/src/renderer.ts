@@ -231,6 +231,8 @@ export interface RenderOptions {
    * - `'headingUp'`: while driving, the forklift always drives straight up on screen and steering rotates the board.
    */
   driveCameraMode?: DriveCameraMode;
+  /** Optional signed load sway for `myVid` (Floor Trials); leans the carried stack. */
+  cargoSway?: number;
 }
 
 export interface WarehouseRendererInit {
@@ -1199,6 +1201,7 @@ export class WarehouseRenderer {
             nowMs: this.nowMs,
             reducedMotion: this.reducedMotion,
             siteId: world.siteId,
+            sway: v.id === opts.myVid ? opts.cargoSway : undefined,
           }),
       });
     }

@@ -34,6 +34,13 @@ export default defineConfig({
     emptyOutDir: true,
     sourcemap: true,
     target: 'es2022',
+    rollupOptions: {
+      // Multi-page: the live game plus the Floor Trials prototype (/trials.html).
+      input: {
+        main: new URL('./index.html', import.meta.url).pathname,
+        trials: new URL('./trials.html', import.meta.url).pathname,
+      },
+    },
   },
   server: {
     port: 5173,

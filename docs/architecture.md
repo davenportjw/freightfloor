@@ -230,6 +230,10 @@ The client (`apps/client`, vanilla TypeScript + Canvas2D, Vite) has two HUD layo
 | `render/orders.ts` | — | Pure helpers for map overlays: cone-tile validity (mirrors sim `toggleCone`) and dispatch source-zone → rack mapping |
 | `render/ghost.ts` | — | Ghost planner path to the highlighted order |
 
+### Floor Trials (prototype, second Vite entry)
+
+`apps/client/trials.html` is a second Vite entry (`build.rollupOptions.input` in `vite.config.ts`), served at `/trials.html` and linked from the ☰ menu (`.menu-trials-link`). It runs **entirely in the browser**, with no lobby, WebSocket or server state. `src/trials/main.ts` builds a solo world from the deterministic sim module `packages/sim/src/trials.ts` (`createTrial`, `stepTrial`, `trialInteract`, `trialGuide`). It steps the sim at a fixed 100 ms and draws it with the shared `WarehouseRenderer`, which accepts `RenderOptions.cargoSway` so your own stack leans. Level progress (best stars and time) is kept in `localStorage['ff.trials.v1']`. Player-facing rules are in [gameplay.md § 8](gameplay.md#8-floor-trials-prototype). Tests are in `packages/sim/test/trials.test.ts`, including an autoplay bot that must clear every level.
+
 `renderer.ts` draws the cone ghost and your own cones in cone mode, the dispatch preview (source racks, target bay, dashed link), `E ·` action tags, and (when `rackLiftMinigame` is enabled) 3D shelf-elevated rack pallets (`L1 Low`, `L2 Mid`, `L3 High`), 3D forklift fork elevation (`v.fork`), and the world-space vertical Mast Height Slider gauge alongside the forklift mast. It also exposes `follow(vid)` / `panTo(x, y)` for the free Floor camera.
 
 ---

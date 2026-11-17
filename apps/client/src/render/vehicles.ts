@@ -39,6 +39,9 @@ export function modelOf(type: string | undefined): ModelKind {
   return 'counterbalance';
 }
 
+/** Lateral lean (tiles) per stacked pallet at |sway| = 1. */
+export const CARGO_SWAY_LEAN = 0.1;
+
 export function vehicleParts(
   v: Vehicle,
   p: Pose,
@@ -46,6 +49,8 @@ export function vehicleParts(
   siteId = 'den-1',
   includeCargo = true,
   camRot = 0,
+  /** Optional signed load sway (Floor Trials); leans stacked cargo sideways. */
+  sway = 0,
 ): Part[] {
   const ca = Math.cos(p.a);
   const sa = Math.sin(p.a);
@@ -61,21 +66,22 @@ export function vehicleParts(
   const cargoAt = (ox: number, z: number) =>
     cargo.forEach((o, i) => {
       const zz = z + i * 13;
+      const oy = sway * i * CARGO_SWAY_LEAN;
       if (theme.cargoStyle === 'plants') {
-        add(ox, 0, 0.42, 0.4, zz, 2.5, '#A16207');
-        add(ox, 0, 0.3, 0.3, zz + 2.5, 4.5, o.p0 ? '#DC2626' : '#C2410C');
-        add(ox, 0, 0.38, 0.38, zz + 7.0, 5.5, '#16A34A');
+        add(ox, oy, 0.42, 0.4, zz, 2.5, '#A16207');
+        add(ox, oy, 0.3, 0.3, zz + 2.5, 4.5, o.p0 ? '#DC2626' : '#C2410C');
+        add(ox, oy, 0.38, 0.38, zz + 7.0, 5.5, '#16A34A');
       } else if (theme.cargoStyle === 'tech') {
-        add(ox, 0, 0.42, 0.4, zz, 2.5, '#94A3B8');
-        add(ox, 0, 0.36, 0.34, zz + 2.5, 8.5, o.p0 ? '#991B1B' : '#1E293B');
-        add(ox, 0, 0.38, 0.36, zz + 6.5, 1.8, o.p0 ? '#F87171' : '#38BDF8');
+        add(ox, oy, 0.42, 0.4, zz, 2.5, '#94A3B8');
+        add(ox, oy, 0.36, 0.34, zz + 2.5, 8.5, o.p0 ? '#991B1B' : '#1E293B');
+        add(ox, oy, 0.38, 0.36, zz + 6.5, 1.8, o.p0 ? '#F87171' : '#38BDF8');
       } else if (theme.cargoStyle === 'artisan') {
-        add(ox, 0, 0.42, 0.4, zz, 2.5, '#A16207');
-        add(ox, 0, 0.34, 0.34, zz + 2.5, 9.0, o.p0 ? '#DC2626' : '#78350F');
-        add(ox, 0, 0.36, 0.36, zz + 6.2, 1.6, '#FBBF24');
+        add(ox, oy, 0.42, 0.4, zz, 2.5, '#A16207');
+        add(ox, oy, 0.34, 0.34, zz + 2.5, 9.0, o.p0 ? '#DC2626' : '#78350F');
+        add(ox, oy, 0.36, 0.36, zz + 6.2, 1.6, '#FBBF24');
       } else {
-        add(ox, 0, 0.42, 0.4, zz, 3, '#C4A06B');
-        add(ox, 0, 0.36, 0.34, zz + 3, 9, o.p0 ? '#F59E0B' : '#D9B98A');
+        add(ox, oy, 0.42, 0.4, zz, 3, '#C4A06B');
+        add(ox, oy, 0.36, 0.34, zz + 3, 9, o.p0 ? '#F59E0B' : '#D9B98A');
       }
     });
   if (model === 'agv') {
@@ -192,6 +198,8 @@ export interface VehicleDrawState {
   nowMs: number;
   reducedMotion?: boolean;
   siteId?: string;
+  /** Optional signed load sway (Floor Trials); leans stacked cargo sideways. */
+  sway?: number;
 }
 
 export function drawVehicle(
@@ -253,7 +261,7 @@ export function drawVehicle(
     typeof (pt as Partial<Painter>).sprite === 'function' &&
     pt.hasSprite(resolveCargoSpriteKey(cargo[0], siteId));
 
-  for (const q of vehicleParts(v, p, s.nowMs, siteId, !useSpriteCargo, camRot)) {
+  for (const q of vehicleParts(v, p, s.nowMs, siteId, !useSpriteCargo, camRot, s.sway ?? 0)) {
     pt.oBox(q.cx, q.cy, q.len, q.wid, p.a, q.z0, q.h, q.hex, 'rgba(15,23,42,0.28)');
   }
 
@@ -265,8 +273,11 @@ export function drawVehicle(
     const baseZ = model === 'agv' ? 9.2 : forkZ + 2;
     const gx = p.x + Math.cos(p.a) * ox;
     const gy = p.y + Math.sin(p.a) * ox;
+    const lean = (s.sway ?? 0) * CARGO_SWAY_LEAN;
     cargo.forEach((o, i) => {
-      pt.sprite(resolveCargoSpriteKey(o, siteId), gx, gy, baseZ + i * 13, 1.05);
+      const lx = -Math.sin(p.a) * lean * i;
+      const ly = Math.cos(p.a) * lean * i;
+      pt.sprite(resolveCargoSpriteKey(o, siteId), gx + lx, gy + ly, baseZ + i * 13, 1.05);
     });
   }
 

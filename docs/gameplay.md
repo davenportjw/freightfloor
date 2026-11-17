@@ -341,3 +341,42 @@ Hotkeys never fire while you are typing in a text box (the one exception: `Esc` 
 This table, the in-app **All controls** table (`HOTKEYS` in `apps/client/src/ui/hotkeys.ts`) and the real key resolver (`resolveHotkey`) are kept in sync by `apps/client/test/hotkeys.test.ts`, which checks in both directions across the Drive, Floor and pick-sheet contexts.
 
 Typed orders go through Model Armor and the same limiter as the buttons. Natural-language district/bay routing commands (e.g. `"get hazmats to returns"`, `"move cold storage to bay E2"`) execute directly via `dispatchOrderRoute`, while ambiguous or exploratory commands (e.g. `"help"`, `"what can I do"`, `"reroute"`) open the live `a2uiScreen` clarification builder.
+
+## 8. Floor Trials (prototype)
+
+**Floor Trials** (`/trials.html`, also in the ☰ menu) is a solo level mode. Each level is a short delivery puzzle on the Denver floor: lift the listed pallets, stack them, and drop them at their dock bays. The level list and the game share one screen. Pick a level on the left rail and play it in the stage. Everything runs in the browser. The rules live in the deterministic sim module `packages/sim/src/trials.ts`.
+
+### Rules
+
+| Rule | Detail |
+|---|---|
+| Stack | Each level sets `stackMax` (1–3 pallets). `E` lifts the nearest listed pallet (within 1.6 tiles, while stopped) or drops every carried pallet for that bay (within 2.1 tiles of the bay). |
+| Load sway | The stack is a damped spring (`SWAY_K = 18`, `SWAY_C = 3.5`). It is driven by turning × speed and by hard braking. Taller stacks sway more (`SWAY_GAIN = [0, 0.55, 1, 1.55]`). The **LOAD** meter shows the sway. At 1.0 the top pallet falls next to the truck, which costs **1 strike**. Full speed in a full turn tips a 3-stack, while 1 pallet holds steady. |
+| Impacts | Hitting something at more than 1.65 tiles/s (a speed drop greater than 1.5 in one tick) jolts the stack in proportion to your speed. With a tall load, that is usually enough to topple a pallet. A boost crash drops the whole load as 1 strike. Fallen pallets stay on the floor and can be lifted again. |
+| Falling racks | Hitting a rack at more than 2 tiles/s damages it. Racks warn on the first hit and fall on the second (`rackHp` 2, or 1 on Wobbly Racks). A fallen rack drops debris onto a neighbouring floor tile, blocking it for 20 s, and costs 1 strike. |
+| Spills | Crossing a spill faster than 1.2 tiles/s kicks the stack once per puddle. Creep across or drive around. |
+| Strikes | **3 strikes fail the level** (`TRIAL_MAX_STRIKES`). |
+| Stars | Par time is the sum of planned trips at cruise speed (`trialPar`). ★★★ means within 1.25× par, ★★ within 1.7× par, ★ any finish. Each strike lowers the cap by one star (1 strike caps at ★★, 2 strikes at ★). The clock starts on your first input. |
+| Unlocks | A level unlocks once the previous level has at least 1 star. Best stars and time are saved per browser. |
+
+### Levels
+
+| # | Level | Stack | Twist |
+|---|---|---|---|
+| 1 | First Lift | 1 | One pallet to Bay E2 |
+| 2 | Double Stack | 2 | Two pallets ride together to E1 |
+| 3 | Tower of Three | 3 | Three high to E4; corners tip the stack |
+| 4 | Wet Floor | 3 | Six spills on the main road (par × 1.25) |
+| 5 | Wobbly Racks | 3 | Racks fall on the first hard hit |
+| 6 | Rush Hour | 3 | Six pallets across bays E7 and E8 |
+
+### Controls
+
+| Key | Action |
+|---|---|
+| W A S D / arrows | Drive |
+| Shift / Space | Boost (crashing drops the load) |
+| E | Lift / drop |
+| R | Retry level |
+| Enter | Next level (on the result card) |
+| 1–9 | Pick an unlocked level |
