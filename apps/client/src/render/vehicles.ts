@@ -68,6 +68,8 @@ export interface VehiclePartsOptions {
   motion?: WheelMotion;
   /** Emit a rotating rim marker on each hub (3D only: sub-pixel in iso). */
   lugs?: boolean;
+  /** Optional per-tier stack lean (Floor Trials): bends the carried stack and tints a tipping top pallet. */
+  lean?: CargoLean;
 }
 
 /** Collapsed (fully lowered) mast height in iso-px for counterbalance trucks. */
@@ -109,6 +111,45 @@ const STEEL = '#334155';
 const STEEL_MID = '#475569';
 const HAZARD = '#FBBF24';
 
+/** Lateral lean (tiles) per stacked pallet at |sway| = 1. */
+export const CARGO_SWAY_LEAN = 0.1;
+/** Stack height per carried pallet (iso-px). */
+export const CARGO_TIER_Z = 13;
+const WARN_RED = '#EF4444';
+
+/**
+ * Carried-stack lean (Floor Trials). `tiers[k]` is the signed lateral offset (tiles, + = vehicle's
+ * left-hand normal) of the k-th pallet boundary: `tiers[0]` is the forks, `tiers[n]` the top of the
+ * stack. `warn` (0..1) tints the top pallet red as the load nears tipping.
+ */
+export interface CargoLean {
+  tiers: readonly number[];
+  warn: number;
+}
+
+/** Linear blend of two #RRGGBB colours, returned as #RRGGBB (so `shade()` can still parse it). */
+export function mixHex(a: string, b: string, t: number): string {
+  const k = Math.max(0, Math.min(1, t));
+  const na = parseInt(a.slice(1), 16);
+  const nb = parseInt(b.slice(1), 16);
+  let out = 0;
+  for (const sh of [16, 8, 0]) {
+    const ca = (na >> sh) & 255;
+    const cb = (nb >> sh) & 255;
+    out |= Math.round(ca + (cb - ca) * k) << sh;
+  }
+  return `#${out.toString(16).padStart(6, '0')}`;
+}
+
+/** Lateral offset at a fraction (0 = base, 1 = top) through pallet `i` of a leaning stack. */
+export function leanAt(lean: CargoLean | undefined, i: number, frac: number): number {
+  if (!lean) return 0;
+  const a = lean.tiers[i] ?? 0;
+  const b = lean.tiers[i + 1] ?? a;
+  const f = Math.max(0, Math.min(1, frac));
+  return a + (b - a) * f;
+}
+
 export function vehicleParts(
   v: Vehicle,
   p: Pose,
@@ -116,8 +157,10 @@ export function vehicleParts(
   siteId = 'den-1',
   includeCargo = true,
   camRot = 0,
-  opts: VehiclePartsOptions = {},
+  optsOrLean: VehiclePartsOptions | CargoLean = {},
 ): Part[] {
+  const opts: VehiclePartsOptions = 'tiers' in optsOrLean ? { lean: optsOrLean } : optsOrLean;
+  const lean = opts.lean;
   const ca = Math.cos(p.a);
   const sa = Math.sin(p.a);
   const team = teamColor(v);
@@ -185,26 +228,33 @@ export function vehicleParts(
   /** Carried loads: the shared `cargoPrims` model, scaled to sit on the forks, stacked upward. */
   const cargoAt = (ox: number, z: number) => {
     let zz = z;
-    for (const o of cargo) {
+    cargo.forEach((o, i) => {
       const { prims, height } = cargoPrims(o, siteId);
+      const tierH = height * CARRIED_Z;
+      const isTop = i === cargo.length - 1;
+      const warn = isTop && lean ? lean.warn : 0;
+      const flash = warn > 0 ? warn * (0.7 + 0.3 * Math.sin(nowMs / (110 - 50 * warn))) : 0;
       for (const q of prims) {
+        const partZ0 = zz + q.z0 * CARRIED_Z;
+        const partH = q.h * CARRIED_Z;
+        const frac = tierH > 0 ? (q.z0 * CARRIED_Z + partH / 2) / tierH : 0;
         const lx = ox + q.x * CARRIED_XY;
-        const ly = q.y * CARRIED_XY;
+        const ly = q.y * CARRIED_XY + leanAt(lean, i, frac);
         const part: Part = {
           cx: p.x + ca * lx - sa * ly,
           cy: p.y + sa * lx + ca * ly,
           len: q.w * CARRIED_XY,
           wid: q.d * CARRIED_XY,
-          z0: zz + q.z0 * CARRIED_Z,
-          h: q.h * CARRIED_Z,
-          hex: q.hex,
+          z0: partZ0,
+          h: partH,
+          hex: flash > 0 ? mixHex(q.hex, WARN_RED, flash) : q.hex,
           role: 'cargo',
         };
         if (q.kind === 'cyl') part.shape = 'cyl';
         parts.push(part);
       }
-      zz += height * CARRIED_Z;
-    }
+      zz += tierH;
+    });
   };
 
   /** Telescoping mast: twin rails per stage plus a tie bar across each stage's top. */
@@ -382,6 +432,8 @@ export interface VehicleDrawState {
   siteId?: string;
   /** Wheel roll / steer from the renderer's `WheelOdometer` (wheels sit still without it). */
   motion?: WheelMotion;
+  /** Optional per-tier stack lean (Floor Trials): bends the carried stack and stretches its shadow. */
+  lean?: CargoLean;
 }
 
 /** Body footprint (tiles) for the ground shadow, centred `ox` ahead of the vehicle origin. */
@@ -445,11 +497,13 @@ export function drawVehicle(
     pt.poly(pt.circleGrid(p.x, p.y, 0.8 + 0.08 * k), 'rgba(34,197,94,0.22)', '#16A34A', 2);
   }
 
+  const cargo = v.cargo ?? [];
   const camRot = pt.cam?.rot ?? 0;
+  if (s.lean && cargo.length > 0) drawLeanShadow(pt, v, p, s.lean, cargo.length);
   const canWheel = typeof (pt as Partial<Painter>).wheel === 'function';
   // LOD: rims are a couple of pixels when zoomed out; skip them there.
   const lowDetail = (pt.cam?.zoom ?? 1) < 0.9;
-  for (const q of vehicleParts(v, p, s.nowMs, siteId, true, camRot, { motion: s.motion })) {
+  for (const q of vehicleParts(v, p, s.nowMs, siteId, true, camRot, { motion: s.motion, lean: s.lean })) {
     if (lowDetail && q.role === 'hub') continue;
     const a = p.a + (q.yaw ?? 0);
     if (q.shape === 'wheel' && canWheel) pt.wheel(q.cx, q.cy, q.len, q.wid, a, q.z0, q.h, q.hex, 'rgba(15,23,42,0.35)');
@@ -475,4 +529,34 @@ export function drawVehicle(
   }
   if (s.brainError) pt.poly(pt.circleGrid(p.x, p.y, 0.95), null, '#E11D48', 2.5);
   ctx.restore();
+}
+
+/** Fork-tip offset (tiles ahead of the vehicle centre) where carried cargo sits. */
+export function cargoOffset(type: string | undefined): number {
+  return modelOf(type) === 'agv' ? -0.02 : 0.62;
+}
+
+/**
+ * Floor shadow under a carried stack, stretched and shifted toward the lean so the tilt reads from
+ * above (the iso view hides lateral offsets of tall stacks otherwise).
+ */
+function drawLeanShadow(pt: Painter, v: Vehicle, p: Pose, lean: CargoLean, n: number): void {
+  const ca = Math.cos(p.a);
+  const sa = Math.sin(p.a);
+  const ox = cargoOffset(v.type);
+  const top = lean.tiers[n] ?? 0;
+  const shift = top * 0.8;
+  const cx = p.x + ca * ox - sa * shift;
+  const cy = p.y + sa * ox + ca * shift;
+  const rf = 0.3;
+  const rl = 0.3 + Math.abs(top) * 0.9;
+  const pts: [number, number][] = [];
+  for (let k = 0; k < 20; k++) {
+    const t = (k / 20) * Math.PI * 2;
+    const f = Math.cos(t) * rf;
+    const l = Math.sin(t) * rl;
+    pts.push(pt.P(cx + ca * f - sa * l, cy + sa * f + ca * l));
+  }
+  const alpha = 0.14 + Math.min(0.12, Math.abs(top) * 0.25) + lean.warn * 0.06;
+  pt.poly(pts, `rgba(15,23,42,${alpha.toFixed(3)})`);
 }

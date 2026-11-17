@@ -203,6 +203,17 @@ export function mountMenu(menuBtn: HTMLElement, root: HTMLElement, ctx: UiCtx): 
             ),
           ]),
         ),
+        el('div', { class: 'menu-group' }, [
+          el(
+            'a',
+            {
+              class: 'menu-item menu-trials-link',
+              title: 'Solo stacking levels with stars (prototype)',
+              attrs: { href: '/trials.html' },
+            },
+            [el('span', { class: 'grow', text: 'Floor Trials' }), el('span', { class: 'muted', text: '★' })],
+          ),
+        ]),
         el('div', { class: 'menu-group menu-credits' }, [
           el(
             'a',

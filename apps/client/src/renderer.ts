@@ -82,6 +82,7 @@ import {
   computeChargeVisualCue,
   drawVehicle,
   isVehicleCharging,
+  type CargoLean,
   type ChargeCueFrame,
 } from './render/vehicles.js';
 import { dockTruckFrame, drawDockRig, SimClock, TRAILER_LEN, TRAILER_TOP } from './render/trucks.js';
@@ -171,6 +172,19 @@ export interface RenderOptions {
    * - `'headingUp'`: while driving, the forklift always drives straight up on screen and steering rotates the board.
    */
   driveCameraMode?: DriveCameraMode;
+  /** Optional per-tier stack lean for `myVid` (Floor Trials); bends the carried stack. */
+  cargoLean?: CargoLean;
+  /** Optional order ids not drawn on the floor (Floor Trials: pallets still mid-tumble). */
+  hiddenOrders?: ReadonlySet<number>;
+  /** Optional world-space effects pass, drawn after the depth-sorted scene and before labels. */
+  worldFx?: (pt: Painter, nowMs: number) => void;
+  /**
+   * Optional solo-mode chrome (Floor Trials): no vehicle id / battery tag, no order ids in guide
+   * pills (it names the pallet's bay instead), and no "Incident" pill over strike markers.
+   */
+  minimalChrome?: boolean;
+  /** Optional filter for floor markers (Floor Trials holds a strike ring back until its pallet lands). */
+  markerFilter?: (m: { x: number; y: number; kind: string }) => boolean;
 }
 
 export interface WarehouseRendererInit {
@@ -640,6 +654,7 @@ export class WarehouseRenderer {
     const items = this.sceneItems(world, opts);
     items.sort((a, b) => a.d - b.d);
     for (const it of items) it.fn();
+    opts.worldFx?.(this.painter, this.nowMs);
     this.drawConeOverlay(world, opts);
     this.drawLabels(world, opts);
     if (showGhost) this.drawGhostLabel(opts.ghost!);
@@ -902,6 +917,7 @@ export class WarehouseRenderer {
     // order pickup rings
     for (const o of world.orders) {
       if (o.state === 'picked' || o.state === 'done') continue;
+      if (opts.hiddenOrders?.has(o.id)) continue;
       const s = o.slot;
       if (!this.visible(s.ax + 0.5, s.ay + 0.5, TW)) continue;
       const claimer = o.claimant ? world.vehicles.find((v) => v.id === o.claimant) : undefined;
@@ -933,6 +949,7 @@ export class WarehouseRenderer {
     const mp = this.pulse(150 * Math.PI * 2);
     for (const m of world.markers) {
       if (m.until <= world.t || !this.visible(m.x + 0.5, m.y + 0.5, TW)) continue;
+      if (opts.markerFilter && !opts.markerFilter(m)) continue;
       const inc = m.kind === 'incident';
       pt.poly(
         pt.circleGrid(m.x + 0.5, m.y + 0.5, 0.5 + 0.35 * mp * (inc ? 1 : 0.6)),
@@ -1058,6 +1075,7 @@ export class WarehouseRenderer {
     // order pallets (P0 star)
     for (const o of world.orders) {
       if (o.state === 'picked' || o.state === 'done') continue;
+      if (opts.hiddenOrders?.has(o.id)) continue;
       const s = o.slot;
       const elevated = Boolean(opts.rackLiftEnabled && isRackSlot(s));
       const level = ((s.level ?? 0) as 0 | 1 | 2);
@@ -1113,6 +1131,7 @@ export class WarehouseRenderer {
             reducedMotion: this.reducedMotion,
             siteId: world.siteId,
             motion: this.reducedMotion ? undefined : this.wheelMotion.get(v.id),
+            lean: v.id === opts.myVid ? opts.cargoLean : undefined,
           }),
       });
     }
@@ -1240,12 +1259,12 @@ export class WarehouseRenderer {
         pt.pill(net ? `${b.id} → NET` : b.id, sx - 26 * Math.min(1, z + 0.3), sy + 1, net ? NET_COLOR : '#1D4ED8');
       }
     }
-    for (const m of world.markers) {
+    for (const m of opts.minimalChrome ? [] : world.markers) {
       if (m.kind !== 'incident' || m.until <= world.t) continue;
       const [sx, sy] = pt.P(m.x + 0.5, m.y + 0.5, 46);
       pt.pill('Incident', sx, sy, '#DC2626');
     }
-    if (labels && z > 1.1) {
+    if (labels && z > 1.1 && !opts.minimalChrome) {
       for (const v of world.vehicles) {
         const p = this.poses.get(v.id)!;
         const [sx, sy] = pt.P(p.x, p.y, 44);
@@ -1275,7 +1294,7 @@ export class WarehouseRenderer {
     for (const v of world.vehicles) {
       const p = this.poses.get(v.id)!;
       const carryP0 = (v.cargo ?? []).some((o: Order) => o.p0);
-      const named = v.human || opts.selectedVid === v.id || carryP0;
+      const named = !opts.minimalChrome && (v.human || opts.selectedVid === v.id || carryP0);
       const [sx, sy] = pt.P(p.x, p.y, 60);
       if (named) pt.pill(carryP0 ? `★ ${v.id}` : v.id, sx, sy, carryP0 ? '#D97706' : teamColor(v));
       // live extra: brain badges from server overlays
@@ -1361,6 +1380,10 @@ export class WarehouseRenderer {
       const id = g.order?.id ?? fullOrder?.id;
       const what = id != null ? `#${id}` : '';
       label = g.inRange ? `E · Pick up ${what}`.trim() : id != null ? `Pick #${id}` : 'Pick';
+      if (opts.minimalChrome) {
+        const bay = fullOrder?.bay;
+        label = g.inRange ? 'E · Lift pallet' : bay ? `Pallet → ${bay}` : 'Pallet';
+      }
       if (opts.rackLiftEnabled && fullOrder && requiresRackLift(fullOrder, 'pick')) {
         liftLevel = ((fullOrder.slot.level ?? 0) as 0 | 1 | 2);
         const tierLabel = RACK_LEVEL_LABELS[liftLevel] ?? 'L1 Low';

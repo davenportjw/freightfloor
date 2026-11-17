@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Floor Trials · Freight Floor</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/src/trials/trials.css" />
+  </head>
+  <body>
+    <div class="tr-shell">
+      <aside class="tr-rail" aria-label="Levels">
+        <header class="tr-brand">
+          <a href="/" class="tr-back" title="Back to Freight Floor">←</a>
+          <div>
+            <div class="tr-title">FLOOR <em>TRIALS</em></div>
+            <div class="tr-sub" id="trTotal">0 / 18 ★</div>
+          </div>
+        </header>
+        <ol id="trLevels" class="tr-levels"></ol>
+        <footer class="tr-keys">
+          <span><kbd>W A S D</kbd> drive</span>
+          <span><kbd>Shift</kbd> boost</span>
+          <span><kbd>E</kbd> lift / drop</span>
+          <span><kbd>R</kbd> retry</span>
+        </footer>
+      </aside>
+      <main class="tr-stage">
+        <canvas id="trCanvas" aria-label="Trial floor"></canvas>
+        <div class="tr-hud" id="trHud">
+          <div class="tr-pill tr-pill--level" id="trLevelName"></div>
+          <div class="tr-pill" id="trTimer">0.0s</div>
+          <div class="tr-pill tr-strikes" id="trStrikes" aria-label="Strikes"></div>
+          <div class="tr-pill tr-stack" id="trStack"></div>
+        </div>
+        <div class="tr-meter" id="trMeter" aria-label="Load stability">
+          <span class="tr-meter__label">LOAD</span>
+          <div class="tr-meter__track"><div class="tr-meter__mid"></div><div class="tr-meter__fill" id="trMeterFill"></div></div>
+        </div>
+        <div class="tr-intent" id="trIntent"></div>
+        <div class="tr-toasts" id="trToasts" aria-live="polite"></div>
+        <div class="tr-touch" id="trTouch" aria-label="Touch controls">
+          <div class="tr-touch__pad">
+            <button type="button" data-key="KeyW" aria-label="Forward">▲</button>
+            <button type="button" data-key="KeyA" aria-label="Turn left">◀</button>
+            <button type="button" data-key="KeyS" aria-label="Reverse">▼</button>
+            <button type="button" data-key="KeyD" aria-label="Turn right">▶</button>
+          </div>
+          <div class="tr-touch__acts">
+            <button type="button" data-key="ShiftLeft" aria-label="Boost">Boost</button>
+            <button type="button" data-act="interact" class="primary" aria-label="Lift or drop">E</button>
+          </div>
+        </div>
+        <section class="tr-result" id="trResult" hidden>
+          <div class="tr-result__stars" id="trResStars"></div>
+          <h2 id="trResTitle"></h2>
+          <p id="trResLine"></p>
+          <div class="tr-result__actions">
+            <button type="button" id="trRetry">Retry <kbd>R</kbd></button>
+            <button type="button" id="trNext" class="primary">Next <kbd>↵</kbd></button>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/src/trials/main.ts"></script>
+  </body>
+</html>
