@@ -375,10 +375,16 @@ try {
    * transient coverage is still printed for the record.
    */
   async function settleTransients(label) {
-    if (!(await isShown('#fare'))) return;
+    // Only the order-choice row is transient; the rival line in #fare stays up all run and counts.
+    const choiceOpen = () =>
+      page.evaluate(() => [...document.querySelectorAll('#fare [data-role="fare-option"]')].some((e) => e.checkVisibility()));
+    if (!(await choiceOpen())) return;
     const g = await hudGeometry();
     console.log(`order choice open (${label}): transient coverage ${(g.coverage * 100).toFixed(1)}% — waiting for it to resolve`);
-    await page.waitForFunction(() => !document.querySelector('#fare')?.checkVisibility(), null, { timeout: 8_000 }).catch(() => {});
+    await page
+      .waitForFunction(() => ![...document.querySelectorAll('#fare [data-role="fare-option"]')].some((e) => e.checkVisibility()), null, { timeout: 8_000 })
+      .catch(() => {});
+    if (await choiceOpen()) console.log(`order choice still open after 8 s (${label})`);
     await page.waitForTimeout(400);
   }
 

@@ -1909,7 +1909,12 @@ canvas#world.cone-mode { cursor: crosshair; }
   background: rgba(255, 255, 255, 0.92); border: 1px solid var(--line-2); border-radius: 12px;
   padding: 6px 10px; box-shadow: 0 4px 14px -6px rgba(15, 23, 42, 0.18);
 }
-.fare-row.rival { padding: 4px 10px; }
+/* Persistent rival line: one row, capped width, long Gemini notes ellipsised (it used to wrap the
+   unstyled 🧠 reason onto a second ~640 px line and push the Drive HUD past its 15% floor budget). */
+.fare-row.rival { padding: 4px 10px; flex-wrap: nowrap; }
+@media (min-width: 1024px) { .fare-row.rival { max-width: min(520px, 40vw); } }
+.fare-row.rival > * { min-width: 0; }
+.fare-row.rival .rival-pill { flex: none; }
 .fare-tag { font-size: 12px; font-weight: 700; text-transform: uppercase; color: var(--ink-2); background: var(--soft); border-radius: 6px; padding: 2px 6px; }
 .fare-tag.carpool { background: var(--blue-l); color: var(--blue-d); }
 .fare-pill {
@@ -2710,7 +2715,7 @@ body.hud-minimal #dash .hints { display: none; }
 #shieldCard[hidden] { display: none; }
 #shieldCard .sub { color: var(--muted); font-size: 13px; }
 /* Rival reasoning pill (ui/objective.ts): my rival's latest real Gemini decision note. */
-.rival-reason { font-size: 13px; color: var(--ink-2); max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rival-reason { font-size: 13px; color: var(--ink-2); max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
 /* Inline text-action button primitive (no underline; distinct from pill buttons). */
 .textlink {
   appearance: none; -webkit-appearance: none;
