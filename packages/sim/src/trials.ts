@@ -44,6 +44,11 @@ export interface TrialLevel {
   spills?: Point[];
   /** Par multiplier for levels whose hazards force slower or longer lines (default 1). */
   parScale?: number;
+  /**
+   * Rules revision (default 1). Bump it whenever a change to this level (start, pallets, hazards,
+   * par) would make old runs incomparable; shared ghost runs are keyed by `trialRev(level)`.
+   */
+  rev?: number;
 }
 
 export type TrialStatus = 'ready' | 'running' | 'won' | 'failed';

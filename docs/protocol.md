@@ -81,6 +81,34 @@ Today's (UTC) Daily Shift leaderboard: each player's best finished Daily run, ac
 
 Scores are written by the site, not the lobby: when a human (non-bot) Daily run finishes, `persistVehicleStats` builds a `DailyScoreDoc` (`dailyScoreDoc(v, …)`) and calls `PersistenceStore.recordDailyScore`, a Firestore transaction on `daily{suffix}/{dayKey}/daily_scores/{clientId}` that keeps only a strictly higher score. `expireAt` (a Timestamp, `dayKey + DAILY_SCORE_TTL_DAYS` = 30 days) drives the `daily_scores` TTL policy.
 
+
+### `POST /api/trials/:levelId/runs`
+Shares a finished, winning Floor Trials run as a ghost (§ Floor Trials in [gameplay.md](gameplay.md#ghost-runs)). Route body limit 64 KiB (`TRIAL_RUN_BODY_LIMIT`; larger → 413). Self-identified crawlers get 403 `crawler_not_allowed`; more than `TRIAL_RUN_RATE_PER_MIN` (12) submits per IP per minute get 429 `rate_limited`. Unknown level → 404 `unknown_level`.
+
+**Request Body (`TrialRunSubmitSchema`, strict)**
+| Field | Type | Description |
+|---|---|---|
+| `clientId` | `string` (1–128) | The browser's raw clientId (`warehouse_client_id`). Bearer credential; never echoed or served. |
+| `rev` | `int` | Level rules revision the run was driven on (`trialRev(level)`). |
+| `time` | `number` (0 < t ≤ 600) | Level time in seconds (multiple of 0.1). |
+| `stars` | `int` 1–3 | Must equal `starsFor(time, par, strikes)`. |
+| `strikes` | `int` 0–2 | Must match the strike markers in the track. |
+| `track` | `string` (base64url, ≤ `TRIAL_GHOST_TRACK_MAX_CHARS` 48,000) | `encodeGhost` output (format 1, see `packages/sim/src/trialGhost.ts`). |
+
+The lobby runs `validateGhostRun` (`@warehouse/sim`); a failure is 422 `implausible_run` with `reason` (`stale_rev`, `bad_time`, `too_fast`, `bad_stars`, `bad_strikes`, `bad_track`, `sample_count`, `bad_start`, `too_fast_step`, `stack_overflow`, `moving_lift`, `drop_off_bay`, `not_delivered`, `not_finished`, `strike_mismatch`). The callsign is the player's stored `players/{clientId}.name` (humans only) or the deterministic `generateDriverCallsign(clientId)`. A Firestore transaction on `trials/{levelId}_r{rev}/runs/{clientId}` keeps the faster run (ties: fewer strikes, then the earlier run). 503 `ghosts_unavailable` when the store fails.
+
+**Response (`TrialRunSubmitResponseSchema`)**: `{ ok: true, improved, best: { time, stars }, rank, total }`. `rank` = 1 + runs strictly faster than the stored best.
+
+### `GET /api/trials/:levelId/ghosts[?time=<seconds>]`
+Shared ghosts for the level's current rules revision. The top 3 and total are cached per lobby instance for `TRIAL_GHOSTS_CACHE_TTL_MS` (15 s) and invalidated on that instance by an improving submit; `time` (your best) adds the run just faster than it (1 uncached read, plus a count when it is outside the top 3). `Cache-Control: no-store`. 404 `unknown_level`, 503 `ghosts_unavailable`.
+
+**Response Body (`TrialGhostsResponseSchema`)**
+| Field | Type | Description |
+|---|---|---|
+| `levelId`, `rev` | | Level id and rules revision. |
+| `total` | `int` | Players with a stored run on this revision. |
+| `top` | `TrialGhost[]` | Up to 3 fastest: `{ rank, publicId, name, time, stars, strikes, track }` (competition ranking by time). No raw clientIds. |
+| `next` | `TrialGhost \| null` | The slowest run strictly faster than `time` (null without `time` or when `time` leads). |
 ---
 
 ## 2. Client-to-Site WebSocket Messages (`ClientMessageSchema`)

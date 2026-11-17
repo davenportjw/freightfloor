@@ -176,6 +176,8 @@ export interface RenderOptions {
   cargoLean?: CargoLean;
   /** Optional order ids not drawn on the floor (Floor Trials: pallets still mid-tumble). */
   hiddenOrders?: ReadonlySet<number>;
+  /** Optional floor-paint pass, drawn after the floor and before the depth-sorted scene (Floor Trials ghost trails). */
+  floorFx?: (pt: Painter, nowMs: number) => void;
   /** Optional world-space effects pass, drawn after the depth-sorted scene and before labels. */
   worldFx?: (pt: Painter, nowMs: number) => void;
   /**
@@ -651,6 +653,7 @@ export class WarehouseRenderer {
     // to be drawn last, so the dashes crossed over the player's own forklift). Its label stays on top.
     const showGhost = Boolean(me && opts.layers.ghost && opts.ghost && opts.ghost.points.length >= 2);
     if (showGhost) this.drawGhostPath(opts.ghost!);
+    opts.floorFx?.(this.painter, this.nowMs);
     const items = this.sceneItems(world, opts);
     items.sort((a, b) => a.d - b.d);
     for (const it of items) it.fn();

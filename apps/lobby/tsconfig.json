@@ -8,6 +8,7 @@
   "include": ["src/**/*"],
   "references": [
     { "path": "../../packages/protocol" },
-    { "path": "../../packages/armor" }
+    { "path": "../../packages/armor" },
+    { "path": "../../packages/sim" }
   ]
 }
