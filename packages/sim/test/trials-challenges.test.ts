@@ -91,6 +91,24 @@ describe('level catalogue', () => {
     }
   });
 
+  it('challenge pars match the docs/gameplay.md § 8 level table', () => {
+    const pars = Object.fromEntries(CHALLENGES.map((l) => [l.id, createTrial(l.id).state.par]));
+    expect(pars).toEqual({
+      putaway: 29.6,
+      fragile: 37.3,
+      'heavy-bottom': 40.7,
+      'cone-maze': 27.2,
+      'low-battery': 70.5,
+      'dock-windows': 50.9,
+      traffic: 51.1,
+      'lights-out': 26,
+      'wet-and-wobbly': 58.5,
+      'cross-dock': 77,
+      'rush-hour-ii': 90.7,
+      'night-shift': 63.1,
+    });
+  });
+
   it('every challenge level adds at least one mechanic', () => {
     for (const l of CHALLENGES) {
       const twist =

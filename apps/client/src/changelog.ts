@@ -34,6 +34,24 @@ export interface ChangelogRelease {
 /** Newest first. */
 export const CHANGELOG: readonly ChangelogRelease[] = [
   {
+    date: '2026-11-17',
+    title: 'Floor Trials: Challenges',
+    items: [
+      {
+        kind: 'new',
+        title: 'Twelve Floor Trials challenges',
+        body: 'Levels 7–18 add one twist at a time: stow inbound pallets into rack slots, sort cross-dock freight, carry glass that shatters and heavy pallets that must ride low, weave through cone mazes, plan a charger stop on a thin battery, beat timed dock doors, dodge forklift traffic and drive with only your headlights. Night Shift throws it all at you at once.',
+        commits: ['f33be31', '0c25f04'],
+      },
+      {
+        kind: 'improved',
+        title: 'Floor Trials level list',
+        body: 'The level rail is now split into Getting started and Challenges, and each challenge card shows tags for its twists.',
+        commits: ['0c25f04'],
+      },
+    ],
+  },
+  {
     date: '2026-11-16',
     title: 'Floor Trials',
     items: [
