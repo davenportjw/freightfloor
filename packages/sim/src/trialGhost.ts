@@ -22,15 +22,17 @@
  *   zigzag da          heading delta, wrapped to −128..127
  *   u8     aux         bit0 fork, bit1 sway, bit2 stack, bit3 events follow
  *   [zigzag dFork] [zigzag dSway] [u8 stack] [u8 k, k × u8 event]
- * event byte: low 3 bits kind (1 pick, 2 drop, 3 topple, 4 crash, 5 rack fall),
- *             high 5 bits pallets delivered (drop only)
+ * event byte: low 3 bits kind (1 pick, 2 drop, 3 topple, 4 crash, 5 rack fall, 6 stow,
+ *             7 traffic); high 5 bits = pallets delivered (drop / stow). Low bits 0 escape to
+ *             an extended kind in the high 5 bits (1 glass shatter, 2 charge stop).
  * ```
  *
  * Events that happen at level time t (a pick between two ticks) attach to sample round(t × 10).
  * A 90 s run is ~900 samples at ~4–5 bytes each, i.e. ~5–6 KB of base64.
  */
 import { TRIAL_GHOST_TRACK_MAX_CHARS } from '@warehouse/protocol';
-import { createTrial, starsFor, TRIAL_BAY_REACH, TRIAL_LIFT_SPEED, TRIAL_MAX_STRIKES, trialLevel } from './trials.js';
+import { windowState } from './trialMechanics.js';
+import { createTrial, starsFor, TRIAL_LIFT_SPEED, TRIAL_MAX_STRIKES, trialDropTargets, trialLevel } from './trials.js';
 import type { Trial, TrialEventKind, TrialLevel } from './trials.js';
 
 export const TRIAL_GHOST_FORMAT = 1;
@@ -53,15 +55,40 @@ const ANG_Q = 256;
 const FORK_Q = 63;
 const SWAY_Q = 32;
 
-export type GhostEventKind = 'pick' | 'drop' | 'topple' | 'crash' | 'rack_fall';
-const EVENT_CODES: Record<GhostEventKind, number> = { pick: 1, drop: 2, topple: 3, crash: 4, rack_fall: 5 };
-const EVENT_KINDS: Array<GhostEventKind | null> = [null, 'pick', 'drop', 'topple', 'crash', 'rack_fall', null, null];
+export type GhostEventKind =
+  | 'pick'
+  | 'drop'
+  | 'stow'
+  | 'topple'
+  | 'crash'
+  | 'rack_fall'
+  | 'traffic'
+  | 'shatter'
+  | 'charge';
+/**
+ * Event byte: low 3 bits are the kind (1–7); 0 escapes to an extended kind in the high 5 bits.
+ * For drop / stow the high 5 bits carry the pallets delivered instead.
+ */
+const EVENT_CODES: Partial<Record<GhostEventKind, number>> = { pick: 1, drop: 2, topple: 3, crash: 4, rack_fall: 5, stow: 6, traffic: 7 };
+const EVENT_KINDS: Array<GhostEventKind | null> = [null, 'pick', 'drop', 'topple', 'crash', 'rack_fall', 'stow', 'traffic'];
+/** Extended kinds (escape code 0): failures and markers that carry no count. */
+const EXT_EVENT_CODES: Partial<Record<GhostEventKind, number>> = { shatter: 1, charge: 2 };
+const EXT_EVENT_KINDS: Array<GhostEventKind | null> = [null, 'shatter', 'charge'];
+/** Ghost events that count as strikes (`strike()` in trials.ts). */
+export const GHOST_STRIKE_KINDS: ReadonlySet<GhostEventKind> = new Set(['topple', 'crash', 'rack_fall', 'traffic']);
+const isDelivery = (k: GhostEventKind): boolean => k === 'drop' || k === 'stow';
+
+function eventByte(e: GhostEvent): number {
+  const code = EVENT_CODES[e.kind];
+  if (code != null) return code | (isDelivery(e.kind) ? Math.min(31, e.n ?? 0) << 3 : 0);
+  return (EXT_EVENT_CODES[e.kind] ?? 0) << 3;
+}
 
 export interface GhostEvent {
   /** Sample index (level time = i × 0.1). */
   i: number;
   kind: GhostEventKind;
-  /** Pallets delivered by a drop. */
+  /** Pallets delivered by a drop or stow. */
   n?: number;
 }
 
@@ -118,14 +145,21 @@ export interface GhostRecorder {
   track: GhostTrack;
   /** Last trial event sequence number already folded into the track. */
   seenSeq: number;
+  /** `state.delivered` already attributed to drop / stow events. */
+  delivered: number;
+  /** Whether the truck was charging at the last record (a new charge stop is a marker). */
+  charging: boolean;
 }
 
 const GHOST_EVENT_FROM_TRIAL: Partial<Record<TrialEventKind, GhostEventKind>> = {
   pick: 'pick',
   drop: 'drop',
+  stow: 'stow',
   topple: 'topple',
   crash: 'crash',
   rack_fall: 'rack_fall',
+  traffic: 'traffic',
+  shatter: 'shatter',
 };
 
 function snapshotInto(track: GhostTrack, i: number, tr: Trial): void {
@@ -143,6 +177,8 @@ export function createGhostRecorder(tr: Trial): GhostRecorder {
   const rec: GhostRecorder = {
     track: { x: [], y: [], a: [], fork: [], sway: [], stack: [], events: [] },
     seenSeq: tr.state.eventSeq,
+    delivered: tr.state.delivered,
+    charging: Boolean(tr.state.charging),
   };
   snapshotInto(rec.track, 0, tr);
   return rec;
@@ -172,12 +208,16 @@ export function recordGhost(rec: GhostRecorder, tr: Trial): void {
     const kind = GHOST_EVENT_FROM_TRIAL[ev.kind];
     if (!kind) continue;
     const e: GhostEvent = { i: Math.round(ev.t / TRIAL_GHOST_DT), kind };
-    if (kind === 'drop') {
-      const m = /Delivered (\d+)/.exec(ev.text);
-      e.n = m ? Number(m[1]) : 1;
+    if (isDelivery(kind)) {
+      // Structured count: the delivered tally moved by exactly this drop / stow.
+      e.n = tr.state.delivered - rec.delivered;
+      rec.delivered = tr.state.delivered;
     }
     tk.events.push(e);
   }
+  const charging = Boolean(tr.state.charging);
+  if (charging && !rec.charging) tk.events.push({ i, kind: 'charge' });
+  rec.charging = charging;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -276,7 +316,7 @@ export function encodeGhost(track: GhostTrack): string {
   const pushEvents = (evs: GhostEvent[]) => {
     const list = evs.slice(0, 255);
     out.push(list.length);
-    for (const e of list) out.push(EVENT_CODES[e.kind] | (Math.min(31, e.n ?? 0) << 3));
+    for (const e of list) out.push(eventByte(e));
   };
   pushEvents(byIndex.get(0) ?? []);
   for (let i = 1; i < n; i++) {
@@ -351,10 +391,10 @@ export function decodeGhost(encoded: string, maxSamples = ghostSampleCount(TRIAL
     const m = u8();
     for (let e = 0; e < m; e++) {
       const c = u8();
-      const kind = EVENT_KINDS[c & 7];
+      const kind = c & 7 ? EVENT_KINDS[c & 7] : (EXT_EVENT_KINDS[c >> 3] ?? null);
       if (!kind) throw new Error('bad ghost event');
       const ev: GhostEvent = { i, kind };
-      if (kind === 'drop') ev.n = c >> 3;
+      if (isDelivery(kind)) ev.n = c >> 3;
       tk.events.push(ev);
     }
   };
@@ -406,8 +446,8 @@ export type GhostValidation = { ok: true; track: GhostTrack } | { ok: false; rea
 interface LevelFacts {
   level: TrialLevel;
   par: number;
-  /** Bay tiles (centres) of the bays this level delivers to. */
-  bays: Map<string, Array<{ x: number; y: number }>>;
+  /** Valid drop tiles (centres) from `trialDropTargets`: bay tiles and putaway access tiles. */
+  targets: Array<{ x: number; y: number; kind: 'bay' | 'stow'; id: string; reach: number }>;
 }
 
 const factsCache = new Map<string, LevelFacts>();
@@ -418,12 +458,8 @@ function levelFacts(levelId: string): LevelFacts | null {
   const hit = factsCache.get(levelId);
   if (hit && hit.level === level) return hit;
   const tr = createTrial(levelId);
-  const bays = new Map<string, Array<{ x: number; y: number }>>();
-  for (const p of level.pallets) {
-    const cfg = tr.world.map.bays.find((b) => b.id === p.bay);
-    if (cfg) bays.set(p.bay, cfg.tiles.map((t) => ({ x: t.x + 0.5, y: t.y + 0.5 })));
-  }
-  const facts: LevelFacts = { level, par: tr.state.par, bays };
+  const targets = trialDropTargets(level).map((t) => ({ ...t, x: t.x + 0.5, y: t.y + 0.5 }));
+  const facts: LevelFacts = { level, par: tr.state.par, targets };
   factsCache.set(levelId, facts);
   return facts;
 }
@@ -443,10 +479,12 @@ const fail = (reason: string): GhostValidation => ({ ok: false, reason });
  *   [TRIAL_GHOST_MIN_PAR_FRAC × par, TRIAL_GHOST_MAX_TIME];
  * - sample 0 is the level's start pose;
  * - no tick moves the truck further than TRIAL_GHOST_MAX_STEP tiles;
- * - stack never exceeds the level's `stackMax`; picks and drops happen near standstill;
- *   drops happen within reach of a bay this level delivers to;
- * - delivered pallets (sum of drop counts) equal the level's pallet total, the last drop is on
- *   the last sample, and strikes (topples + crashes + rack falls) match the reported strikes;
+ * - stack never exceeds the level's `stackMax`; picks, drops and stows happen near standstill;
+ * - every drop is within reach of one of the level's bays (`trialDropTargets`) whose dock window
+ *   (if any) is open at that moment, and every stow is within reach of a putaway slot;
+ * - delivered pallets (sum of drop + stow counts) equal the level's pallet total, the last
+ *   delivery is on the last sample, no glass shattered, and strikes (topple, crash, rack fall,
+ *   traffic: `GHOST_STRIKE_KINDS`) match the reported strikes;
  * - `stars` equals `starsFor(time, par, strikes)`.
  */
 export function validateGhostRun(run: GhostRun): GhostValidation {
@@ -482,21 +520,28 @@ export function validateGhostRun(run: GhostRun): GhostValidation {
   let delivered = 0;
   let strikes = 0;
   let lastDrop = -1;
+  const isOpen = (bayId: string, t: number) =>
+    [t, t - 1e-6, t + 1e-6].some((u) => windowState(level.windows, bayId, u)?.open ?? true);
   for (const e of track.events) {
-    if (e.kind === 'pick' || e.kind === 'drop') {
+    if (e.kind === 'pick' || isDelivery(e.kind)) {
       // Events attach to the first record after the interaction, so check that tick's motion.
       const moving = Math.min(step(e.i), step(e.i + 1 < n ? e.i + 1 : e.i));
       if (moving > liftStep) return fail('moving_lift');
     }
-    if (e.kind === 'drop') {
+    if (isDelivery(e.kind)) {
       const at = { x: track.x[e.i], y: track.y[e.i] };
-      const near = [...facts.bays.values()].some((tiles) =>
-        tiles.some((t) => Math.hypot(at.x - t.x, at.y - t.y) <= TRIAL_BAY_REACH + 0.1),
+      const want = e.kind === 'drop' ? 'bay' : 'stow';
+      const inReach = facts.targets.filter(
+        (t) => t.kind === want && Math.hypot(at.x - t.x, at.y - t.y) <= t.reach + 0.1,
       );
-      if (!near) return fail('drop_off_bay');
-      delivered += e.n ?? 0;
+      if (!inReach.length) return fail(e.kind === 'drop' ? 'drop_off_bay' : 'stow_off_slot');
+      if (e.kind === 'drop' && !inReach.some((t) => isOpen(t.id, e.i * TRIAL_GHOST_DT))) return fail('dock_closed');
+      if (!e.n || e.n < 1) return fail('empty_delivery');
+      delivered += e.n;
       lastDrop = Math.max(lastDrop, e.i);
-    } else if (e.kind === 'topple' || e.kind === 'crash' || e.kind === 'rack_fall') {
+    } else if (e.kind === 'shatter') {
+      return fail('shattered');
+    } else if (GHOST_STRIKE_KINDS.has(e.kind)) {
       strikes++;
     }
   }

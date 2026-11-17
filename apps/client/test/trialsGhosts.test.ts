@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createTrial, trialLevel, trialRev, type GhostRun } from '@warehouse/sim';
 import type { TrialGhostsResponse } from '@warehouse/protocol';
-import { drive, runOf } from '../../../packages/sim/test/helpers/trialDriver.js';
+import { drive, runOf } from '../../../packages/sim/test/trialDriver.js';
 import {
   CLIENT_ID_KEY,
   GHOST_MODE_KEY,

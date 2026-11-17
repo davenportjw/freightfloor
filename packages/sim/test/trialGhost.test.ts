@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { drive, runOf } from './helpers/trialDriver.js';
+import { drive, recordGuided, runOf, type DriveLog } from './trialDriver.js';
 import {
   TRIAL_GHOST_MAX_STEP,
   TRIAL_LEVELS,
@@ -17,14 +17,22 @@ import {
   type Trial,
 } from '../src/index.js';
 
-const recorded = new Map<string, { tr: Trial; rec: GhostRecorder; run: GhostRun }>();
+const recorded = new Map<string, { tr: Trial; rec: GhostRecorder; run: GhostRun; log: DriveLog | null }>();
+/**
+ * A genuine recorded clear: levels 1–6 (and boosted runs) use the path-following `drive`; the
+ * Challenge levels 7–18 use the challenge-aware `guidedDrive` (charger stops, dock windows,
+ * traffic yields, glass / heavy corner speeds).
+ */
 function recordedRun(id: string, boost = false) {
   const key = `${id}:${boost}`;
   const hit = recorded.get(key);
   if (hit) return hit;
   const tr = createTrial(id);
-  const rec = drive(tr, { boost });
-  const r = { tr, rec, run: runOf(tr, rec) };
+  let rec: GhostRecorder;
+  let log: DriveLog | null = null;
+  if (boost || tr.level.num <= 6) rec = drive(tr, { boost });
+  else ({ rec, log } = recordGuided(tr));
+  const r = { tr, rec, run: runOf(tr, rec), log };
   recorded.set(key, r);
   return r;
 }
@@ -148,6 +156,115 @@ describe('trial ghosts: plausibility validator', () => {
     expect(check((t) => { t.stack[40] = 3; })).toEqual({ ok: false, reason: 'stack_overflow' });
     // Drop away from any bay.
     expect(check((t) => { const d = t.events.find((e) => e.kind === 'drop')!; d.i = 0; t.events.push({ i: t.x.length - 1, kind: 'drop', n: 0 }); })).toEqual({ ok: false, reason: 'drop_off_bay' });
+  });
+});
+
+describe('trial ghosts: Challenge levels 7–18', () => {
+  const challenges = TRIAL_LEVELS.filter((l) => l.num > 6);
+  const BODY_LIMIT = 64 * 1024;
+
+  it.each(challenges.map((l) => [l.id]))('%s: a guided clear validates, round-trips and stays small', (id) => {
+    const { tr, rec, run } = recordedRun(id);
+    expect(tr.state.status).toBe('won');
+    expect(validateGhostRun(run)).toMatchObject({ ok: true });
+    const back = decodeGhost(run.track);
+    expect(back.x.length).toBe(rec.track.x.length);
+    expect(back.stack).toEqual(rec.track.stack);
+    expect(back.events).toEqual(rec.track.events);
+    // Structured delivery counts: drops + stows add up to every pallet.
+    const delivered = back.events.filter((e) => e.kind === 'drop' || e.kind === 'stow').reduce((a, e) => a + (e.n ?? 0), 0);
+    expect(delivered).toBe(tr.level.pallets.length);
+    const body = JSON.stringify({ clientId: 'x'.repeat(36), rev: run.rev, time: run.time, stars: run.stars, strikes: run.strikes, track: run.track });
+    expect(body.length).toBeLessThan(BODY_LIMIT / 4);
+  });
+
+  it('exercises the mechanics: stows, cross-dock, charger stops, dock windows and traffic', () => {
+    const kinds = new Set<string>();
+    let charges = 0;
+    let waits = 0;
+    let yields = 0;
+    let largest = { id: '', chars: 0, time: 0 };
+    for (const l of challenges) {
+      const { run, rec, log } = recordedRun(l.id);
+      for (const e of rec.track.events) kinds.add(e.kind);
+      charges += log?.charges ?? 0;
+      waits += log?.windowWaits ?? 0;
+      yields += log?.trafficYields ?? 0;
+      if (run.track.length > largest.chars) largest = { id: l.id, chars: run.track.length, time: run.time };
+    }
+    expect(kinds.has('stow')).toBe(true);
+    expect(kinds.has('charge')).toBe(true);
+    expect(charges).toBeGreaterThan(0);
+    expect(waits).toBeGreaterThan(0);
+    expect(yields).toBeGreaterThan(0);
+    // eslint-disable-next-line no-console
+    console.info(`[ghost] largest challenge ghost: ${largest.id} ${largest.time.toFixed(1)} s, ${largest.chars} chars`);
+    expect(largest.chars).toBeLessThan(16_000);
+  });
+
+  it('encodes every event kind, including traffic strikes and extended markers', () => {
+    const n = 6;
+    const tk = {
+      x: Array.from({ length: n }, (_, i) => 10 + i * 0.1),
+      y: Array(n).fill(5),
+      a: Array(n).fill(0),
+      fork: Array(n).fill(0.15),
+      sway: Array(n).fill(0),
+      stack: [0, 1, 1, 0, 0, 0],
+      events: [
+        { i: 1, kind: 'pick' as const },
+        { i: 2, kind: 'traffic' as const },
+        { i: 2, kind: 'charge' as const },
+        { i: 3, kind: 'stow' as const, n: 1 },
+        { i: 4, kind: 'shatter' as const },
+        { i: 5, kind: 'drop' as const, n: 3 },
+      ],
+    };
+    expect(decodeGhost(encodeGhost(tk)).events).toEqual(tk.events);
+  });
+
+  it('rejects doctored challenge runs: off-slot stow, closed dock door, hidden traffic strike, shatter', () => {
+    const pick = (pred: (id: string) => boolean) => challenges.find((l) => pred(l.id) && recordedRun(l.id).tr.state.status === 'won')!;
+    const clone = (rec: GhostRecorder) => ({
+      x: [...rec.track.x], y: [...rec.track.y], a: [...rec.track.a], fork: [...rec.track.fork],
+      sway: [...rec.track.sway], stack: [...rec.track.stack], events: rec.track.events.map((e) => ({ ...e })),
+    });
+    const stowLevel = challenges.find((l) => recordedRun(l.id).rec.track.events.some((e) => e.kind === 'stow'))!;
+    {
+      const { rec, run } = recordedRun(stowLevel.id);
+      const t = clone(rec);
+      const st = t.events.find((e) => e.kind === 'stow')!;
+      st.i = 0; // the start pose is nowhere near a putaway slot
+      expect(validateGhostRun({ ...run, track: encodeGhost(t) })).toMatchObject({ ok: false });
+    }
+    const windowed = pick((id) => Boolean(trialLevel(id)!.windows));
+    {
+      const { rec, run } = recordedRun(windowed.id);
+      const level = trialLevel(windowed.id)!;
+      const t = clone(rec);
+      // Move the first windowed-bay drop to a tick when that door is shut (same pose: truck parked).
+      const d = t.events.find((e) => e.kind === 'drop' && level.windows![level.pallets.find((p) => p.bay && level.windows![p.bay])!.bay!])!;
+      expect(d).toBeTruthy();
+      const bay = Object.keys(level.windows!)[0];
+      let shut = -1;
+      for (let i = d.i; i > 0 && shut < 0; i--) {
+        const w = level.windows![bay];
+        const phase = (((i * 0.1 + (w.offset ?? 0)) % w.period) + w.period) % w.period;
+        if (phase >= w.open + 0.2 && Math.hypot(t.x[i] - t.x[d.i], t.y[i] - t.y[d.i]) < 0.01) shut = i;
+      }
+      expect(shut).toBeGreaterThan(0); // the guided driver waited parked at the door
+      if (shut > 0) {
+        d.i = shut;
+        expect(validateGhostRun({ ...run, track: encodeGhost(t) })).toMatchObject({ ok: false });
+      }
+    }
+    const { rec, run } = recordedRun(challenges[0].id);
+    const hidden = clone(rec);
+    hidden.events.push({ i: 3, kind: 'traffic' });
+    expect(validateGhostRun({ ...run, track: encodeGhost(hidden) })).toEqual({ ok: false, reason: 'strike_mismatch' });
+    const broken = clone(rec);
+    broken.events.push({ i: 3, kind: 'shatter' });
+    expect(validateGhostRun({ ...run, track: encodeGhost(broken) })).toEqual({ ok: false, reason: 'shattered' });
   });
 });
 

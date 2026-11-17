@@ -214,7 +214,7 @@ function rgba(hex: string, a: number): string {
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a.toFixed(3)})`;
 }
 
-/** Faint floor trail of a ghost's whole run, brighter for the next 3 s, with pick/drop stops. */
+/** Faint floor trail of a ghost's whole run, brighter for the next 3 s, with pick / drop / stow stops. */
 export function drawGhostTrail(pt: Painter, g: ShownGhost, t: number, dim = 1): void {
   const ctx = pt.ctx;
   const tk = g.track;
@@ -244,7 +244,7 @@ export function drawGhostTrail(pt: Painter, g: ShownGhost, t: number, dim = 1): 
   const i0 = Math.max(0, Math.min(n - 1, Math.floor(t / 0.1)));
   stroke(i0, Math.min(n - 1, i0 + 30), 0.5, Math.max(2.5, 4 * z));
   for (const e of tk.events) {
-    if (e.kind !== 'pick' && e.kind !== 'drop') continue;
+    if (e.kind !== 'pick' && e.kind !== 'drop' && e.kind !== 'stow') continue;
     const ring = pt.circleGrid(tk.x[e.i], tk.y[e.i], 0.2, 16);
     pt.poly(ring, e.kind === 'pick' ? rgba(color, 0.45) : null, rgba(color, 0.7), Math.max(1.5, 2 * z));
   }

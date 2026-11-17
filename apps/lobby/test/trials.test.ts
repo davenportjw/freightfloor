@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { TrialGhostsResponseSchema, TrialRunSubmitResponseSchema } from '@warehouse/protocol';
-import { createTrial, decodeGhost, type GhostRun } from '@warehouse/sim';
-import { drive, runOf } from '../../../packages/sim/test/helpers/trialDriver.js';
+import { createTrial, decodeGhost, TRIAL_LEVELS, type GhostRun } from '@warehouse/sim';
+import { drive, recordGuided, runOf } from '../../../packages/sim/test/trialDriver.js';
 import { buildLobbyServer, InMemoryLobbyStore, publicIdFor, TRIAL_RUN_RATE_PER_MIN, type StoredSiteDoc } from '../src/index.js';
 
 const TEST_SECRET = 'test-hmac-secret-key-for-warehouse-lobby-2026';
@@ -147,6 +147,20 @@ describe('Floor Trials shared ghosts API', () => {
     for (let i = 0; i < TRIAL_RUN_RATE_PER_MIN + 1; i++) codes.push((await submit(app, `client-${i}`, slow, '10.9.9.9')).statusCode);
     expect(codes.slice(0, TRIAL_RUN_RATE_PER_MIN).every((c) => c === 200)).toBe(true);
     expect(codes.at(-1)).toBe(429);
+    await app.close();
+  });
+
+  it('accepts genuine Challenge clears (putaway stows, dock windows, chargers, traffic)', async () => {
+    const { app } = await makeApp();
+    for (const id of ['putaway', 'cross-dock', 'dock-windows', 'low-battery', 'traffic', 'night-shift'].filter((x) => TRIAL_LEVELS.some((l) => l.id === x))) {
+      const tr = createTrial(id);
+      const { rec } = recordGuided(tr);
+      expect(tr.state.status).toBe('won');
+      const res = await submit(app, `client-${id}`, runOf(tr, rec), `10.1.0.${id.length}`);
+      expect(res.statusCode, `${id}: ${res.body}`).toBe(200);
+      const g = TrialGhostsResponseSchema.parse((await app.inject({ method: 'GET', url: `/api/trials/${id}/ghosts` })).json());
+      expect(g.top[0].time).toBe(tr.state.t);
+    }
     await app.close();
   });
 

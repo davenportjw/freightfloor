@@ -411,10 +411,10 @@ Other players' runs drive the level with you as translucent **ghost trucks**, so
 | **My best** | Your own fastest clear, saved in this browser. It works offline. |
 | **Off** | No ghosts. |
 
-- Up to three ghosts (World #1, Next to beat, My best) are drawn at once, each labelled with callsign and time. The highlighted one is brighter and paints a faint trail of its whole route on the floor, brighter for the next 3 s, with rings where it lifted (filled) and dropped (open).
-- Ghosts start on your first input and follow your level clock. They show forks, stack and sway exactly as recorded. Under *prefers-reduced-motion* the ghost stacks do not lean.
+- Up to three ghosts (World #1, Next to beat, My best) are drawn at once, each labelled with callsign and time. The highlighted one is brighter and paints a faint trail of its whole route on the floor, brighter for the next 3 s, with rings where it lifted (filled) and dropped or stowed (open).
+- Ghosts start on your first input and follow your level clock. They show forks, stack and sway exactly as recorded. Under *prefers-reduced-motion* the ghost stacks do not lean. On Lights Out levels the ghosts and their trail show through the fog, slightly dimmer, so the teaching ghost still shows the line.
 - Every attempt is recorded. On a clear that beats your saved best time, the run is kept locally and shared with the server under your callsign (your game callsign, or the generated one if you have never joined a shift). A best that could not be shared is retried the next time you open the level.
-- The server keeps only each player's fastest run per level and checks it against the level rules first (start pose, speed, stack limit, deliveries, strikes, stars). Runs are tied to a level's rules revision, so changing a level resets its ghosts.
+- The server keeps only each player's fastest run per level and checks it against the level rules first (start pose, speed, stack limit, drops at the right bays while their dock doors are open, stows at the right slots, deliveries, strikes including traffic, stars). Runs are tied to a level's rules revision, so changing a level resets its ghosts.
 - If the server can't be reached, the selector says so. My best still works and no ghost is made up.
 
 ### Feedback
