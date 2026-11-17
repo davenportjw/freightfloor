@@ -20,6 +20,7 @@ import {
   DISPATCH_PRIORITIES,
   DISPATCH_SOURCE_ZONES,
   DISPATCH_TARGET_BAYS,
+  GEMINI_DECISION_MODEL,
   type A2uiScreenMessage,
   type DispatchersCallMinigame,
   type DispatchersCallRevealMessage,
@@ -42,13 +43,17 @@ import {
   type World,
 } from '@warehouse/sim';
 import {
+  DECISIONS_STANDBY_COOLDOWN_MS,
   DEFAULT_GCP_PROJECT,
   DEFAULT_GEMINI_LOCATION,
   DEFAULT_GEMINI_MODEL,
+  isDecisionsProviderUnavailableError,
+  SdkDecisionsApiTransport,
+  type DecisionsApiTransport,
   type RawBrainResponse,
 } from './brain.js';
 import { REAL_MS_PER_GAME_MIN } from './governance.js';
-import type { PersistenceStore } from './persistence.js';
+import { estimateModelCallCostUsd, type PersistenceStore } from './persistence.js';
 
 // ---------------------------------------------------------------------------
 // Flag
@@ -164,6 +169,243 @@ export const DISPATCHERS_CALL_SYSTEM_INSTRUCTION = [
 ].join(' ');
 
 /**
+ * Deterministic, guaranteed-valid candidate dispatches for a live floor situation.
+ * Used both to ground generative Flash-Lite proposals (preventing duplicate/invalid-bay skips)
+ * and as the closed-set option menu for `DecisionsDispatchersCallClient` (`gemini-decision-1`).
+ */
+export function buildDispatchersCallCandidates(
+  t: DispatchersCallTelemetry,
+): DispatchersCallOption[] {
+  const s = t.situation;
+  const openOutboundBays = t.bays
+    .filter((b) => !b.departing && b.id !== 'RET' && t.targetBays.includes(b.id))
+    .slice();
+  const byFullest = openOutboundBays
+    .slice()
+    .sort((a, b) => b.load / Math.max(1, b.cap) - a.load / Math.max(1, a.cap));
+  const byEmptiest = openOutboundBays
+    .slice()
+    .sort((a, b) => a.load / Math.max(1, a.cap) - b.load / Math.max(1, b.cap));
+
+  const asTargetBay = (id: string | undefined): Required<DispatchParams>['targetBay'] =>
+    id && (DISPATCH_TARGET_BAYS as readonly string[]).includes(id)
+      ? (id as Required<DispatchParams>['targetBay'])
+      : 'auto';
+
+  const primaryBay = asTargetBay(byFullest[0]?.id ?? t.targetBays[0] ?? 'auto');
+  const emptyBay = asTargetBay(
+    byEmptiest.find((b) => b.id !== primaryBay)?.id ?? byEmptiest[0]?.id ?? 'auto',
+  );
+  const retBay: Required<DispatchParams>['targetBay'] = t.targetBays.includes('RET')
+    ? 'RET'
+    : emptyBay;
+  const nearCapBay = asTargetBay(
+    s.bayId && t.targetBays.includes(s.bayId) ? s.bayId : primaryBay,
+  );
+  const clampCount = (n: number) => Math.max(1, Math.min(DISPATCH_MAX_COUNT, Math.round(n)));
+
+  let raw: Array<{ label: string; action: Required<DispatchParams> }>;
+  if (s.kind === 'trailer_near_cap') {
+    const needed = clampCount(Math.max(1, s.bayCap - s.bayLoad));
+    raw = [
+      {
+        label: `Close ${nearCapBay} trailer now`,
+        action: {
+          sourceZone: 'any',
+          targetBay: nearCapBay,
+          priority: 'p0',
+          count: needed,
+          mode: 'reroute_and_spawn',
+        },
+      },
+      {
+        label: `Stage fresh wave at ${emptyBay}`,
+        action: {
+          sourceZone: 'general',
+          targetBay: emptyBay,
+          priority: 'urgent',
+          count: 3,
+          mode: 'spawn_only',
+        },
+      },
+      {
+        label: `Route high-value to ${emptyBay === nearCapBay ? 'auto' : emptyBay}`,
+        action: {
+          sourceZone: 'high',
+          targetBay: emptyBay === nearCapBay ? 'auto' : emptyBay,
+          priority: 'urgent',
+          count: 2,
+          mode: 'reroute_and_spawn',
+        },
+      },
+    ];
+  } else if (s.kind === 'hazmat_backlog') {
+    raw = [
+      {
+        label: `Contain Hazmat at ${retBay}`,
+        action: {
+          sourceZone: 'haz',
+          targetBay: retBay,
+          priority: 'p0',
+          count: clampCount(Math.max(2, s.hazmatOpen)),
+          mode: 'reroute_and_spawn',
+        },
+      },
+      {
+        label: `Reroute open Hazmat only`,
+        action: {
+          sourceZone: 'haz',
+          targetBay: retBay,
+          priority: 'urgent',
+          count: clampCount(Math.max(1, s.hazmatOpen)),
+          mode: 'reroute_only',
+        },
+      },
+      {
+        label: `Keep general freight moving`,
+        action: {
+          sourceZone: 'general',
+          targetBay: emptyBay,
+          priority: 'standard',
+          count: 3,
+          mode: 'spawn_only',
+        },
+      },
+    ];
+  } else if (s.kind === 'p0_surge') {
+    raw = [
+      {
+        label: `Clear open P0s to ${primaryBay}`,
+        action: {
+          sourceZone: 'any',
+          targetBay: primaryBay,
+          priority: 'p0',
+          count: clampCount(Math.max(2, s.openP0)),
+          mode: 'reroute_only',
+        },
+      },
+      {
+        label: `Urgent general wave to ${emptyBay}`,
+        action: {
+          sourceZone: 'general',
+          targetBay: emptyBay,
+          priority: 'urgent',
+          count: 3,
+          mode: 'spawn_only',
+        },
+      },
+      {
+        label: `Cold chain push to ${emptyBay === primaryBay ? 'auto' : emptyBay}`,
+        action: {
+          sourceZone: 'cold',
+          targetBay: emptyBay === primaryBay ? 'auto' : emptyBay,
+          priority: 'urgent',
+          count: 2,
+          mode: 'reroute_and_spawn',
+        },
+      },
+    ];
+  } else if (s.kind === 'dock_backlog') {
+    raw = [
+      {
+        label: `Drain general racks to ${primaryBay}`,
+        action: {
+          sourceZone: 'general',
+          targetBay: primaryBay,
+          priority: 'urgent',
+          count: 4,
+          mode: 'reroute_only',
+        },
+      },
+      {
+        label: `Fast-track Bulk to ${emptyBay}`,
+        action: {
+          sourceZone: 'bulk',
+          targetBay: emptyBay,
+          priority: 'urgent',
+          count: 3,
+          mode: 'reroute_and_spawn',
+        },
+      },
+      {
+        label: `Cold storage rush to ${emptyBay === primaryBay ? 'auto' : emptyBay}`,
+        action: {
+          sourceZone: 'cold',
+          targetBay: emptyBay === primaryBay ? 'auto' : emptyBay,
+          priority: 'p0',
+          count: 2,
+          mode: 'reroute_and_spawn',
+        },
+      },
+    ];
+  } else {
+    // spill
+    raw = [
+      {
+        label: `Reroute freight to ${emptyBay}`,
+        action: {
+          sourceZone: 'any',
+          targetBay: emptyBay,
+          priority: 'urgent',
+          count: 3,
+          mode: 'reroute_only',
+        },
+      },
+      {
+        label: `Secure Hazmat to ${retBay}`,
+        action: {
+          sourceZone: 'haz',
+          targetBay: retBay,
+          priority: 'p0',
+          count: 2,
+          mode: 'reroute_and_spawn',
+        },
+      },
+      {
+        label: `Spawn clean general wave`,
+        action: {
+          sourceZone: 'general',
+          targetBay: 'auto',
+          priority: 'standard',
+          count: 3,
+          mode: 'spawn_only',
+        },
+      },
+    ];
+  }
+
+  // Deduplicate actions strictly while preserving order.
+  const deduped: DispatchersCallOption[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const key = JSON.stringify(item.action);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push({
+      idx: deduped.length,
+      label: item.label.slice(0, DISPATCHERS_CALL_LABEL_MAX),
+      action: item.action,
+    });
+  }
+  return deduped;
+}
+
+export function buildDispatchersCallQuestionText(s: DispatchersCallSituation): string {
+  switch (s.kind) {
+    case 'trailer_near_cap':
+      return `Bay ${s.bayId ?? 'outbound'} is at ${s.bayLoad}/${s.bayCap}. What is your dispatch call?`;
+    case 'p0_surge':
+      return `${s.openP0} P0 critical orders are open on the floor. How do we route next?`;
+    case 'hazmat_backlog':
+      return `${s.hazmatOpen} Hazmat orders are backed up. Where should dispatch focus?`;
+    case 'dock_backlog':
+      return `${s.dockOpen} inbound dock pallets are waiting. How do we clear rack space?`;
+    default:
+      return `${s.spills} active floor spill${s.spills === 1 ? '' : 's'} ahead. Which dispatch keeps flow moving?`;
+  }
+}
+
+/**
  * Render the model prompt from numeric telemetry. `untrusted` (player display names,
  * client ids) is asserted absent from the rendered text.
  */
@@ -172,6 +414,11 @@ export function renderDispatchersCallPrompt(
   untrusted: readonly string[] = [],
 ): { systemInstruction: string; prompt: string } {
   const s = t.situation;
+  const candidates = buildDispatchersCallCandidates(t);
+  const candidateLines = candidates.map(
+    (c) =>
+      `candidate_${c.idx}: label="${c.label}" sourceZone=${c.action.sourceZone} targetBay=${c.action.targetBay} priority=${c.action.priority} count=${c.action.count} mode=${c.action.mode}`,
+  );
   const lines = [
     `situation=${s.kind}`,
     `spills=${s.spills} openP0=${s.openP0} hazmatOpen=${s.hazmatOpen} dockPutawayOpen=${s.dockOpen}`,
@@ -183,6 +430,7 @@ export function renderDispatchersCallPrompt(
     `bays ${t.bays.map((b) => `${b.id}=${b.load}/${b.cap}${b.departing ? '(departing)' : ''}`).join(' ')}`,
     `targetBays=${t.targetBays.join(',')}`,
     `sourceZones=${DISPATCH_SOURCE_ZONES.join(',')}`,
+    ...candidateLines,
   ];
   const prompt = lines.join('\n');
   const list = untrusted.filter((x): x is string => typeof x === 'string' && x.length > 0);
@@ -325,6 +573,7 @@ export interface DispatchersCallModelClient {
     prompt: string;
     responseSchema: Record<string, unknown>;
     signal: AbortSignal;
+    telemetry?: DispatchersCallTelemetry;
   }): Promise<RawBrainResponse>;
 }
 
@@ -347,6 +596,7 @@ export class VertexDispatchersCallClient implements DispatchersCallModelClient {
     prompt: string;
     responseSchema: Record<string, unknown>;
     signal: AbortSignal;
+    telemetry?: DispatchersCallTelemetry;
   }): Promise<RawBrainResponse> {
     const res = await this.ai.models.generateContent({
       model: this.model,
@@ -368,6 +618,109 @@ export class VertexDispatchersCallClient implements DispatchersCallModelClient {
       tokensIn: res.usageMetadata?.promptTokenCount ?? 0,
       tokensOut: res.usageMetadata?.candidatesTokenCount ?? 0,
       model: this.model,
+    };
+  }
+}
+
+/**
+ * Gemini Decisions API (`gemini-decision-1`) client for Dispatcher's Call.
+ * Evaluates the deterministic situational candidate dispatches via a single `choice` pass
+ * and surfaces the winning option + calibrated confidence in the reveal reason.
+ */
+export class DecisionsDispatchersCallClient implements DispatchersCallModelClient {
+  public readonly model = GEMINI_DECISION_MODEL;
+  private readonly transport: DecisionsApiTransport;
+  private readonly fallbackClient?: DispatchersCallModelClient;
+  private readonly standbyCooldownMs: number;
+  private standbyUntilMs = 0;
+
+  constructor(opts?: {
+    apiKey?: string;
+    transport?: DecisionsApiTransport;
+    fallbackClient?: DispatchersCallModelClient | null;
+    standbyCooldownMs?: number;
+  }) {
+    this.transport = opts?.transport ?? new SdkDecisionsApiTransport({ apiKey: opts?.apiKey });
+    this.standbyCooldownMs = opts?.standbyCooldownMs ?? DECISIONS_STANDBY_COOLDOWN_MS;
+    if (opts?.fallbackClient !== null && (opts?.fallbackClient || !opts?.transport)) {
+      this.fallbackClient = opts?.fallbackClient ?? new VertexDispatchersCallClient();
+    }
+  }
+
+  async generate(params: {
+    systemInstruction: string;
+    prompt: string;
+    responseSchema: Record<string, unknown>;
+    signal: AbortSignal;
+    telemetry?: DispatchersCallTelemetry;
+  }): Promise<RawBrainResponse> {
+    if (this.fallbackClient && Date.now() < this.standbyUntilMs) {
+      return this.fallbackClient.generate(params);
+    }
+    if (!params.telemetry) {
+      throw new Error('DecisionsDispatchersCallClient requires DispatchersCallTelemetry');
+    }
+    const candidates = buildDispatchersCallCandidates(params.telemetry);
+    if (candidates.length < DISPATCHERS_CALL_MIN_OPTIONS) {
+      throw new Error('Insufficient situational candidates for Dispatcher\'s Call');
+    }
+    const criteria: Record<string, string> = {};
+    for (const c of candidates) {
+      criteria[`opt_${c.idx}`] = `${c.label}: ${describeDispatchAction(c.action)}`;
+    }
+    let res;
+    try {
+      res = await this.transport.create(
+        {
+          model: this.model,
+          input: params.prompt,
+          questions: {
+            dispatch_pick: {
+              type: 'choice',
+              instructions:
+                'Given the live warehouse floor telemetry, which dispatch option maximizes on-time pallet deliveries over the next 30 game-minutes?',
+              criteria,
+            },
+          },
+        },
+        params.signal,
+      );
+      this.standbyUntilMs = 0;
+    } catch (err) {
+      if (this.fallbackClient && isDecisionsProviderUnavailableError(err)) {
+        this.standbyUntilMs = Date.now() + this.standbyCooldownMs;
+        return this.fallbackClient.generate(params);
+      }
+      throw err;
+    }
+    const ans = res.answers?.dispatch_pick;
+    if (!ans || ans.type !== 'choice') {
+      throw new Error('Missing dispatch_pick choice answer from gemini-decision-1');
+    }
+    const pickedIdx = Number.parseInt(ans.choice.replace('opt_', ''), 10);
+    const geminiPick =
+      Number.isInteger(pickedIdx) && pickedIdx >= 0 && pickedIdx < candidates.length
+        ? pickedIdx
+        : 0;
+    const picked = candidates[geminiPick];
+    const confPct = Math.round(Math.max(0, Math.min(1, ans.confidence)) * 100);
+    const proposalPayload = {
+      question: buildDispatchersCallQuestionText(params.telemetry.situation),
+      options: candidates.map((c) => ({
+        label: c.label,
+        ...c.action,
+      })),
+      geminiPick,
+      reason: `${picked.label} · ${confPct}% conf`,
+    };
+    const usage = res.usage as { total_input_tokens?: number; total_tokens?: number } | undefined;
+    return {
+      text: JSON.stringify(proposalPayload),
+      tokensIn: usage?.total_input_tokens ?? usage?.total_tokens ?? 0,
+      tokensOut: 0,
+      model: this.model,
+      output: picked.label,
+      confidence: ans.confidence,
     };
   }
 }
@@ -595,12 +948,15 @@ export class DispatchersCallCoordinator {
       const { systemInstruction, prompt } = renderDispatchersCallPrompt(telemetry, untrusted);
       const responseSchema = dispatchersCallResponseSchema(telemetry.targetBays);
       const raw = await withTimeout(this.timeoutMs, (signal) =>
-        this.opts.client.generate({ systemInstruction, prompt, responseSchema, signal }),
+        this.opts.client.generate({ systemInstruction, prompt, responseSchema, signal, telemetry }),
       );
       model = raw.model ?? model;
       // Budget ledger failures are logged, never treated as a model failure (no re-call).
       try {
-        await this.opts.budget.recordUsage('agent', raw.tokensIn, raw.tokensOut, undefined, this.now());
+        const costUsd = model.includes(GEMINI_DECISION_MODEL)
+          ? estimateModelCallCostUsd(model, raw.tokensIn, raw.tokensOut)
+          : undefined;
+        await this.opts.budget.recordUsage('agent', raw.tokensIn, raw.tokensOut, costUsd, this.now());
       } catch (usageErr) {
         this.logger.warn('usage record failed', {
           vid: v.id,

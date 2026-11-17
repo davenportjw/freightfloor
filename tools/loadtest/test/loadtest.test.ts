@@ -310,6 +310,14 @@ describe('@warehouse/loadtest — 128-client full-flow load & Gemini pilot harne
   }, 60000);
 
   it('enforces strict no-mock error holding when Gemini pilot fails or exhausts budget', async () => {
+    // Wait briefly if any upstream lobby->site proxy sockets from the 128-client run are still draining.
+    const drainDeadline = Date.now() + 2000;
+    while (
+      Date.now() < drainDeadline &&
+      [...sites.values()].some((s) => s.instance.clients.size >= 32)
+    ) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
     // The previous test's 128 drivers just left; the lobby keeps their seats on a 45 s
     // reconnect hold (SEAT_HOLD_MS), so a pilot joining through that lobby would be seated
     // as a spectator and never plan. Use a lobby with a fresh seat queue so the pilots drive.

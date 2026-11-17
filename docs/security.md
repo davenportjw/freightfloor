@@ -65,6 +65,7 @@ Display names must match `^[A-Za-z0-9 _.\-]{2,20}$` after `NFKC` normalization a
 - **Rate-limiter memory**: the per-IP token bucket evicts idle entries (idle ≥ full refill time, swept every 60 s) and caps tracked keys at 50,000 (LRU).
 - **Frame cap**: the lobby's proxy `WebSocketServer` uses `maxPayload: MAX_WS_FRAME_BYTES` (4096); oversized frames close with `1009` before reaching the site.
 - **HMAC secret**: there is no literal fallback secret. On Cloud Run (`K_SERVICE` set) a missing `TICKET_HMAC_SECRET` is fatal; locally the lobby generates a random per-process secret and logs a warning (set the same `TICKET_HMAC_SECRET` for lobby and site to run them together).
+- **Scoped Decisions API key exception (`gemini-decisions-api-key`)**: While `POST /v1beta/decisions` (`gemini-decision-1`) awaits native Google Cloud ADC parity, `infra/main.tf` provisions a dedicated `google_apikeys_key` restricted strictly to `generativelanguage.googleapis.com` and stores its key string in Secret Manager (`gemini-decisions-api-key`, accessor granted solely to `warehouse-site` SA, injected via `secret_key_ref` into `GEMINI_DECISIONS_API_KEY`). No API key is ever hardcoded in repository source, and `@warehouse/site` runs a daily 24-hour ADC parity check (`probeDecisionsAdcSupport`) that automatically switches transport auth to ADC as soon as Google enables it.
 
 ---
 

@@ -3,6 +3,7 @@ import { Firestore } from '@google-cloud/firestore';
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
 import { GoogleAuth } from 'google-auth-library';
 import {
+  GEMINI_DECISION_MODEL,
   PROXY_HEADER_NAME,
   ServerMessageSchema,
   SiteIdSchema,
@@ -579,9 +580,10 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
       }
     }
 
-    if (report.brainModel !== 'gemini-3.5-flash-lite') {
+    const allowedBrainModels = new Set<string>([GEMINI_DECISION_MODEL, 'gemini-3.5-flash-lite']);
+    if (!allowedBrainModels.has(report.brainModel)) {
       report.errors.push(
-        `Expected brainHealth.model === 'gemini-3.5-flash-lite', got '${report.brainModel}'`
+        `Expected brainHealth.model in ['${GEMINI_DECISION_MODEL}', 'gemini-3.5-flash-lite'], got '${report.brainModel}'`
       );
     }
 
@@ -721,7 +723,7 @@ export async function runLiveSmoke(options: LiveSmokeOptions): Promise<LiveSmoke
     report.deltasReceived > 0 &&
     report.siteHealthOk &&
     report.siteStateOk &&
-    report.brainModel === 'gemini-3.5-flash-lite' &&
+    (report.brainModel === GEMINI_DECISION_MODEL || report.brainModel === 'gemini-3.5-flash-lite') &&
     report.transferVerified &&
     report.errors.length === 0;
 

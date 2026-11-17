@@ -6,6 +6,8 @@ import {
   buildAiRecap,
   createRunAiLog,
   directiveEchoFrom,
+  formatDecisionConfidence,
+  formatDecisionOutput,
   pushCapped,
   recapDecisionText,
   recapDirectiveText,
@@ -237,6 +239,59 @@ describe('rival reasoning pill', () => {
     expect(rivalReasonText({ id: 'FL-03' }, { ...d, note: '   ' })).toBeNull();
     expect(rivalReasonText(null, d)).toBeNull();
     expect(rivalReasonText({ id: 'FL-03' }, null)).toBeNull();
+  });
+
+  it('displays structured decision output and calibrated confidence for Decisions API & Flash models', () => {
+    expect(formatDecisionOutput('contract', { orderIds: ['42', '19'] })).toBe('#42 + #19');
+    expect(formatDecisionOutput('hazard', { choice: 'reroute' })).toBe('reroute');
+    expect(formatDecisionOutput('cards', { keep: ['C1', 'C2'] })).toBe('keep C1, C2');
+    expect(formatDecisionOutput('tactics', { speed: 1.15, buffer: 2, chargeAt: 22 })).toBe('spd 1.15 · buf 2 · bat 22%');
+    expect(formatDecisionConfidence(0.876)).toBe('88% conf');
+    expect(formatDecisionConfidence(undefined)).toBeNull();
+
+    // Pure gemini-decision-1 broadcast (0 output tokens -> empty prose note, real decision + confidence)
+    const dm = {
+      vid: 'FL-03',
+      kind: 'contract' as const,
+      decision: { orderIds: ['42'] },
+      confidence: 0.88,
+      note: '',
+      latencyMs: 178.4,
+    };
+    expect(rivalReasonText({ id: 'FL-03', strategy: 'Sprinter' }, dm)).toBe(
+      'FL-03 Sprinter → #42 · 88% conf · 178 ms',
+    );
+
+    // Generative model with both structured decision output and distinct prose note
+    const gen = {
+      vid: 'FL-03',
+      kind: 'contract' as const,
+      decision: { orderIds: ['42'] },
+      note: 'Close E2 trailer first',
+      latencyMs: 390,
+    };
+    expect(rivalReasonText({ id: 'FL-03', strategy: 'Sprinter' }, gen)).toBe(
+      'FL-03 Sprinter → #42: "Close E2 trailer first" · 390 ms',
+    );
+
+    // Post-run "You vs Gemini" recap keeps zero-note Decisions API entries via structured output + confidence
+    const log = createRunAiLog('v1:2');
+    pushCapped(log.rivalDecisions, {
+      vid: 'FL-03',
+      reqId: 10,
+      kind: 'hazard',
+      note: '',
+      latencyMs: 165,
+      model: 'gemini-decision-1',
+      decision: { choice: 'reroute' },
+      confidence: 0.92,
+      at: 10,
+    });
+    const recap = buildAiRecap(log, () => 'Steady');
+    expect(recap?.rival).toHaveLength(1);
+    expect(recapDecisionText(recap!.rival[0]!)).toBe(
+      'FL-03 Steady · hazard → reroute · 92% conf · 165 ms',
+    );
   });
 
   it('rival_snipe bubbles over the sniping AI and tolerates an omitted reason', () => {

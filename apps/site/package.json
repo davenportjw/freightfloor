@@ -6,6 +6,8 @@
   "scripts": {
     "build": "wireit",
     "start": "node dist/index.js",
+    "brain:variants": "node dist/try-variants.js",
+    "brain:check-adc": "node dist/check-decisions-adc.js",
     "test": "wireit",
     "test:live": "wireit",
     "test:redteam": "wireit"
@@ -59,7 +61,7 @@
     "@google-cloud/firestore": "^7.11.0",
     "@google-cloud/pubsub": "^4.10.0",
     "@google-cloud/secret-manager": "^5.6.0",
-    "@google/genai": "^1.0.0",
+    "@google/genai": "^3.3.0",
     "@warehouse/armor": "*",
     "@warehouse/protocol": "*",
     "@warehouse/sim": "*",

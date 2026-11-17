@@ -459,6 +459,8 @@ export interface LastDecisionRecord {
   latencyMs: number;
   inputTokens?: number;
   outputTokens?: number;
+  output?: string;
+  confidence?: number;
   t: number;
 }
 
@@ -774,6 +776,10 @@ export interface ContractOption {
   destSite: string | null;
   p0: boolean;
   bay: string;
+  zone?: string;
+  bayLoad?: number;
+  bayCap?: number;
+  isRivalTarget?: boolean;
 }
 
 export interface HazardOption {
@@ -821,6 +827,9 @@ export interface AgentContext {
   slack: number | null;
   difficulty: DifficultyKey;
   tactics: Tactics;
+  combo?: number;
+  activeGoals?: string[];
+  rivalScoreGap?: number | null;
   hazardId?: number;
   hazardTile?: Point;
   standings?: { rank: number; totalVehicles: number; leaderPts: number; medianShipped: number };
@@ -842,6 +851,8 @@ export interface DecisionMeta {
   latencyMs: number;
   inputTokens?: number;
   outputTokens?: number;
+  output?: string;
+  confidence?: number;
 }
 
 export interface ContractDecision {
@@ -892,6 +903,8 @@ export interface DecisionJournalEntry {
   latencyMs: number;
   inputTokens?: number;
   outputTokens?: number;
+  output?: string;
+  confidence?: number;
 }
 
 export interface Transfer {

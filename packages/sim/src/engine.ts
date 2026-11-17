@@ -2265,6 +2265,32 @@ export function assign(w: World, v: Vehicle, orders: Order[]): void {
   }
 }
 
+function matchesDirectiveZoneToken(orderZone: string, token: string): boolean {
+  const oZone = orderZone.toUpperCase();
+  const z = token.toUpperCase();
+  if (z === oZone) return true;
+  if (z === 'HAZ' && oZone === 'Z') return true;
+  if (z === 'COLD' && oZone === 'W') return true;
+  if (z === 'BULK' && oZone === 'X') return true;
+  if (z === 'HIGH' && oZone === 'U') return true;
+  if (z === 'GENERAL' && ['A', 'B', 'C', 'D', 'E'].includes(oZone)) return true;
+  return false;
+}
+
+function directivePreferredZones(dir: AgentDirective | null | undefined): string[] {
+  if (!dir) return [];
+  if (dir.preferredZones?.length) return dir.preferredZones;
+  if (dir.focusZones?.length) return dir.focusZones;
+  return dir.preferredZone ? [dir.preferredZone] : [];
+}
+
+function directivePreferredBays(dir: AgentDirective | null | undefined): string[] {
+  if (!dir) return [];
+  if (dir.preferredBays?.length) return dir.preferredBays;
+  if (dir.focusBays?.length) return dir.focusBays;
+  return dir.preferredBay ? [dir.preferredBay] : [];
+}
+
 export function scoreOrder(w: World, v: Vehicle, o: Order, refPoint: Point = v.tile): number {
   const dist = manhattan(refPoint.x, refPoint.y, o.slot.ax, o.slot.ay);
   const slack = Math.round((o.due - w.t) * 10) / 10;
@@ -2281,25 +2307,19 @@ export function scoreOrder(w: World, v: Vehicle, o: Order, refPoint: Point = v.t
 
   const dir = v.directive;
   if (dir) {
-    const oZone = o.slot.zone.toUpperCase();
     const oBay = o.bay.toUpperCase();
-    const matchesZoneToken = (token: string): boolean => {
-      const z = token.toUpperCase();
-      if (z === oZone) return true;
-      if (z === 'HAZ' && oZone === 'Z') return true;
-      if (z === 'COLD' && oZone === 'W') return true;
-      if (z === 'BULK' && oZone === 'X') return true;
-      if (z === 'HIGH' && oZone === 'U') return true;
-      return false;
-    };
+    const prefZones = directivePreferredZones(dir);
+    const prefBays = directivePreferredBays(dir);
+    const matchesZoneToken = (token: string): boolean =>
+      matchesDirectiveZoneToken(o.slot.zone, token);
 
-    if (dir.preferredZones?.length && dir.preferredZones.some(matchesZoneToken)) {
+    if (prefZones.length && prefZones.some(matchesZoneToken)) {
       bonus += 45;
     }
     if (dir.avoidZones?.length && dir.avoidZones.some(matchesZoneToken)) {
       bonus -= 60;
     }
-    if (dir.preferredBays?.length && dir.preferredBays.some((b) => b.toUpperCase() === oBay)) {
+    if (prefBays.length && prefBays.some((b) => b.toUpperCase() === oBay)) {
       bonus += 40;
     }
     if (dir.priority === 'p0_first' && o.p0) {
@@ -2309,11 +2329,14 @@ export function scoreOrder(w: World, v: Vehicle, o: Order, refPoint: Point = v.t
       bonus += o.value * 1.4;
     } else if (dir.priority === 'nearest') {
       bonus += Math.max(0, 40 - dist * 1.6);
-    } else if (dir.priority === 'transfers' && (o.isTransfer || o.fromSite || o.destSite)) {
+    } else if (
+      (dir.priority === 'transfers' || dir.priority === 'transfers_first') &&
+      (o.isTransfer || o.fromSite || o.destSite)
+    ) {
       bonus += 45;
-    } else if (dir.priority === 'zone_focus' && dir.preferredZones?.some(matchesZoneToken)) {
+    } else if (dir.priority === 'zone_focus' && prefZones.some(matchesZoneToken)) {
       bonus += 30;
-    } else if (dir.priority === 'bay_focus' && dir.preferredBays?.some((b) => b.toUpperCase() === oBay)) {
+    } else if (dir.priority === 'bay_focus' && prefBays.some((b) => b.toUpperCase() === oBay)) {
       bonus += 30;
     }
   }
@@ -2612,6 +2635,18 @@ function buildAgentContext(
     ? shippedSorted[Math.floor(shippedSorted.length / 2)]
     : 0;
 
+  const hand = w.cards[v.id];
+  const activeGoals = hand?.cards
+    ?.filter((c) => c.status === 'active')
+    .map((c) =>
+      c.type === 'route' && c.zone && c.bay
+        ? `route(${c.zone}->${c.bay}):${c.progress}/${c.goal}`
+        : `${c.type}:${c.progress}/${c.goal}`,
+    );
+
+  const pairedHuman = w.vehicles.find((x) => x.human && !x.isBot && x.rivalId === v.id);
+  const rivalScoreGap = pairedHuman ? Math.round(v.sPts - pairedHuman.sPts) : null;
+
   return {
     agentId: v.id,
     persona: v.strategy,
@@ -2627,6 +2662,9 @@ function buildAgentContext(
     slack: slackOf(w, v),
     difficulty: w.difficulty,
     tactics: { ...v.tactics },
+    combo: v.combo ?? 1,
+    ...(activeGoals && activeGoals.length > 0 ? { activeGoals } : {}),
+    rivalScoreGap,
     standings: {
       rank: rank || 1,
       totalVehicles: w.vehicles.length,
@@ -2698,12 +2736,23 @@ export function emitContractRequestIfNeeded(w: World, v: Vehicle): DecisionReque
     .sort((a, b) => b.score - a.score)
     .slice(0, 6);
 
+  const bayById = new Map(w.bays.map((b) => [b.id, b] as const));
+  const rivalOrderIds = new Set<number>();
+  for (const h of w.vehicles) {
+    if (!h.human || h.isBot || h.rivalId !== v.id) continue;
+    for (const ho of h.orders) rivalOrderIds.add(ho.id);
+    if (h.fareOffer?.options) {
+      for (const fo of h.fareOffer.options) rivalOrderIds.add(fo.orderId);
+    }
+  }
+
   const options: ContractOption[] = scored.map(({ o, dist, slack }) => {
     const district: DistrictKind =
       w.map.zoneKind[o.slot.zone] || floorKind(w.map, o.slot.ax, o.slot.ay);
     const congestion = Number(
       (w.heat[o.slot.ay * w.map.w + o.slot.ax] || 0).toFixed(2),
     );
+    const bayInfo = bayById.get(o.bay);
     return {
       id: String(o.id),
       orderId: o.id,
@@ -2717,6 +2766,9 @@ export function emitContractRequestIfNeeded(w: World, v: Vehicle): DecisionReque
       destSite: o.destSite || null,
       p0: o.p0,
       bay: o.bay,
+      zone: o.slot.zone,
+      ...(bayInfo && bayInfo.cap > 0 ? { bayLoad: bayInfo.load, bayCap: bayInfo.cap } : {}),
+      ...(rivalOrderIds.has(o.id) ? { isRivalTarget: true } : {}),
     };
   });
 
@@ -2849,6 +2901,11 @@ export function applyDecision(
   }
 
   let reasonText = '';
+  let outputText = '';
+  const confSuffix =
+    typeof meta.confidence === 'number' && Number.isFinite(meta.confidence)
+      ? ` (${Math.round(meta.confidence * 100)}% conf)`
+      : '';
 
   if (req.kind === 'contract') {
     const cd = d as ContractDecision;
@@ -2955,7 +3012,8 @@ export function applyDecision(
       }
     }
     assign(w, v, chosenOrders);
-    reasonText = cd.reason || `Claimed #${chosenOrders.map((o) => o.id).join(', #')}`;
+    outputText = chosenOrders.map((o) => `#${o.id}`).join(' + ');
+    reasonText = cd.reason || `Claimed ${outputText}${confSuffix}`;
   } else if (req.kind === 'hazard') {
     const hd = d as HazardDecision;
     if (!hd || !['reroute', 'wait', 'push'].includes(hd.choice)) {
@@ -3000,7 +3058,8 @@ export function applyDecision(
     }
     v.hzSeen.add(h.id);
     w.totals.decisions[hd.choice]++;
-    reasonText = hd.reason || `Hazard choice: ${hd.choice}`;
+    outputText = hd.choice;
+    reasonText = hd.reason || `Hazard: ${hd.choice}${confSuffix}`;
   } else if (req.kind === 'tactics') {
     const td = d as TacticsDecision;
     if (
@@ -3045,7 +3104,8 @@ export function applyDecision(
     if (v.strategy === 'Strategist') {
       w.tuned = { ...v.tactics };
     }
-    reasonText = td.note || td.reason || 'Retuned tactics';
+    outputText = `spd ${v.tactics.speed.toFixed(2)} · buf ${v.tactics.buffer} · bat ${v.tactics.chargeAt}%`;
+    reasonText = td.note || td.reason || `Retuned ${outputText}${confSuffix}`;
     emit(
       w,
       'retune',
@@ -3074,8 +3134,15 @@ export function applyDecision(
       c.status = 'active';
       hand.cards.push(c);
     });
-    reasonText = kd.reason || `Kept ${kept.map((c) => c.title).join(', ')}`;
+    outputText = `keep ${kept.map((c) => c.id).join(', ')}`;
+    reasonText = kd.reason || `Kept ${kept.map((c) => c.title).join(', ')}${confSuffix}`;
   }
+
+  const resolvedOutput = meta.output ?? (outputText || undefined);
+  const resolvedConfidence =
+    typeof meta.confidence === 'number' && Number.isFinite(meta.confidence)
+      ? Math.max(0, Math.min(1, Number(meta.confidence.toFixed(4))))
+      : undefined;
 
   w.pendingDecisions.splice(idx, 1);
   v.brainError = null;
@@ -3087,6 +3154,8 @@ export function applyDecision(
     latencyMs: meta.latencyMs,
     inputTokens: meta.inputTokens,
     outputTokens: meta.outputTokens,
+    ...(resolvedOutput ? { output: resolvedOutput } : {}),
+    ...(resolvedConfidence !== undefined ? { confidence: resolvedConfidence } : {}),
     t: w.t,
   };
   const journalEntry: DecisionJournalEntry = {
@@ -3102,10 +3171,18 @@ export function applyDecision(
     latencyMs: meta.latencyMs,
     inputTokens: meta.inputTokens,
     outputTokens: meta.outputTokens,
+    ...(resolvedOutput ? { output: resolvedOutput } : {}),
+    ...(resolvedConfidence !== undefined ? { confidence: resolvedConfidence } : {}),
   };
   w.decisionJournal.push(journalEntry);
   if (w.decisionJournal.length > 200) w.decisionJournal.shift();
-  emit(w, 'decision', `${v.id} (${v.strategy}) [${req.kind}]: ${reasonText}`, {
+  const outLead =
+    resolvedOutput && !reasonText.includes(resolvedOutput) ? `${resolvedOutput} — ` : '';
+  const confTail =
+    resolvedConfidence !== undefined && !reasonText.includes('% conf')
+      ? ` · ${Math.round(resolvedConfidence * 100)}% conf`
+      : '';
+  emit(w, 'decision', `${v.id} (${v.strategy}) [${req.kind}]: ${outLead}${reasonText}${confTail}`, {
     vid: v.id,
     reqId: req.id,
     kind: req.kind,
@@ -6571,14 +6648,20 @@ interface ScoredOrder {
   dist: number;
   crowd: number;
   card: boolean;
+  dirZoneMatch?: boolean;
+  dirBayMatch?: boolean;
 }
 
-/** guide()'s order scoring: distance − P0 bonus − own-contract bonus + claimed/crowd penalties. */
+/** guide()'s order scoring: distance − P0 bonus − own-contract bonus − directive fit + claimed/crowd penalties. */
 function scoreOrdersFor(w: World, v: Vehicle, filter?: (o: Order) => boolean): ScoredOrder[] {
   const mine = new Set([
     ...activeCardIds(w, v.controlledByClientId || null),
     ...activeCardIds(w, v.driver),
   ]);
+  const dir = v.directive;
+  const prefZones = directivePreferredZones(dir);
+  const prefBays = directivePreferredBays(dir);
+  const avoidZones = dir?.avoidZones ?? [];
   const otherHumans = w.vehicles.filter(
     (x) => x !== v && isManualHuman(x) && x.cargo.length === 0 && (v.isBot || !x.isBot),
   );
@@ -6599,14 +6682,37 @@ function scoreOrdersFor(w: World, v: Vehicle, filter?: (o: Order) => boolean): S
     }
     const card = !!(o.card && mine.has(o.card));
     const xdock = v.human && xdockOpen(w, o);
+    const dirZoneMatch =
+      prefZones.length > 0 && prefZones.some((z) => matchesDirectiveZoneToken(o.slot.zone, z));
+    const dirAvoidMatch =
+      avoidZones.length > 0 && avoidZones.some((z) => matchesDirectiveZoneToken(o.slot.zone, z));
+    const dirBayMatch =
+      prefBays.length > 0 && prefBays.some((b) => b.toUpperCase() === o.bay.toUpperCase());
+    let dirDelta = 0;
+    if (dirZoneMatch) dirDelta -= 18;
+    if (dirAvoidMatch) dirDelta += 25;
+    if (dirBayMatch) dirDelta -= 16;
+    if (dir?.priority === 'p0_first' && o.p0) dirDelta -= 15;
+    else if (dir?.priority === 'high_value') dirDelta -= Math.min(18, Math.round(o.value * 0.45));
+    else if (
+      (dir?.priority === 'transfers' || dir?.priority === 'transfers_first') &&
+      (o.isTransfer || o.fromSite || o.destSite)
+    ) {
+      dirDelta -= 18;
+    } else if (dir?.priority === 'zone_focus' && dirZoneMatch) {
+      dirDelta -= 10;
+    } else if (dir?.priority === 'bay_focus' && dirBayMatch) {
+      dirDelta -= 10;
+    }
     const sc =
       dist -
       (o.p0 ? 20 : 0) -
       (card ? 25 : 0) -
       (xdock ? 10 : 0) +
+      dirDelta +
       (o.claimant && o.claimant !== v.id ? 8 : 0) +
       crowd;
-    out.push({ o, sc, dist, crowd, card });
+    out.push({ o, sc, dist, crowd, card, dirZoneMatch, dirBayMatch });
   });
   // Stable sort: ties keep w.orders order (same winner as the old first-minimum scan).
   out.sort((a, b) => a.sc - b.sc);
@@ -6619,6 +6725,8 @@ function copilotReason(best: ScoredOrder, alt: ScoredOrder | undefined, carpool:
   else parts.push(`${best.dist} tiles away`);
   if (best.o.p0) parts.push('P0 +20');
   if (best.card) parts.push('your contract +25');
+  if (best.dirZoneMatch) parts.push(`matches zone ${best.o.slot.zone}`);
+  if (best.dirBayMatch) parts.push(`matches bay ${best.o.bay}`);
   if (best.o.putaway) parts.push(`inbound: stow at rack ${best.o.putaway.rackId} or cross-dock bay ${best.o.xdockBay} +${XDOCK_BONUS}`);
   if (alt && best.crowd < alt.crowd) parts.push('fewer drivers nearby');
   if (carpool) parts.push(`same bay ${best.o.bay} as your load`);

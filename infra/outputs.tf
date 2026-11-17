@@ -45,3 +45,8 @@ output "tfstate_bucket" {
   value       = var.suffix == "" ? "gs://${google_storage_bucket.tfstate[0].name}/terraform/state" : "gs://${var.project_id}-tfstate/terraform/state"
 }
 
+output "decisions_api_secret_id" {
+  description = "Secret Manager secret ID for the temporary Gemini Decisions API key exception (retired once daily ADC check turns green)"
+  value       = google_secret_manager_secret.gemini_decisions_api_key.secret_id
+}
+

@@ -20,6 +20,10 @@ export interface RivalDecision {
   latencyMs: number;
   model: string;
   decision: Record<string, unknown>;
+  /** Calibrated confidence (0..1) when returned by a decision model. */
+  confidence?: number;
+  /** Calibrated per-option / per-level probabilities when returned by Decisions API. */
+  probabilities?: Record<string, number>;
   /** `Date.now()` when the client received it (recency tie-break). */
   at: number;
 }
@@ -78,16 +82,87 @@ export function clipNote(note: string, max = 90): string {
   return t.length > max ? `${t.slice(0, max - 1).trimEnd()}…` : t;
 }
 
-/** `FL-03 Sprinter: "<note>" · 410 ms` — null when there is no rival decision or its note is empty. */
+/**
+ * Extract the concrete structured output from a `decision` payload (e.g. `#42`, `#42 + #19`,
+ * `reroute`, `keep C1, C2`, `spd 1.15 · buf 2 · bat 20%`). Returns null when `decision` is empty.
+ */
+export function formatDecisionOutput(
+  kind: DecisionKind | undefined,
+  decision: Record<string, unknown> | null | undefined,
+): string | null {
+  if (!decision || typeof decision !== 'object') return null;
+  if (typeof decision.output === 'string' && decision.output.trim().length > 0) {
+    return decision.output.trim();
+  }
+  const ids = Array.isArray(decision.orderIds)
+    ? decision.orderIds.filter((x) => typeof x === 'string' || typeof x === 'number').map((x) => `#${String(x).replace(/^#/, '')}`)
+    : decision.orderId !== undefined
+      ? [`#${String(decision.orderId).replace(/^#/, '')}`]
+      : [];
+  if (ids.length > 0 && (!kind || kind === 'contract')) {
+    return ids.join(' + ');
+  }
+  const choice = decision.choice ?? decision.action;
+  if (typeof choice === 'string' && choice.trim().length > 0 && (!kind || kind === 'hazard')) {
+    return choice.trim();
+  }
+  const keep = Array.isArray(decision.keep)
+    ? decision.keep.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+    : [];
+  if (keep.length > 0 && (!kind || kind === 'cards')) {
+    return `keep ${keep.join(', ')}`;
+  }
+  if (typeof decision.speed === 'number' && Number.isFinite(decision.speed) && (!kind || kind === 'tactics')) {
+    const buf = typeof decision.buffer === 'number' ? ` · buf ${decision.buffer}` : '';
+    const bat = typeof decision.chargeAt === 'number' ? ` · bat ${Math.round(decision.chargeAt)}%` : '';
+    return `spd ${decision.speed.toFixed(2)}${buf}${bat}`;
+  }
+  return null;
+}
+
+/** Format a calibrated `[0, 1]` confidence score as `88% conf` (null when absent). */
+export function formatDecisionConfidence(confidence: number | null | undefined): string | null {
+  if (typeof confidence !== 'number' || !Number.isFinite(confidence)) return null;
+  const clamped = Math.max(0, Math.min(1, confidence));
+  return `${Math.round(clamped * 100)}% conf`;
+}
+
+function isDistinctProseNote(note: string, output: string | null): boolean {
+  if (!note) return false;
+  if (/\b\d{1,3}%\s*conf\b/i.test(note)) return false;
+  if (output && note.toLowerCase().startsWith(output.toLowerCase())) return false;
+  return true;
+}
+
+/**
+ * Formats my rival's decision pill:
+ *   - Decision output + confidence: `FL-03 Sprinter → #42 · 88% conf · 180 ms`
+ *   - Output + prose note: `FL-03 Sprinter → #42: "Grab the P0 at B2 first" · 410 ms`
+ *   - Note only: `FL-03 Sprinter: "Grab the P0 at B2 first" · 410 ms`
+ */
 export function rivalReasonText(
   rival: { id: string; strategy?: string | null } | null | undefined,
-  decision: Pick<RivalDecision, 'vid' | 'note' | 'latencyMs'> | null | undefined,
+  decision:
+    | (Pick<RivalDecision, 'vid' | 'note' | 'latencyMs'> &
+        Partial<Pick<RivalDecision, 'kind' | 'decision' | 'confidence'>>)
+    | null
+    | undefined,
 ): string | null {
   if (!rival || !decision || decision.vid !== rival.id) return null;
+  const output = formatDecisionOutput(decision.kind, decision.decision);
+  const conf = formatDecisionConfidence(decision.confidence);
   const note = clipNote(decision.note ?? '');
-  if (!note) return null;
+  if (!output && !conf && !note) return null;
   const who = rival.strategy ? `${rival.id} ${rival.strategy}` : rival.id;
-  return `${who}: "${note}" · ${Math.round(decision.latencyMs)} ms`;
+  const ms = Math.round(decision.latencyMs);
+  const head = [output, conf].filter(Boolean).join(' · ');
+  if (head) {
+    if (isDistinctProseNote(note, output)) {
+      return `${who} → ${head}: "${note}" · ${ms} ms`;
+    }
+    return `${who} → ${head} · ${ms} ms`;
+  }
+  return `${who}: "${note}" · ${ms} ms`;
 }
 
 const KIND_WEIGHT: Record<DecisionKind, number> = { contract: 3, cards: 2, hazard: 2, tactics: 1 };
@@ -105,8 +180,8 @@ export function decisionWeight(d: RivalDecision, myOrderIds: ReadonlySet<string>
 }
 
 /**
- * Top `max` rival decisions with a non-empty note, most consequential first (ties → most recent).
- * Returned in that order; empty when the log has none.
+ * Top `max` rival decisions with real content (note, structured output, or confidence),
+ * most consequential first (ties → most recent). Returned in that order; empty when none.
  */
 export function selectRecapDecisions(
   decisions: readonly RivalDecision[],
@@ -114,7 +189,12 @@ export function selectRecapDecisions(
   max = 3,
 ): RivalDecision[] {
   return decisions
-    .filter((d) => clipNote(d.note ?? '').length > 0)
+    .filter(
+      (d) =>
+        clipNote(d.note ?? '').length > 0 ||
+        formatDecisionOutput(d.kind, d.decision) !== null ||
+        formatDecisionConfidence(d.confidence) !== null,
+    )
     .map((d, i) => ({ d, i, w: decisionWeight(d, myOrderIds) }))
     .sort((a, b) => b.w - a.w || b.d.at - a.d.at || b.i - a.i)
     .slice(0, max)
@@ -122,7 +202,15 @@ export function selectRecapDecisions(
 }
 
 export interface AiRecap {
-  rival: Array<{ vid: string; strategy?: string; kind: DecisionKind; note: string; latencyMs: number }>;
+  rival: Array<{
+    vid: string;
+    strategy?: string;
+    kind: DecisionKind;
+    note: string;
+    latencyMs: number;
+    output?: string;
+    confidence?: number;
+  }>;
   directives: DirectiveEcho[];
 }
 
@@ -133,13 +221,18 @@ export function buildAiRecap(
   maxDirectives = 5,
 ): AiRecap | null {
   if (!log) return null;
-  const rival = selectRecapDecisions(log.rivalDecisions, log.myOrderIds).map((d) => ({
-    vid: d.vid,
-    strategy: strategyOf(d.vid),
-    kind: d.kind,
-    note: clipNote(d.note, 160),
-    latencyMs: Math.round(d.latencyMs),
-  }));
+  const rival = selectRecapDecisions(log.rivalDecisions, log.myOrderIds).map((d) => {
+    const output = formatDecisionOutput(d.kind, d.decision);
+    return {
+      vid: d.vid,
+      strategy: strategyOf(d.vid),
+      kind: d.kind,
+      note: clipNote(d.note, 160),
+      latencyMs: Math.round(d.latencyMs),
+      ...(output ? { output } : {}),
+      ...(d.confidence !== undefined ? { confidence: d.confidence } : {}),
+    };
+  });
   const directives = log.directives.slice(-maxDirectives);
   if (!rival.length && !directives.length) return null;
   return { rival, directives };
@@ -181,9 +274,17 @@ export function shieldCardFor(msg: CommandEchoMessage, sessionStrikes: number): 
   return { title: `🛡 Blocked · ${detail}`, detail, strikes, muted: Boolean(a?.muted) };
 }
 
-/** Recap line for one rival decision: `FL-03 Sprinter · contract: "<note>" · 410 ms`. */
+/** Recap line for one rival decision, surfacing decision output + confidence alongside any note. */
 export function recapDecisionText(r: AiRecap['rival'][number]): string {
   const who = r.strategy ? `${r.vid} ${r.strategy}` : r.vid;
+  const conf = formatDecisionConfidence(r.confidence);
+  const head = [r.output, conf].filter(Boolean).join(' · ');
+  if (head) {
+    if (isDistinctProseNote(r.note, r.output ?? null)) {
+      return `${who} · ${r.kind} → ${head}: "${r.note}" · ${r.latencyMs} ms`;
+    }
+    return `${who} · ${r.kind} → ${head} · ${r.latencyMs} ms`;
+  }
   return `${who} · ${r.kind}: "${r.note}" · ${r.latencyMs} ms`;
 }
 

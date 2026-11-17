@@ -1,6 +1,10 @@
 import { pathToFileURL } from 'node:url';
 import type { SiteId } from '@warehouse/protocol';
-import { resolveGeminiModel } from './brain.js';
+import {
+  loadDecisionsApiKeyFromSecretManager,
+  resolveBrainVariant,
+  resolveGeminiModel,
+} from './brain.js';
 import { CloudPersistenceStore, InMemoryPersistenceStore } from './persistence.js';
 import { createSiteServer } from './server.js';
 
@@ -34,7 +38,9 @@ export async function startMainServer(): Promise<void> {
   // Fail loudly at boot on a non-allow-listed GEMINI_MODEL instead of
   // erroring on every brain / dispatcher call at runtime.
   const geminiModel = resolveGeminiModel(process.env.GEMINI_MODEL);
-  console.log(`[${siteId}] Gemini model: ${geminiModel}`);
+  await loadDecisionsApiKeyFromSecretManager({ siteId });
+  const brainVariant = resolveBrainVariant(process.env.BRAIN_VARIANT);
+  console.log(`[${siteId}] Brain variant: ${brainVariant} (generative fallback/NL model: ${geminiModel})`);
 
   installProcessErrorHandlers(siteId);
 
@@ -57,6 +63,7 @@ export async function startMainServer(): Promise<void> {
     persistence,
     wsPublicUrl: process.env.WS_PUBLIC_URL,
     enableIntervals: true,
+    enableDecisionsAdcMonitor: useCloud || process.env.ENABLE_DECISIONS_ADC_MONITOR === '1',
     restoreFromPersistence: useCloud,
     subscribeTransfers: useCloud,
     requireProxyAuth:

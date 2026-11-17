@@ -2,7 +2,17 @@
 
 ## Overview
 
-Every AI vehicle in the Warehouse distribution network is controlled by an asynchronous **Gemini 3.5 Flash-Lite** brain (`gemini-3.5-flash-lite`) hosted on Vertex AI (`location: 'global'`, `project: 'davenporter-freightfloor'`), authenticated via Google Cloud Application Default Credentials (ADC). Allowed models exported in `ALLOWED_GEMINI_MODELS` are `'gemini-3.8-flash'`, `'gemini-3.5-flash-lite'`, and `'gemini-4-argon'`.
+Every AI vehicle in the Warehouse distribution network is controlled primarily by tick-batched **Gemini Decision 1** (`gemini-decision-1`, `$0.10 / 1M` input, `$0` output tokens via `POST /v1beta/decisions`) when the Secret Manager `gemini-decisions-api-key` exception (or Google Cloud ADC once enabled) is active, with **Gemini 3.5 Flash-Lite** (`gemini-3.5-flash-lite`, `$0.30 / 1M` input, `$2.50 / 1M` output on Vertex AI ADC) handling free-text parsing (`nlCommand`, `agentCommand`) and fallback when no Decisions credential is configured. Allowed generative models exported in `ALLOWED_GEMINI_MODELS` are `'gemini-3.8-flash'`, `'gemini-3.5-flash-lite'`, and `'gemini-4-argon'`.
+
+### Brain Execution Variants (`BRAIN_VARIANT`) & Daily ADC Cutover Monitor
+
+`@warehouse/site` supports four selectable brain execution variants (`BRAIN_VARIANTS` in `@warehouse/protocol`, configured via `BRAIN_VARIANT`, defaulting to `'auto'`):
+
+- **`decisions-batch` (Primary Default when Decisions key or ADC is active)**: Coalesces all ready fleet `DecisionRequest`s on a tick into **one single forward pass** on `gemini-decision-1` (`$0.10 / 1M` input, `0` output tokens) with intra-batch probability de-confliction, calibrated `confidence` (`0..1`), and `DecisionsDispatchersCallClient` for Dispatcher's Call.
+- **`vertex-flash` (Automatic Fallback when no Decisions key/ADC is active)**: Per-agent Vertex AI `generateContent` (`gemini-3.5-flash-lite` via ADC) with static per-archetype `PERSONA_SYSTEM_INSTRUCTIONS` prefix caching and enriched floor context.
+- **`decisions` (`gemini-decision-1` · Single-Agent)**: Evaluates closed-set `choice`, `noul`, and linear `score` rubric questions per agent.
+- **`hybrid` (`gemini-decision-1` Chooser + Vertex Planner)**: Runs tick-batched `gemini-decision-1` for fast `hazard`, `contract`, and `cards` choices, and escalates to Vertex AI (`gemini-3.5-flash-lite`) for strategic `tactics` retuning and low-confidence dilemmas (`confidence < 0.45`).
+- **24-Hour ADC Parity Monitor (`startDailyDecisionsAdcMonitor` / `npm run brain:check-adc -w @warehouse/site`)**: Every 24 hours (and at shard boot), `@warehouse/site` probes whether Vertex AI or Google Cloud OAuth2 ADC now supports `gemini-decision-1`. Once `supported === true`, `SdkDecisionsApiTransport` automatically switches from the Secret Manager API key to ADC and logs an actionable notice so `gemini-decisions-api-key` can be retired.
 
 - **10 Hz Non-Blocking Execution**: The 10 Hz deterministic simulation loop (`packages/sim`) never blocks on network I/O. Instead, `packages/sim` emits `DecisionRequest` events ahead of time, and deterministic pathfinding (`A*`, reservation tables, steering) drives the vehicle between decisions.
 - **Asynchronous Validation (`applyDecision`)**: When the Vertex AI response arrives, the site server passes it into `applyDecision(world, reqId, decision, meta)`. The simulation validates that the request has not expired (`deadline`) and that the chosen option is still legal in the current world state.
@@ -63,7 +73,7 @@ Each AI agent is assigned one of the 5 warehouse `ARCHETYPES` (`packages/sim/src
 | **Opportunist** | `1.1` | `2` tiles | `0.7` | `20%` | `1` | `poach: true`, Preempts P0 | Grabs the highest-value contract even if another agent already holds a soft claim on it. |
 | **Strategist** | `1.0` | `2` tiles | `0.9` | `22%` | `1` | `tunable: true` | Retunes its own tactical parameters (`speed`, `buffer`, `respect`, `chargeAt`, `batch`) via Gemini at shift boundaries and every game-hour. |
 
-Because the system instructions, warehouse rules, and persona definitions are static across calls for a given archetype, `apps/site` caches the persona prompt prefix per archetype (`personaCache[req.persona]`) and uses compact top-6 pre-scored JSON candidates (`thinkingBudget: 0`, `maxOutputTokens: 80`, `reason`/`note` ≤ 40 chars, description-free response schemas) to keep calls small and fast. Measured on a real contract prompt: ~546 → ~501 input and ~36 → ~30 output tokens per call (~11% cheaper).
+Because the system instructions, warehouse rules, and persona strategy rubrics (`PERSONA_RUBRICS`) are static across calls for a given archetype, `apps/site` uses static per-archetype system instructions (`PERSONA_SYSTEM_INSTRUCTIONS[req.persona]`, omitting `agentId` from `systemInstruction` to maximize implicit prefix cache hits across all 20 fleet vehicles) and compact top-6 pre-scored JSON candidates (`thinkingBudget: 0`, `maxOutputTokens: 80`, `reason`/`note` ≤ 40 chars, description-free response schemas) enriched with `bayFill`, `combo`, `activeGoals`, and `rivalTarget`.
 
 ---
 

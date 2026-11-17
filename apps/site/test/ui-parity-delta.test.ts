@@ -386,6 +386,7 @@ describe('UI-parity protocol additions (server wiring)', () => {
       model: 'gemini-3.8-flash',
       latencyMs: Math.round(fl.lastDecision!.latencyMs),
       reason: fl.lastDecision!.reason,
+      output: fl.lastDecision!.output,
       t: fl.lastDecision!.t,
     });
     expect(v.decision!.latencyMs).toBeGreaterThanOrEqual(1);

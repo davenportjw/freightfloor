@@ -468,6 +468,8 @@ export function applyQuantisedDelta(
         reason: d.decision.reason,
         model: d.decision.model,
         latencyMs: d.decision.latencyMs,
+        ...(d.decision.output ? { output: d.decision.output } : {}),
+        ...(d.decision.confidence !== undefined ? { confidence: d.decision.confidence } : {}),
         t: d.decision.t,
       };
     }
@@ -1399,6 +1401,8 @@ export class ClientStore {
           latencyMs: v.lastDecision.latencyMs,
           reason: v.lastDecision.reason,
           t: v.lastDecision.t,
+          ...(v.lastDecision.output ? { output: v.lastDecision.output } : {}),
+          ...(v.lastDecision.confidence !== undefined ? { confidence: v.lastDecision.confidence } : {}),
         };
         this.side.decisions.set(v.id, dec);
         if (dec.kind === 'cards') this.side.cardDecisions.set(v.id, dec);

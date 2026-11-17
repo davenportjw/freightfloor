@@ -437,6 +437,11 @@ export class ProtocolBot {
     }, this.inputIntervalMs);
   }
 
+  public resetWarmupMetrics(): void {
+    this.metrics.ackRttsMs.length = 0;
+    this.sentInputAtMs.clear();
+  }
+
   public async stop(): Promise<void> {
     this.stopping = true;
     if (!this.metrics.disconnectedAtMs) {

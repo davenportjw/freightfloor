@@ -6,6 +6,7 @@
 import { getSiteTheme, policy, STRATEGIES, type Vehicle, type World } from '@warehouse/sim';
 import type { ClientStore } from '../state.js';
 import { formatDirectiveSummary } from './agentDesigner.js';
+import { formatDecisionConfidence } from './aiInsight.js';
 import type { UiCtx, UiModule } from './context.js';
 import { button, el, kbd, KeyedView, swatch } from './dom.js';
 import { teamColor } from './format.js';
@@ -47,7 +48,7 @@ export function inspectorKey(store: ClientStore): string {
     g?.inRange ?? false,
     v.driver ?? '',
     store.side.reasons.get(v.id) ?? '',
-    d ? `${d.t}|${d.model}` : '',
+    d ? `${d.t}|${d.model}|${d.output ?? ''}|${d.confidence ?? ''}` : '',
     v.brainError ?? '',
     mine,
     store.canHandBack(),
@@ -137,11 +138,24 @@ export function mountInspector(root: HTMLElement, ctx: UiCtx): UiModule {
         }
         if (!v.human || v.autopilot) {
           if (reason || decision) {
+            const confBadge = formatDecisionConfidence(decision?.confidence);
+            const headParts = [decision?.output, confBadge].filter(Boolean).join(' · ');
+            const rawReason = decision?.reason ?? reason ?? '';
+            const showReason =
+              rawReason &&
+              (!headParts ||
+                (!rawReason.toLowerCase().startsWith((decision?.output ?? '').toLowerCase()) &&
+                  !/\b\d{1,3}%\s*conf\b/i.test(rawReason)));
+            const summaryText = headParts
+              ? showReason
+                ? `${headParts} — ${rawReason}`
+                : headParts
+              : rawReason;
             const meta = decision ? ` (${decision.model} · ${Math.round(decision.latencyMs)} ms)` : '';
             kids.push(
               el('div', { class: 'insp-brain', title: policyLine(w, v) }, [
                 el('span', { class: 'label', text: 'Brain ' }),
-                decision?.reason ?? reason ?? '',
+                summaryText,
                 meta ? el('span', { class: 'muted', text: meta }) : null,
               ]),
             );

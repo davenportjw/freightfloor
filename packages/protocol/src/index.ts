@@ -174,6 +174,17 @@ export const ALLOWED_GEMINI_MODELS = [
 ] as const;
 export type AllowedGeminiModel = (typeof ALLOWED_GEMINI_MODELS)[number];
 
+export const GEMINI_DECISION_MODEL = 'gemini-decision-1' as const;
+
+export const BRAIN_VARIANTS = [
+  'vertex-flash',
+  'decisions',
+  'decisions-batch',
+  'hybrid',
+] as const;
+export const BrainVariantSchema = z.enum(BRAIN_VARIANTS);
+export type BrainVariant = z.infer<typeof BrainVariantSchema>;
+
 /**
  * Normalizes a numeric (1..5) or named difficulty vote into canonical sim difficulty keys.
  */
@@ -785,6 +796,10 @@ export const VehicleDecisionSchema = z.object({
   latencyMs: z.number().nonnegative(),
   reason: z.string(),
   t: z.number(),
+  /** Compact structured output summary (e.g. `#42`, `reroute`, `keep C1`), when available. */
+  output: z.string().optional(),
+  /** Calibrated confidence (0..1) when returned by a decision model. */
+  confidence: z.number().min(0).max(1).optional(),
 });
 export type VehicleDecision = z.infer<typeof VehicleDecisionSchema>;
 
@@ -1319,6 +1334,10 @@ export const BrainDecisionMessageSchema = z.object({
   tokensIn: z.number().nonnegative(),
   tokensOut: z.number().nonnegative(),
   model: z.string(),
+  /** Calibrated confidence (0..1) when evaluated via Decisions API (or hybrid chooser). */
+  confidence: z.number().min(0).max(1).optional(),
+  /** Calibrated per-option / per-level probabilities when returned by Decisions API. */
+  probabilities: z.record(z.number().min(0).max(1)).optional(),
 });
 export type BrainDecisionMessage = z.infer<typeof BrainDecisionMessageSchema>;
 
@@ -1634,6 +1653,11 @@ export interface JsonSchemaObject {
  * `GEMINI_PRICE_INPUT_PER_M` / `GEMINI_PRICE_OUTPUT_PER_M` when Google changes pricing.
  */
 export const GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS = { input: 0.3, output: 2.5 } as const;
+
+/**
+ * Gemini Developer API list price for `gemini-decision-1` (USD per 1M tokens; 0 output tokens billed).
+ */
+export const GEMINI_DECISION_1_PRICE_PER_M_TOKENS = { input: 0.1, output: 0 } as const;
 
 /**
  * Structured-output schemas for agent decisions. Property descriptions are deliberately

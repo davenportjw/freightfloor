@@ -268,13 +268,14 @@ export async function runLoadtest(
     await Promise.all(batch.map((c) => c.start()));
   }
 
-  // Clear warmup ACK RTT samples captured during the sequential join/handshake storm
-  // so steady-state latency metrics reflect full 128-client concurrent operation.
+  // Allow queued handshake frames from the 128-client sequential join storm to flush,
+  // then clear both warmup RTT samples AND pre-steady-state pending input timestamps.
+  await new Promise((resolve) => setTimeout(resolve, 60));
   for (const b of bots) {
-    b.metrics.ackRttsMs.length = 0;
+    b.resetWarmupMetrics();
   }
   for (const p of pilots) {
-    p.metrics.ackRttsMs.length = 0;
+    p.resetWarmupMetrics();
   }
 
   // Let bots & pilots drive, plan, and interact for durationMs
@@ -282,7 +283,7 @@ export async function runLoadtest(
 
   // Stop all clients cleanly and allow proxy-to-site upstream sockets to close
   await Promise.all(allClients.map((c) => c.stop()));
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await new Promise((resolve) => setTimeout(resolve, 150));
 
   // Aggregate metrics
   const driversPerSite: Record<SiteId, number> = {

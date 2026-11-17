@@ -14,6 +14,8 @@ locals {
     "artifactregistry.googleapis.com",
     "cloudbuild.googleapis.com",
     "aiplatform.googleapis.com",
+    "generativelanguage.googleapis.com",
+    "apikeys.googleapis.com",
     "firestore.googleapis.com",
     "pubsub.googleapis.com",
     "secretmanager.googleapis.com",
@@ -233,6 +235,47 @@ resource "google_secret_manager_secret_iam_member" "lobby_secret_accessor" {
   secret_id = google_secret_manager_secret.ticket_hmac_key.secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.lobby.email}"
+}
+
+# 4b. Secret Manager Exception: Gemini Decisions API Key (`gemini-decision-1` until ADC is enabled)
+# Provisioned via `google_apikeys_key` restricted strictly to `generativelanguage.googleapis.com`
+# and stored directly in Secret Manager (never hardcoded in git). Site shards probe daily for native
+# ADC support and automatically cut over off this key the moment Google Cloud ADC is enabled.
+resource "google_apikeys_key" "gemini_decisions" {
+  project      = var.project_id
+  name         = "warehouse-decisions-key${var.suffix}"
+  display_name = "Warehouse Gemini Decisions API Key (${var.suffix == "" ? "prod" : var.suffix})"
+
+  restrictions {
+    api_targets {
+      service = "generativelanguage.googleapis.com"
+    }
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_secret_manager_secret" "gemini_decisions_api_key" {
+  project   = var.project_id
+  secret_id = "gemini-decisions-api-key${var.suffix}"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_secret_manager_secret_version" "gemini_decisions_api_key" {
+  secret      = google_secret_manager_secret.gemini_decisions_api_key.id
+  secret_data = google_apikeys_key.gemini_decisions.key_string
+}
+
+resource "google_secret_manager_secret_iam_member" "site_decisions_secret_accessor" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.gemini_decisions_api_key.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.site.email}"
 }
 
 # 5. Firestore Native Database & TTL Policy on `journal` collection group (`expireAt` field)
@@ -527,6 +570,15 @@ resource "google_cloud_run_v2_service" "site" {
           }
         }
       }
+      env {
+        name = "GEMINI_DECISIONS_API_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.gemini_decisions_api_key.secret_id
+            version = "latest"
+          }
+        }
+      }
 
       # Snapshot restore + Firestore/Pub/Sub init can take ~15-25s on a cold
       # instance; allow up to ~60s before the revision is marked unhealthy.
@@ -545,6 +597,8 @@ resource "google_cloud_run_v2_service" "site" {
     google_project_service.apis,
     google_secret_manager_secret_version.ticket_hmac_key,
     google_secret_manager_secret_iam_member.site_secret_accessor,
+    google_secret_manager_secret_version.gemini_decisions_api_key,
+    google_secret_manager_secret_iam_member.site_decisions_secret_accessor,
     google_project_iam_member.site_roles,
     google_pubsub_topic_iam_member.site_transfers_publisher,
     google_model_armor_template.warehouse_orders,

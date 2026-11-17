@@ -2,6 +2,8 @@ import { FieldValue, Firestore, Timestamp } from '@google-cloud/firestore';
 import { PubSub, type Message, type Subscription } from '@google-cloud/pubsub';
 import type { ArmorReasonCode } from '@warehouse/armor';
 import {
+  GEMINI_DECISION_1_PRICE_PER_M_TOKENS,
+  GEMINI_DECISION_MODEL,
   GEMINI_FLASH_LITE_PRICE_PER_M_TOKENS,
   type DailyScoreDoc,
   type DecisionKind,
@@ -88,6 +90,9 @@ export interface DecisionJournalEntry {
   latencyMs: number;
   tokensIn: number;
   tokensOut: number;
+  output?: string;
+  confidence?: number;
+  probabilities?: Record<string, number>;
   error?: string;
   createdAt: number;
   expireAt: number;
@@ -154,6 +159,25 @@ export function estimateGeminiFlashCostUsd(tokensIn: number, tokensOut: number):
       Math.max(0, tokensOut) * GEMINI_PRICE_OUTPUT_PER_M) /
     1_000_000;
   return Math.max(0.000005, raw);
+}
+
+/**
+ * Estimates `gemini-decision-1` cost in USD ($0.10 / 1M input tokens, $0 output tokens).
+ */
+export function estimateGeminiDecisionCostUsd(tokensIn: number): number {
+  const raw = (Math.max(0, tokensIn) * GEMINI_DECISION_1_PRICE_PER_M_TOKENS.input) / 1_000_000;
+  return Math.max(0.000001, raw);
+}
+
+export function estimateModelCallCostUsd(
+  model: string | undefined,
+  tokensIn: number,
+  tokensOut: number,
+): number {
+  if (model && model.includes(GEMINI_DECISION_MODEL)) {
+    return estimateGeminiDecisionCostUsd(tokensIn);
+  }
+  return estimateGeminiFlashCostUsd(tokensIn, tokensOut);
 }
 
 export interface PersistenceStore {

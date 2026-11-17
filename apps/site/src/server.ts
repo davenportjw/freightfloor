@@ -111,7 +111,10 @@ import {
 import {
   AgentBrainScheduler,
   VertexGeminiBrainClient,
+  resolveBrainVariant,
   resolveGeminiModel,
+  startDailyDecisionsAdcMonitor,
+  type BrainVariant,
   type GeminiBrainClient,
 } from './brain.js';
 import {
@@ -123,6 +126,7 @@ import {
   type NlOrderParserClient,
 } from './armor-pipeline.js';
 import {
+  DecisionsDispatchersCallClient,
   DispatchersCallCoordinator,
   parseDispatchersCallActionId,
   parseDispatchersCallFlag,
@@ -654,6 +658,8 @@ export function vehicleDetail(v: Vehicle): VehicleDetail {
       latencyMs: Math.round(d.latencyMs),
       reason: d.reason,
       t: d.t,
+      ...(d.output ? { output: d.output } : {}),
+      ...(d.confidence !== undefined ? { confidence: d.confidence } : {}),
     };
     out.decision = decision;
   }
@@ -716,11 +722,14 @@ export interface SiteServerOptions {
   guard?: ArmorGuard;
   strikes?: ArmorGuard;
   brainClient?: GeminiBrainClient;
+  brainVariant?: BrainVariant;
   brainScheduler?: AgentBrainScheduler;
   armorClient?: ModelArmorClient;
   nlParser?: NlOrderParserClient;
   nlPipeline?: NlOrderPipeline;
   enableIntervals?: boolean;
+  /** Runs the 24-hour background ADC parity check for `gemini-decision-1`. */
+  enableDecisionsAdcMonitor?: boolean;
   inputLeaseMs?: number;
   idleEvictionMs?: number;
   evictOnRunComplete?: boolean;
@@ -975,19 +984,25 @@ export async function createSiteServer(
       ipHashSalt: ticketSecret,
     });
 
+  const brainVariant = options.brainVariant ?? resolveBrainVariant(process.env.BRAIN_VARIANT);
+
   const brainClient =
     options.brainClient ??
-    new VertexGeminiBrainClient({
-      projectId: gcpProjectId,
-      location: vertexLocation,
-      model: geminiModel,
-    });
+    (brainVariant === 'vertex-flash'
+      ? new VertexGeminiBrainClient({
+          projectId: gcpProjectId,
+          location: vertexLocation,
+          model: geminiModel,
+        })
+      : undefined);
 
   const brainScheduler =
     options.brainScheduler ??
     new AgentBrainScheduler({
       siteId,
-      client: brainClient,
+      variant: brainVariant,
+      ...(brainClient ? { client: brainClient } : {}),
+      modelName: geminiModel,
       persistence,
       getArmorBlocks1h: (t) => nlPipeline.getArmorBlocks1h(t),
       onDecisionBroadcast: (msg) => broadcast(msg as unknown as ServerMessage),
@@ -1005,15 +1020,19 @@ export async function createSiteServer(
     }
   }
 
+  const vertexDispatchersCallClient = new VertexDispatchersCallClient({
+    projectId: gcpProjectId,
+    location: vertexLocation,
+    model: geminiModel,
+  });
+
   const dispatchersCall = new DispatchersCallCoordinator({
     enabled: enableDispatchersCall,
     client:
       options.dispatchersCallClient ??
-      new VertexDispatchersCallClient({
-        projectId: gcpProjectId,
-        location: vertexLocation,
-        model: geminiModel,
-      }),
+      (brainVariant === 'decisions' || brainVariant === 'decisions-batch'
+        ? new DecisionsDispatchersCallClient({ fallbackClient: vertexDispatchersCallClient })
+        : vertexDispatchersCallClient),
     budget: persistence,
     // Only drivers with a live connection that has not opted out get a call.
     eligible: (v) => {
@@ -3933,9 +3952,19 @@ export async function createSiteServer(
     snapshotTimer.unref?.();
   }
 
+  const stopDecisionsAdcMonitor = options.enableDecisionsAdcMonitor
+    ? startDailyDecisionsAdcMonitor({
+        siteId,
+        projectId: gcpProjectId,
+        location: vertexLocation,
+      })
+    : null;
+
   async function gracefulShutdown(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
+
+    stopDecisionsAdcMonitor?.();
 
     for (const annex of annexServers.values()) {
       await annex.close();

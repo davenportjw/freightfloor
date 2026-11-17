@@ -1321,6 +1321,8 @@ function boot(): void {
           latencyMs: msg.latencyMs,
           model: msg.model,
           decision: msg.decision,
+          ...(msg.confidence !== undefined ? { confidence: msg.confidence } : {}),
+          ...(msg.probabilities ? { probabilities: msg.probabilities } : {}),
           at: Date.now(),
         };
         store.brainDecisions.set(vid, d);
