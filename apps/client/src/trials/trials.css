@@ -142,4 +142,37 @@ kbd {
   .tr-shell { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .tr-rail { max-height: 34vh; border-right: 0; border-bottom: 1px solid var(--line); }
   .tr-keys { display: none; }
+  .tr-hud { top: 10px; left: 10px; right: 10px; gap: 6px; }
+  .tr-pill { font-size: 13px; padding: 4px 10px; }
+  .tr-meter { top: auto; bottom: 12px; left: 10px; }
+  .tr-toasts { top: 96px; left: 10px; right: 10px; }
+  .tr-toast { font-size: 13px; }
+  .tr-intent { white-space: normal; text-align: center; max-width: calc(100% - 20px); }
+}
+
+/* Touch controls: only on coarse pointers (phones / tablets). */
+.tr-touch { display: none; }
+@media (pointer: coarse) {
+  .tr-touch {
+    position: absolute; left: 14px; right: 14px; bottom: 14px; display: flex; justify-content: space-between;
+    align-items: flex-end; pointer-events: none; user-select: none; -webkit-user-select: none;
+  }
+  .tr-touch button {
+    pointer-events: auto; touch-action: none; width: 60px; height: 60px; border-radius: 14px;
+    border: 1px solid var(--line-2); background: rgba(255, 255, 255, 0.88); color: var(--ink-2);
+    font: 700 18px/1 inherit; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+  }
+  .tr-touch button[aria-pressed='true'] { background: var(--soft); border-color: var(--teal); }
+  .tr-touch button.primary { background: var(--teal); color: #fff; border-color: var(--teal); width: 72px; height: 72px; font-size: 22px; }
+  .tr-touch__pad { display: grid; grid-template-columns: repeat(3, 60px); grid-template-rows: repeat(2, 60px); gap: 6px; }
+  .tr-touch__pad [data-key='KeyW'] { grid-column: 2; grid-row: 1; }
+  .tr-touch__pad [data-key='KeyA'] { grid-column: 1; grid-row: 2; }
+  .tr-touch__pad [data-key='KeyS'] { grid-column: 2; grid-row: 2; }
+  .tr-touch__pad [data-key='KeyD'] { grid-column: 3; grid-row: 2; }
+  .tr-touch__acts { display: flex; gap: 10px; align-items: flex-end; }
+  .tr-touch__acts [data-key] { font-size: 14px; }
+  .tr-keys { display: none; }
+  /* Keep the meter and intent clear of the pad. */
+  .tr-meter { top: auto; bottom: 150px; left: 14px; }
+  .tr-intent { bottom: 150px; left: auto; right: 14px; transform: none; }
 }

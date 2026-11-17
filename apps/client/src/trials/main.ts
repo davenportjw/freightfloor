@@ -296,6 +296,7 @@ function frame(now: number): void {
     y: prevPose.y + (cur.y - prevPose.y) * k,
     a: prevPose.a + da * k,
   };
+  const guide = trialGuide(trial);
   const opts: RenderOptions = {
     layers: { routes: false, traffic: false, labels: true, ghost: false },
     highlightStrategy: null,
@@ -303,11 +304,13 @@ function frame(now: number): void {
     myVid: trial.vehicle.id,
     coneMode: false,
     overlays: new Map(),
-    guide: trialGuide(trial),
+    guide: guide && !(guide.kind === 'pick' && fx.hidden.has(guide.order.id)) ? guide : null,
     myPose: pose,
     cargoLean: whip.lean(trial.state.sway),
     hiddenOrders: fx.hidden,
     worldFx: (pt, nowMs) => fx.draw(pt, nowMs),
+    minimalChrome: true,
+    markerFilter: (m) => !fx.landingOn(m.x, m.y),
   };
   renderer.render(trial.world, opts, now);
   updateHud();
@@ -342,6 +345,28 @@ window.addEventListener('keydown', (e) => {
 });
 window.addEventListener('keyup', (e) => keys.delete(e.code));
 window.addEventListener('blur', () => keys.clear());
+
+// Touch controls: hold a pad button = hold its key; E taps interact.
+for (const btn of document.querySelectorAll<HTMLButtonElement>('#trTouch button')) {
+  const key = btn.dataset.key;
+  const release = (): void => {
+    if (key) keys.delete(key);
+    btn.setAttribute('aria-pressed', 'false');
+  };
+  btn.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    btn.setPointerCapture?.(e.pointerId);
+    btn.setAttribute('aria-pressed', 'true');
+    if (key) keys.add(key);
+    else if (btn.dataset.act === 'interact') {
+      trialInteract(trial);
+      drainEvents(performance.now());
+      if (trial.state.status === 'won') finish();
+    }
+  });
+  for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture'] as const) btn.addEventListener(ev, release);
+  btn.addEventListener('contextmenu', (e) => e.preventDefault());
+}
 
 els.retry.addEventListener('click', () => startLevel(trial.level.id));
 els.next.addEventListener('click', () => {

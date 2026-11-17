@@ -190,6 +190,11 @@ export class TrialFx {
     this.tumbles.push(t);
   }
 
+  /** True while a pallet is still in the air (or bouncing) toward floor tile (x, y). */
+  landingOn(x: number, y: number): boolean {
+    return this.tumbles.some((t) => Math.floor(t.to.x) === x && Math.floor(t.to.y) === y);
+  }
+
   dust(x: number, y: number, size: number, nowMs: number): void {
     this.puffs.push({ x, y, startMs: nowMs, size });
   }

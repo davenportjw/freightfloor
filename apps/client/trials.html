@@ -39,6 +39,18 @@
         </div>
         <div class="tr-intent" id="trIntent"></div>
         <div class="tr-toasts" id="trToasts" aria-live="polite"></div>
+        <div class="tr-touch" id="trTouch" aria-label="Touch controls">
+          <div class="tr-touch__pad">
+            <button type="button" data-key="KeyW" aria-label="Forward">▲</button>
+            <button type="button" data-key="KeyA" aria-label="Turn left">◀</button>
+            <button type="button" data-key="KeyS" aria-label="Reverse">▼</button>
+            <button type="button" data-key="KeyD" aria-label="Turn right">▶</button>
+          </div>
+          <div class="tr-touch__acts">
+            <button type="button" data-key="ShiftLeft" aria-label="Boost">Boost</button>
+            <button type="button" data-act="interact" class="primary" aria-label="Lift or drop">E</button>
+          </div>
+        </div>
         <section class="tr-result" id="trResult" hidden>
           <div class="tr-result__stars" id="trResStars"></div>
           <h2 id="trResTitle"></h2>

@@ -368,6 +368,11 @@ These effects are drawn by the client only and never change the rules. Under *pr
 - **Tipping warning:** the top pallet flashes toward red once the load passes about 55% of the tipping point, and flashes faster as it gets closer.
 - **Topple:** a dropped pallet arcs from its place in the stack to the floor tile where it landed, bounces once, and scatters cartons and dust. It only becomes liftable on the floor after the bounce.
 - **Impacts:** hard hits shake the screen in proportion to speed and pause the sim for 70 ms. Rack wobbles, rack falls and boost crashes shake harder, and a falling rack throws up dust.
+- **Quiet labels:** the stage hides multiplayer chrome (vehicle id and battery tags, incident pills, order numbers). The pick guide reads `E · Lift pallet` or `Pallet → <bay>`. The strike ring for a fallen pallet appears only after its tumble lands.
+
+### Controls
+
+Keyboard: `W A S D` / arrows to drive, `Shift` to boost, `E` to lift or drop, `R` to retry. On touch screens, an on-screen pad (▲ ◀ ▼ ▶, **Boost**, **E**) appears at the bottom of the stage. The direction buttons are held like keys.
 
 ### Levels
 
