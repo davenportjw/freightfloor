@@ -277,7 +277,15 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
   const step3Body = el('p', { class: 'intro-step__body' }, ['Drop it at the blue Shipping Bay with ', kbd('E'), '.']);
   const perfectLiftChip = el('span', { class: 'intro-chip' }, ['+$5–$10 perfect lift']);
   perfectLiftChip.hidden = true;
-  const boostChip = el('span', { class: 'intro-chip' }, ['Hold ', kbd('Shift'), ' to boost']);
+  // First-time players learn the crash rule up front; returning players get the short tip.
+  let firstVisit = true;
+  try {
+    firstVisit = (opts.storage?.getItem(HELP_SEEN_KEY) ?? null) === null;
+  } catch {
+    /* storage unavailable: treat as first visit */
+  }
+  const boostTail = firstVisit ? ' to boost — crashing drops your load' : ' to boost';
+  const boostChip = el('span', { class: 'intro-chip' }, ['Hold ', kbd('Shift'), boostTail]);
   const chargeChip = el('span', { class: 'intro-chip' }, ['🔋 Low? Park on a green pad, press ', kbd('E')]);
   const manualSteeringText = el('span', { text: ' WASD steering & physics' });
   const manualOfferText = el('span', { text: ' Ranks 3 offers (Q), auto-picks in 5s' });
@@ -526,7 +534,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
         step2Body.replaceChildren('Pull up to a glowing pallet and tap ', kbd('Pick'), ' on the bottom-right.');
       }
       step3Body.replaceChildren('Drop it at the blue Shipping Bay by tapping ', kbd('Drop'), '.');
-      boostChip.replaceChildren('Hold ', kbd('Boost'), ' to boost');
+      boostChip.replaceChildren('Hold ', kbd('Boost'), boostTail);
       chargeChip.replaceChildren('🔋 Low? Park on a green pad, tap ', kbd('Charge'));
       manualSteeringText.textContent = ' Joystick steering & physics';
       manualOfferText.textContent = ' Ranks 3 offers, auto-picks in 5s';
@@ -555,7 +563,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
         step2Body.replaceChildren('Pull up to a glowing pallet and press ', kbd('E'), '.');
       }
       step3Body.replaceChildren('Drop it at the blue Shipping Bay with ', kbd('E'), '.');
-      boostChip.replaceChildren('Hold ', kbd('Shift'), ' to boost');
+      boostChip.replaceChildren('Hold ', kbd('Shift'), boostTail);
       chargeChip.replaceChildren('🔋 Low? Park on a green pad, press ', kbd('E'));
       manualSteeringText.textContent = ' WASD steering & physics';
       manualOfferText.textContent = ' Ranks 3 offers (Q), auto-picks in 5s';

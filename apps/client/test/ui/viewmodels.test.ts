@@ -1104,6 +1104,15 @@ describe('Shift Briefing / Help modal (mountHelp, How to Play + "How the AI work
 
       expect(lifecyclePane.textContent).toContain('Joystick steering & physics');
       expect(lifecyclePane.textContent).not.toContain('WASD steering & physics');
+
+      // First visit (no seen marker) explains the crash rule on the boost tip; returning players get the short tip.
+      expect(playText).toContain('Hold Boost to boost — crashing drops your load');
+      const seenStorage = { getItem: () => '1', setItem: () => {}, removeItem: () => {} };
+      const returning = new MiniElement('div');
+      mountHelp(returning as unknown as HTMLElement, ctx, { storage: seenStorage }).update();
+      const returningPlay = returning.queryAll((e) => e.getAttribute('data-pane') === 'rules')[0]!;
+      expect(returningPlay.textContent).toContain('Hold Boost to boost');
+      expect(returningPlay.textContent).not.toContain('crashing drops your load');
     } finally {
       (globalThis as Record<string, unknown>).document = prevDoc;
       (globalThis as Record<string, unknown>).window = prevWin;
