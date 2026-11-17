@@ -34,6 +34,18 @@ export interface ChangelogRelease {
 /** Newest first. */
 export const CHANGELOG: readonly ChangelogRelease[] = [
   {
+    date: '2026-11-17',
+    title: 'Trial ghosts',
+    items: [
+      {
+        kind: 'new',
+        title: 'Ghost runs in Floor Trials',
+        body: "Race other players' runs. Translucent ghost trucks drive each level with you: World #1 (the fastest run, with its route and lift stops painted on the floor), the run just faster than your best, and your own best. Clear a level faster than before and your run is shared under your callsign. Press G to switch ghosts or hide them.",
+        commits: ['1830788', 'eecf89c', 'a8d1d9d'],
+      },
+    ],
+  },
+  {
     date: '2026-11-16',
     title: 'Floor Trials',
     items: [

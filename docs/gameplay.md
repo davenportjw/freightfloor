@@ -384,6 +384,23 @@ Typed orders go through Model Armor and the same limiter as the buttons. Natural
 | Stars | Par time is the sum of planned trips at cruise speed (`trialPar`). ★★★ means within 1.25× par, ★★ within 1.7× par, ★ any finish. Each strike lowers the cap by one star (1 strike caps at ★★, 2 strikes at ★). The clock starts on your first input. |
 | Unlocks | A level unlocks once the previous level has at least 1 star. Best stars and time are saved per browser. |
 
+### Ghost runs
+
+Other players' runs drive the level with you as translucent **ghost trucks**, so you can watch how a fast run takes the corners, where it stops to lift, and how it stacks. A small selector at the top right of the stage (`G` cycles it) picks the highlighted ghost:
+
+| Option | Ghost |
+|---|---|
+| **World #1** (default) | The fastest shared run on this level. It is the teaching ghost. |
+| **Next to beat** | The shared run just faster than your best time. |
+| **My best** | Your own fastest clear, saved in this browser. It works offline. |
+| **Off** | No ghosts. |
+
+- Up to three ghosts (World #1, Next to beat, My best) are drawn at once, each labelled with callsign and time. The highlighted one is brighter and paints a faint trail of its whole route on the floor, brighter for the next 3 s, with rings where it lifted (filled) and dropped (open).
+- Ghosts start on your first input and follow your level clock. They show forks, stack and sway exactly as recorded. Under *prefers-reduced-motion* the ghost stacks do not lean.
+- Every attempt is recorded. On a clear that beats your saved best time, the run is kept locally and shared with the server under your callsign (your game callsign, or the generated one if you have never joined a shift). A best that could not be shared is retried the next time you open the level.
+- The server keeps only each player's fastest run per level and checks it against the level rules first (start pose, speed, stack limit, deliveries, strikes, stars). Runs are tied to a level's rules revision, so changing a level resets its ghosts.
+- If the server can't be reached, the selector says so. My best still works and no ghost is made up.
+
 ### Feedback
 
 These effects are drawn by the client only and never change the rules. Under *prefers-reduced-motion*, the shake and tumble are skipped and the stack snaps straight to its lean.
@@ -418,5 +435,6 @@ Keyboard: `W A S D` / arrows to drive, `Shift` to boost, `E` to lift or drop, `R
 | Shift / Space | Boost (crashing drops the load) |
 | E | Lift / drop |
 | R | Retry level |
+| G | Cycle the ghost selector (World #1 → Next to beat → My best → Off) |
 | Enter | Next level (on the result card) |
 | 1–9 | Pick an unlocked level |
