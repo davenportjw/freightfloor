@@ -4,7 +4,8 @@
  *
  * Runs the deterministic trial sim (`@warehouse/sim` trials.ts) locally at a fixed 10 Hz and
  * renders with the main game's WarehouseRenderer. Progress (best stars / time per level) is
- * kept in localStorage; nothing talks to the server.
+ * kept in localStorage. Ghost runs (ghosts.ts) record every attempt, keep your fastest locally and
+ * share / fetch other players' runs through the lobby's `/api/trials/:levelId/*` endpoints.
  */
 import {
   IMPACT_DROP,
@@ -25,6 +26,7 @@ import type { Pose } from '../render/motion.js';
 import { forkHeightM, isoZ } from '../render/liftGeometry.js';
 import { CARGO_TIER_Z, cargoOffset } from '../render/vehicles.js';
 import { StackWhip, TrialFx } from './fx.js';
+import { TrialGhosts } from './ghosts.js';
 
 const STEP_MS = 100; // 1 tick = 0.1 game-min = 100 ms real time (matches TICK_MIN)
 const STORE_KEY = 'ff.trials.v1';
@@ -93,6 +95,19 @@ const motionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
 const reducedMotion = (): boolean => Boolean(motionQuery?.matches);
 const whip = new StackWhip();
 const fx = new TrialFx(reducedMotion);
+const ghosts = new TrialGhosts({
+  stage: els.canvas.parentElement ?? document.body,
+  storage: (() => {
+    try {
+      return window.localStorage;
+    } catch {
+      return null;
+    }
+  })(),
+  reducedMotion,
+});
+/** Ghost clock (level seconds): follows the drawn player pose, keeps running after the finish. */
+let ghostT = 0;
 
 const renderer = new WarehouseRenderer({
   canvas: els.canvas,
@@ -151,6 +166,8 @@ function startLevel(id: string): void {
   els.toasts.innerHTML = '';
   els.result.hidden = true;
   els.levelName.textContent = `${trial.level.num}. ${trial.level.name}`;
+  ghostT = 0;
+  ghosts.startLevel(trial, progress[id]?.time ?? null);
   renderLevels();
   toast({ seq: 0, t: 0, kind: 'hint', text: trial.level.tip });
 }
@@ -202,6 +219,7 @@ function stepWithFx(now: number): void {
   const forkZ = isoZ(forkHeightM(Number.isFinite(v.fork) ? v.fork : 0)) + 2;
   const side = Math.sign(trial.state.sway) || 1;
   stepTrial(trial, input());
+  ghosts.record(trial);
   const drop = prevSpeed - Math.abs(v.speedNow);
   if (drop > IMPACT_DROP && Math.abs(v.speedNow) < IMPACT_REST) {
     fx.kick(3 + prevSpeed * 2.2, now);
@@ -232,6 +250,7 @@ function stepWithFx(now: number): void {
 function finish(): void {
   const st = trial.state;
   const won = st.status === 'won';
+  ghosts.finish(trial);
   if (won) {
     const best = progress[trial.level.id];
     if (!best || st.stars > best.stars || (st.stars === best.stars && st.t < best.time)) {
@@ -300,6 +319,8 @@ function frame(now: number): void {
     y: prevPose.y + (cur.y - prevPose.y) * k,
     a: prevPose.a + da * k,
   };
+  if (trial.state.status === 'running') ghostT = Math.max(0, trial.state.t - 0.1 + 0.1 * k);
+  else if (trial.state.status !== 'ready') ghostT += dt / 1000;
   const guide = trialGuide(trial);
   const opts: RenderOptions = {
     layers: { routes: false, traffic: false, labels: true, ghost: false },
@@ -312,7 +333,11 @@ function frame(now: number): void {
     myPose: pose,
     cargoLean: whip.lean(trial.state.sway),
     hiddenOrders: fx.hidden,
-    worldFx: (pt, nowMs) => fx.draw(pt, nowMs),
+    floorFx: (pt) => ghosts.drawFloor(pt, ghostT),
+    worldFx: (pt, nowMs) => {
+      fx.draw(pt, nowMs);
+      ghosts.draw(pt, ghostT);
+    },
     minimalChrome: true,
     markerFilter: (m) => !fx.landingOn(m.x, m.y),
   };
@@ -336,8 +361,11 @@ window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   if (e.code === 'KeyE') {
     trialInteract(trial);
+    ghosts.record(trial);
     drainEvents(performance.now());
     if (trial.state.status === 'won') finish();
+  } else if (e.code === 'KeyG') {
+    ghosts.cycle();
   } else if (e.code === 'KeyR') {
     startLevel(trial.level.id);
   } else if (e.code === 'Enter' && !els.result.hidden && !els.next.disabled) {
@@ -364,6 +392,7 @@ for (const btn of document.querySelectorAll<HTMLButtonElement>('#trTouch button'
     if (key) keys.add(key);
     else if (btn.dataset.act === 'interact') {
       trialInteract(trial);
+      ghosts.record(trial);
       drainEvents(performance.now());
       if (trial.state.status === 'won') finish();
     }

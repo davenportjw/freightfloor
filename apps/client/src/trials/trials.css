@@ -138,6 +138,31 @@ kbd {
 .tr-result button.primary kbd { background: var(--teal-d); color: #fff; border-color: var(--teal-d); }
 .tr-result button:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* Ghost runs selector (top right): World #1 / Next to beat / My best / Off. */
+.tr-ghosts {
+  position: absolute; top: 60px; right: 14px; display: grid; gap: 6px; justify-items: end;
+  max-width: min(360px, calc(100% - 28px));
+}
+.tr-ghosts__label { display: none; }
+.tr-ghosts__seg {
+  display: flex; padding: 3px; gap: 2px; border-radius: 10px; background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--line); box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+.tr-ghosts__seg button {
+  padding: 4px 9px; border: 0; border-radius: 7px; background: transparent; color: var(--ink-2);
+  font: 600 13px/1.2 inherit; cursor: pointer; white-space: nowrap;
+}
+.tr-ghosts__seg button:hover { background: var(--soft); }
+.tr-ghosts__seg button[data-empty='true'] { color: var(--faint); }
+.tr-ghosts__seg button[aria-pressed='true'] { background: var(--ink); color: #fff; }
+.tr-ghosts__seg button:focus-visible { outline: 2px solid var(--teal); outline-offset: 1px; }
+.tr-ghosts__status {
+  padding: 4px 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.94); border: 1px solid var(--line);
+  font-size: 12px; color: var(--muted); text-align: right; pointer-events: none; white-space: pre-line;
+}
+.tr-ghosts__status:empty { display: none; }
+.tr-ghosts__status[data-error='true'] { color: var(--red); border-color: #fecaca; }
+
 @media (max-width: 760px) {
   .tr-shell { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .tr-rail { max-height: 34vh; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -148,6 +173,8 @@ kbd {
   .tr-toasts { top: 96px; left: 10px; right: 10px; }
   .tr-toast { font-size: 13px; }
   .tr-intent { white-space: normal; text-align: center; max-width: calc(100% - 20px); }
+  .tr-ghosts { top: 52px; right: 10px; }
+  .tr-ghosts__seg button { padding: 3px 6px; font-size: 12px; }
 }
 
 /* Touch controls: only on coarse pointers (phones / tablets). */

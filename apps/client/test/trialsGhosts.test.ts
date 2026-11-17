@@ -1,0 +1,134 @@
+import { describe, expect, it } from 'vitest';
+import { createTrial, trialLevel, trialRev, type GhostRun } from '@warehouse/sim';
+import type { TrialGhostsResponse } from '@warehouse/protocol';
+import { drive, runOf } from '../../../packages/sim/test/helpers/trialDriver.js';
+import {
+  CLIENT_ID_KEY,
+  GHOST_MODE_KEY,
+  GHOST_STORE_KEY,
+  fetchTrialGhosts,
+  loadGhostMode,
+  localBest,
+  pickGhosts,
+  saveLocalBest,
+  submitTrialRun,
+  trialClientId,
+} from '../src/trials/ghosts.js';
+
+function memStorage(init: Record<string, string> = {}) {
+  const m = new Map(Object.entries(init));
+  return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m };
+}
+
+function genuine(levelId: string, boost = false): GhostRun {
+  const tr = createTrial(levelId);
+  const rec = drive(tr, { boost });
+  expect(tr.state.status).toBe('won');
+  return runOf(tr, rec);
+}
+
+const slow = genuine('rush-hour');
+const fast = genuine('rush-hour', true);
+const level = trialLevel('rush-hour')!;
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+}
+
+describe('Floor Trials ghosts: local best', () => {
+  it('keeps only the fastest run for the current rules revision', () => {
+    const s = memStorage({ 'ff.trials.v1': '{"rush-hour":{"stars":2,"time":80}}' });
+    expect(localBest(s, level)).toBeNull();
+    expect(saveLocalBest(s, level, slow)).toBe(true);
+    expect(localBest(s, level)).toMatchObject({ time: slow.time, submitted: false, rev: trialRev(level) });
+    expect(saveLocalBest(s, level, slow)).toBe(false);
+    expect(saveLocalBest(s, level, fast)).toBe(true);
+    expect(saveLocalBest(s, level, slow)).toBe(false);
+    expect(localBest(s, level)?.time).toBe(fast.time);
+    // The progress key is untouched (ff.trials.v1 stays compatible).
+    expect(s.m.get('ff.trials.v1')).toBe('{"rush-hour":{"stars":2,"time":80}}');
+    // A stale revision is ignored and replaced.
+    expect(localBest(s, { ...level, rev: trialRev(level) + 1 })).toBeNull();
+    expect(saveLocalBest(s, { ...level, rev: trialRev(level) + 1 }, { ...slow, rev: trialRev(level) + 1 })).toBe(true);
+  });
+
+  it('survives corrupt storage and defaults the selector to World #1', () => {
+    const s = memStorage({ [GHOST_STORE_KEY]: '{not json', [GHOST_MODE_KEY]: 'bogus' });
+    expect(localBest(s, level)).toBeNull();
+    expect(loadGhostMode(s)).toBe('world');
+    expect(loadGhostMode(memStorage({ [GHOST_MODE_KEY]: 'off' }))).toBe('off');
+    expect(loadGhostMode(null)).toBe('world');
+  });
+
+  it('reuses (or mints) the live game clientId', () => {
+    expect(trialClientId(memStorage({ [CLIENT_ID_KEY]: 'abc-123' }))).toBe('abc-123');
+    const s = memStorage();
+    const id = trialClientId(s);
+    expect(id).toMatch(/[0-9a-f-]{36}/);
+    expect(s.m.get(CLIENT_ID_KEY)).toBe(id);
+  });
+});
+
+describe('Floor Trials ghosts: slot selection', () => {
+  const board = (top: GhostRun[], next: GhostRun | null): TrialGhostsResponse => ({
+    levelId: 'rush-hour',
+    rev: 1,
+    total: top.length,
+    top: top.map((r, i) => ({ rank: i + 1, publicId: `p1_${'a'.repeat(22)}`, name: `p${i}`, time: r.time, stars: r.stars, strikes: r.strikes, track: r.track })),
+    next: next ? { rank: 1, publicId: `p1_${'b'.repeat(22)}`, name: 'nx', time: next.time, stars: next.stars, strikes: next.strikes, track: next.track } : null,
+  });
+  const mine = (r: GhostRun) => ({ rev: r.rev, time: r.time, stars: r.stars, strikes: r.strikes, track: r.track, submitted: true });
+
+  it('orders World #1, Next to beat, My best and drops duplicates', () => {
+    const shown = pickGhosts(board([fast, slow], fast), mine(slow));
+    expect(shown.map((g) => [g.slot, g.name])).toEqual([
+      ['world', 'p0'],
+      ['mine', 'You'],
+    ]);
+    expect(shown[0].track.x.length).toBe(Math.round(fast.time * 10) + 1);
+  });
+
+  it('labels your own shared run "You" instead of drawing it twice', () => {
+    expect(pickGhosts(board([slow], null), mine(slow)).map((g) => [g.slot, g.name])).toEqual([['world', 'You']]);
+  });
+
+  it('still shows My best when the lobby is unreachable (board null)', () => {
+    expect(pickGhosts(null, mine(slow)).map((g) => g.slot)).toEqual(['mine']);
+    expect(pickGhosts(null, null)).toEqual([]);
+  });
+
+  it('skips undecodable tracks instead of inventing a ghost', () => {
+    const b = board([fast], null);
+    b.top[0].track = 'AAAA';
+    expect(pickGhosts(b, null)).toEqual([]);
+  });
+});
+
+describe('Floor Trials ghosts: lobby calls', () => {
+  it('passes the caller best time and validates the reply', async () => {
+    const urls: string[] = [];
+    const ok = await fetchTrialGhosts(async (url) => {
+      urls.push(url);
+      return jsonResponse(200, { levelId: 'rush-hour', rev: 1, total: 0, top: [], next: null });
+    }, 'rush-hour', 41.25);
+    expect(ok).toMatchObject({ ok: true, data: { total: 0 } });
+    expect(urls[0]).toBe('/api/trials/rush-hour/ghosts?time=41.3');
+    const err = await fetchTrialGhosts(async () => jsonResponse(503, { error: 'ghosts_unavailable', message: 'Shared ghosts are unavailable right now.' }), 'rush-hour', null);
+    expect(err).toEqual({ ok: false, error: 'Shared ghosts are unavailable right now.' });
+    const offline = await fetchTrialGhosts(async () => {
+      throw new TypeError('Failed to fetch');
+    }, 'rush-hour', null);
+    expect(offline).toEqual({ ok: false, error: 'Failed to fetch' });
+  });
+
+  it('submits the run without the levelId in the body', async () => {
+    let sent: { url: string; body: Record<string, unknown> } | null = null;
+    const res = await submitTrialRun(async (url, init) => {
+      sent = { url, body: JSON.parse(String(init?.body)) };
+      return jsonResponse(200, { ok: true, improved: true, best: { time: slow.time, stars: slow.stars }, rank: 1, total: 1 });
+    }, 'client-1', slow);
+    expect(res).toMatchObject({ ok: true, data: { rank: 1 } });
+    expect(sent!.url).toBe('/api/trials/rush-hour/runs');
+    expect(Object.keys(sent!.body).sort()).toEqual(['clientId', 'rev', 'stars', 'strikes', 'time', 'track']);
+  });
+});
