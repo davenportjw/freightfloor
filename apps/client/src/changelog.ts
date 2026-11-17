@@ -50,6 +50,12 @@ export const CHANGELOG: readonly ChangelogRelease[] = [
         commits: ['1830788', 'eecf89c', 'a8d1d9d'],
       },
       {
+        kind: 'fixed',
+        title: 'Smoother motion across the floor',
+        body: 'Conveyor totes roll steadily down each belt instead of stuttering tile to tile, and dock trucks glide at an even pace. Forks rise and lower smoothly on every forklift, your truck no longer jumps when Co-Pilot takes over or hands back control, and floating labels, callouts and incident markers ease and fade instead of snapping. The flashing lights in Cab View are calmer too.',
+        commits: ['f13201b'],
+      },
+      {
         kind: 'improved',
         title: 'Floor Trials level list',
         body: 'The level rail is now split into Getting started and Challenges, and each challenge card shows tags for its twists.',
