@@ -104,6 +104,7 @@ import {
   runStartEvent,
 } from './analytics.js';
 import { recordLocalVisit } from './visits.js';
+import { registerWebMcpTools } from './webmcp.js';
 
 // Re-exported for the existing test suite (test/client.test.ts).
 export { applyQuantisedDelta, formatRunDisplayName, nextRunDisplayName, parseRunDisplayName } from './state.js';
@@ -1817,5 +1818,6 @@ function boot(): void {
 }
 
 if (typeof document !== 'undefined' && typeof window !== 'undefined' && document.getElementById('world')) {
+  registerWebMcpTools();
   boot();
 }

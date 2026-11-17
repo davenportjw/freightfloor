@@ -9,6 +9,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import { z } from 'zod';
+import { CONTENT_SIGNAL, registerAgentDiscoveryRoutes } from './agentDiscovery.js';
 import {
   BASE_SITE_IDS,
   getCanonicalBaseSiteId,
@@ -2278,6 +2279,8 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
     reply.type('text/plain; charset=utf-8').header('Cache-Control', 'public, max-age=3600');
     return [
       'User-agent: *',
+      // https://contentsignals.org/: search & answer engines yes, model training no.
+      `Content-Signal: ${CONTENT_SIGNAL}`,
       'Allow: /',
       'Disallow: /api/',
       'Disallow: /ws',
@@ -2286,6 +2289,7 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
       '# Plain-text summary for LLM and answer-engine crawlers.',
       `# LLMs: ${publicOrigin(req)}/llms.txt`,
       '',
+      `Agentmap: ${publicOrigin(req)}/.well-known/ai-catalog.json`,
       `Sitemap: ${publicOrigin(req)}/sitemap.xml`,
       '',
     ].join('\n');
@@ -3442,6 +3446,7 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
 
   const here = dirname(fileURLToPath(import.meta.url));
   const staticRoot = opts.staticDir ?? resolve(here, '../../client/dist');
+  registerAgentDiscoveryRoutes(app, { publicOrigin, staticRoot });
   if (existsSync(staticRoot)) {
     await app.register(fastifyStatic, {
       root: staticRoot,
@@ -3452,6 +3457,11 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
     app.setNotFoundHandler(async (req, reply) => {
       if (req.url.startsWith('/api/') || req.url.startsWith('/sites/')) {
         return reply.code(404).send({ error: 'not_found', message: 'API route not found' });
+      }
+      // Unpublished well-known documents are real 404s, not the SPA shell (agents read an
+      // HTML 200 there as a soft-404).
+      if (req.url.startsWith('/.well-known/')) {
+        return reply.code(404).type('text/plain; charset=utf-8').send('Not found');
       }
       // Missing files (anything with an extension, e.g. /apple-touch-icon.png) get a real 404
       // instead of index.html, so crawlers don't index soft-404s.
