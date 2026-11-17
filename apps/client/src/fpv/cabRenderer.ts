@@ -1275,7 +1275,6 @@ export class CabRenderer {
     if (showLift && target) {
       if (pip) this.drawPipFrame(pip, target, me);
       this.drawDockedGauge(target, me, Boolean(target.active));
-      if (opts.rackLift?.isTwoTapConfirmPending()) this.pill.pill('TAP E AT SWEET SPOT', VW / 2, VH * 0.36, '#D97706');
     }
     const flash = opts.rackLift?.lastFlash(performance.now());
     if (flash) {
@@ -1327,12 +1326,12 @@ export class CabRenderer {
     if (g.kind === 'pick') {
       const id = g.order?.id;
       const what = id != null ? `#${id}` : '';
-      if (target && g.inRange && opts.rackLiftEnabled) return `Hold E · Lift ${what}${tier}`.trim();
+      if (target && g.inRange && opts.rackLiftEnabled) return `Tap E · Pick up ${what} · Hold for bonus${tier}`;
       return (g.inRange ? `E · Pick up ${what}` : id != null ? `Pick #${id}` : 'Pick').trim() + (target ? tier : '');
     }
     if (g.kind === 'drop' && g.stow) {
       const rack = g.order?.putaway?.rackId ?? me.cargo?.[0]?.putaway?.rackId ?? 'rack';
-      if (target && g.inRange && opts.rackLiftEnabled) return `Hold E · Stow ${rack}${tier}`;
+      if (target && g.inRange && opts.rackLiftEnabled) return `Tap E · Stow ${rack} · Hold for bonus${tier}`;
       return (g.inRange ? `E · Stow at ${rack}` : `Stow ${rack}`) + (target ? tier : '');
     }
     if (g.kind === 'drop') {

@@ -1387,7 +1387,7 @@ export class WarehouseRenderer {
       if (opts.rackLiftEnabled && fullOrder && requiresRackLift(fullOrder, 'pick')) {
         liftLevel = ((fullOrder.slot.level ?? 0) as 0 | 1 | 2);
         const tierLabel = RACK_LEVEL_LABELS[liftLevel] ?? 'L1 Low';
-        label = g.inRange && liftLevel > 0 ? `Hold E · Lift ${what} · ${tierLabel}`.trim() : `${label} · ${tierLabel}`;
+        label = g.inRange ? `Tap E · Pick up ${what} · Hold for bonus · ${tierLabel}` : `${label} · ${tierLabel}`;
       }
     } else if (g.kind === 'drop' && g.stow) {
       const carried = (me.cargo ?? []) as Array<Order & { rack?: string }>;
@@ -1400,7 +1400,7 @@ export class WarehouseRenderer {
       if (opts.rackLiftEnabled && stowOrder && requiresRackLift(stowOrder, 'stow')) {
         liftLevel = ((stowOrder.putaway?.level ?? 0) as 0 | 1 | 2);
         const tierLabel = RACK_LEVEL_LABELS[liftLevel] ?? 'L1 Low';
-        label = g.inRange && liftLevel > 0 ? `Hold E · Stow ${rack ?? 'rack'} · ${tierLabel}` : `${label} · ${tierLabel}`;
+        label = g.inRange ? `Tap E · Stow ${rack ?? 'rack'} · Hold for bonus · ${tierLabel}` : `${label} · ${tierLabel}`;
       }
     } else if (g.kind === 'drop') {
       const bay = g.order?.bay ?? world.map.bays.find((bb) => bb.tiles.some((t) => t.x === g.x && t.y === g.y))?.id;
@@ -1612,10 +1612,6 @@ export class WarehouseRenderer {
     ctx.arc(trackX + trackW * 0.5, cursorY, 2.2, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
-
-    if (rackLift?.isTwoTapConfirmPending()) {
-      pt.pill('TAP E AT SWEET SPOT', cardX + cardW * 0.5, Math.max(44, cardY - 14), '#D97706');
-    }
   }
 
   /** Rising floating feedback flash badge after completing a rack lift. */
