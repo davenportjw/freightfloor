@@ -30,7 +30,7 @@ const PROTOCOL_DOC_URL = `${SOURCE_URL}/blob/main/docs/protocol.md`;
 const SKILL_NAME = 'freightfloor';
 
 /** Content-Signal preferences, also emitted in robots.txt (https://contentsignals.org/). */
-export const CONTENT_SIGNAL = 'search=yes, ai-input=yes, ai-train=no';
+export const CONTENT_SIGNAL = 'search=yes, ai-input=yes, ai-train=yes';
 
 /** RFC 8288 Link header for the HTML homepage. */
 export function homepageLinkHeader(): string {

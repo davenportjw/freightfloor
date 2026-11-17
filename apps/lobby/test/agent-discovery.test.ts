@@ -57,7 +57,7 @@ describe('@warehouse/lobby: agent discovery', () => {
 
   it('adds Content-Signal and Agentmap to robots.txt', async () => {
     const robots = await app.inject({ method: 'GET', url: '/robots.txt', headers });
-    expect(robots.body).toMatch(/User-agent: \*\nContent-Signal: search=yes, ai-input=yes, ai-train=no\n/);
+    expect(robots.body).toMatch(/User-agent: \*\nContent-Signal: search=yes, ai-input=yes, ai-train=yes\n/);
     expect(robots.body).toContain('Agentmap: https://freightfloor.com/.well-known/ai-catalog.json');
   });
 

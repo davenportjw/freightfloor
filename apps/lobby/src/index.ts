@@ -2279,7 +2279,7 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
     reply.type('text/plain; charset=utf-8').header('Cache-Control', 'public, max-age=3600');
     return [
       'User-agent: *',
-      // https://contentsignals.org/: search & answer engines yes, model training no.
+      // https://contentsignals.org/: search, answer engines, and model training all allowed.
       `Content-Signal: ${CONTENT_SIGNAL}`,
       'Allow: /',
       'Disallow: /api/',
