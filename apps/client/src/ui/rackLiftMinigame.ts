@@ -7,11 +7,9 @@
  *   - Holding `E` (`onInteractDown`) smoothly raises the 3D forklift mast & fork carriage from
  *     `0.08` up to `0.98` (oscillating between `0.06` and `0.98` if held past top).
  *   - Releasing `E` (`onInteractUp`) locks `currentFork` and sends `{ type: 'interact', forkHeight }`.
- *   - Smart Hybrid Safety Net (`< 140ms`): if the target shelf is L2 (`1`) or L3 (`2`) and the player
- *     only tapped `E` quickly (`heldMs < 140`), `twoTapArmed = true` keeps the forks rising so a
- *     second `E` press locks the height instead of accidentally scraping at the bottom!
- *   - On L1 (`0`), a quick tap is already inside the L1 sweet spot (`0.08..0.22`), so releasing
- *     immediately commits a Perfect/Clean L1 grab with zero extra friction.
+ *   - Quick-tap safety net (`< 140ms`): a quick tap on any level (`heldMs < 140`) bypasses the
+ *     slider and sends a plain `{ type: 'interact' }` (standard pickup/stow, ungraded, no penalty),
+ *     so one press always grabs the pallet. Only a deliberate hold plays the graded minigame.
  */
 import {
   evaluateRackLift,
@@ -29,7 +27,8 @@ import {
   type World,
 } from '@warehouse/sim';
 
-export const TWO_TAP_THRESHOLD_MS = 140;
+/** Releases shorter than this are a quick tap: a plain, ungraded pickup/stow. */
+export const QUICK_TAP_THRESHOLD_MS = 140;
 
 export interface RackLiftGaugeLayout {
   isCompact: boolean;
@@ -122,7 +121,6 @@ function hasArmedPrecisionStop(w: World | null, v: Vehicle | null, slot: Slot): 
 
 export class RackLiftController {
   active = false;
-  twoTapArmed = false;
   orderId: number | null = null;
   action: 'pick' | 'stow' = 'pick';
   slot: Slot | null = null;
@@ -177,10 +175,6 @@ export class RackLiftController {
     return this.active;
   }
 
-  isTwoTapConfirmPending(): boolean {
-    return this.active && this.twoTapArmed;
-  }
-
   lastFlash(nowMs: number): (RackLiftFlash & { at: number }) | null {
     if (!this.flash) return null;
     if (nowMs >= this.flash.untilMs) {
@@ -227,7 +221,6 @@ export class RackLiftController {
       return { action: 'immediate' };
     }
     this.active = true;
-    this.twoTapArmed = false;
     this.orderId = cand.order.id;
     this.action = cand.action;
     this.slot = cand.slot;
@@ -249,17 +242,18 @@ export class RackLiftController {
     world: World | null = null,
   ):
     | { action: 'noop' }
-    | { action: 'continue_two_tap' }
+    | { action: 'tap' }
     | {
         action: 'commit';
         forkHeight: number;
         evaluation: ReturnType<typeof evaluateRackLift> & { bonusPts: number };
       } {
-    if (!this.active || this.twoTapArmed) return { action: 'noop' };
+    if (!this.active) return { action: 'noop' };
     const heldMs = Math.max(0, nowMs - this.startedAtMs);
-    if (heldMs < TWO_TAP_THRESHOLD_MS && this.targetLevel > 0) {
-      this.twoTapArmed = true;
-      return { action: 'continue_two_tap' };
+    if (heldMs < QUICK_TAP_THRESHOLD_MS) {
+      // A tap is a standard pickup/stow: drop the lift and let the caller send a plain interact.
+      this.cancel(vehicle);
+      return { action: 'tap' };
     }
     let committedFork = 0;
     this.commit(nowMs, world, vehicle, (fh) => {
@@ -298,7 +292,9 @@ export class RackLiftController {
     sendInteract: (forkHeight?: number) => void,
   ): void {
     const res = this.onKeyUp(nowMs, vehicle, world);
-    if (res.action === 'commit') {
+    if (res.action === 'tap') {
+      sendInteract();
+    } else if (res.action === 'commit') {
       sendInteract(res.forkHeight);
     }
   }
@@ -361,7 +357,6 @@ export class RackLiftController {
       vehicle.forkTarget = 0.3;
     }
     this.active = false;
-    this.twoTapArmed = false;
     sendInteract(fork);
   }
 
@@ -401,7 +396,6 @@ export class RackLiftController {
   cancel(vehicle?: Vehicle | null): void {
     const wasActive = this.active;
     this.active = false;
-    this.twoTapArmed = false;
     this.orderId = null;
     this.slot = null;
     if (wasActive && vehicle) {

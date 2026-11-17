@@ -1612,10 +1612,6 @@ export class WarehouseRenderer {
     ctx.arc(trackX + trackW * 0.5, cursorY, 2.2, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
-
-    if (rackLift?.isTwoTapConfirmPending()) {
-      pt.pill('TAP E AT SWEET SPOT', cardX + cardW * 0.5, Math.max(44, cardY - 14), '#D97706');
-    }
   }
 
   /** Rising floating feedback flash badge after completing a rack lift. */

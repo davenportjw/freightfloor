@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createWorld, postOrder } from '@warehouse/sim';
 import { ClientStore, RACK_LIFT_KEY, readRackLiftOverride } from '../src/state.js';
-import { RackLiftController, TWO_TAP_THRESHOLD_MS } from '../src/ui/rackLiftMinigame.js';
+import { QUICK_TAP_THRESHOLD_MS, RackLiftController } from '../src/ui/rackLiftMinigame.js';
 
 function createMemoryStorage(): Storage {
   const map = new Map<string, string>();
@@ -110,43 +110,34 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
     expect(ctrl.lastFlash(1800)?.grade).toBe('perfect');
   });
 
-  it('5. quick-tapping E (< 140ms) on an L2 rack order switches to twoTapConfirm mode instead of scraping at fork=0.08, and a second tap commits', () => {
-    const world = createWorld({ seed: 42 });
-    const v = world.vehicles[0]!;
-    v.cargo = [];
-    const order = postOrder(world)!;
-    order.slot = { ...order.slot, id: 'R1-1', zone: 'A', level: 1 };
-    expect(order.slot.level).toBe(1);
+  it('5. a quick tap of E (< 140ms) on an L1/L2/L3 rack order is one press: a plain ungraded pickup, no second tap needed', () => {
+    for (const level of [0, 1, 2] as const) {
+      const world = createWorld({ seed: 42 });
+      const v = world.vehicles[0]!;
+      v.cargo = [];
+      const order = postOrder(world)!;
+      order.slot = { ...order.slot, id: 'R1-1', zone: 'A', level };
 
-    v.x = order.slot.ax;
-    v.y = order.slot.ay;
-    v.px = v.x + 0.5;
-    v.py = v.y + 0.5;
+      v.x = order.slot.ax;
+      v.y = order.slot.ay;
+      v.px = v.x + 0.5;
+      v.py = v.y + 0.5;
 
-    const ctrl = new RackLiftController();
-    const downRes = ctrl.onKeyDown(2000, world, v, true);
-    expect(downRes).toEqual({ action: 'lifting', level: 1 });
+      const ctrl = new RackLiftController();
+      const downRes = ctrl.onKeyDown(2000, world, v, true);
+      expect(downRes).toEqual({ action: 'lifting', level });
 
-    // Release after 80ms (< TWO_TAP_THRESHOLD_MS = 140ms)
-    expect(80).toBeLessThan(TWO_TAP_THRESHOLD_MS);
-    const upRes = ctrl.onKeyUp(2080, v);
-    expect(upRes).toEqual({ action: 'continue_two_tap' });
-    expect(ctrl.isActive()).toBe(true);
-    expect(ctrl.isTwoTapConfirmPending()).toBe(true);
+      expect(80).toBeLessThan(QUICK_TAP_THRESHOLD_MS);
+      const sent: (number | undefined)[] = [];
+      ctrl.onInteractUp(2080, world, v, (fh) => sent.push(fh));
+      // Exactly one plain interact (no forkHeight ⇒ server does a standard pickup, no grade).
+      expect(sent).toEqual([undefined]);
+      expect(ctrl.isActive()).toBe(false);
+      expect(ctrl.lastFlash(2100)).toBeNull();
 
-    // Step ~410ms so fork reaches ~0.54 (L2 sweet spot)
-    ctrl.step(410, world, v, true);
-    expect(v.fork).toBeGreaterThan(0.45);
-    expect(v.fork).toBeLessThan(0.65);
-
-    // Second keydown commits at the current fork height
-    const secondTap = ctrl.onKeyDown(2490, world, v, true);
-    expect(secondTap.action).toBe('commit');
-    if (secondTap.action === 'commit') {
-      expect(secondTap.evaluation.grade).toBe('perfect');
-      expect(secondTap.forkHeight).toBeCloseTo(v.fork, 3);
+      // A later press starts a fresh lift instead of committing a stale one.
+      expect(ctrl.onKeyDown(2600, world, v, true).action).toBe('lifting');
     }
-    expect(ctrl.isActive()).toBe(false);
   });
 
   it('6. non-rack interactions (inbound DOCK-* pickup, outbound bay drop, charger) always return { action: "immediate" } even when enabled', () => {

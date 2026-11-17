@@ -588,11 +588,9 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
           kbd(keyLabel),
           ' to raise your 3D forks along the vertical gauge and release ',
           kbd(keyLabel),
-          ' inside the green target band. Quick-tapping ',
+          ' inside the green target band. A quick tap of ',
           kbd(keyLabel),
-          ' on L2/L3 keeps the forks rising so a second ',
-          kbd(keyLabel),
-          ' locks the height.',
+          ' is a standard grab with no bonus or penalty.',
         ]),
         el('div', { class: 'intro-lift-grades' }, [
           el('span', { class: 'intro-lift-grade good' }, [

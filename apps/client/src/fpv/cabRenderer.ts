@@ -1275,7 +1275,6 @@ export class CabRenderer {
     if (showLift && target) {
       if (pip) this.drawPipFrame(pip, target, me);
       this.drawDockedGauge(target, me, Boolean(target.active));
-      if (opts.rackLift?.isTwoTapConfirmPending()) this.pill.pill('TAP E AT SWEET SPOT', VW / 2, VH * 0.36, '#D97706');
     }
     const flash = opts.rackLift?.lastFlash(performance.now());
     if (flash) {

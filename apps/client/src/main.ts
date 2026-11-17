@@ -465,7 +465,10 @@ function boot(): void {
       if (!me || !store.isRackLiftActive()) return;
       // Pass the world so a hold-release commit detects an armed precision stop (Slide & Snatch).
       const res = rackLift.onKeyUp(performance.now(), me, store.world);
-      if (res.action === 'commit') {
+      if (res.action === 'tap') {
+        // Quick tap: standard pickup/stow, one press.
+        actions.interact();
+      } else if (res.action === 'commit') {
         actions.interact(res.forkHeight);
       }
     },
