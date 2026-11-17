@@ -132,3 +132,18 @@ describe('@warehouse/lobby: agent discovery', () => {
     }
   });
 });
+
+describe('@warehouse/lobby: agent discovery markdown URLs', () => {
+  it('never wraps absolute URLs in code spans (scanners read the closing backtick as part of the URL)', async () => {
+    const app = await buildLobbyServer({ store: new InMemoryLobbyStore([]), ticketSecret: TEST_SECRET, gaMeasurementId: null });
+    try {
+      for (const url of ['/auth.md', '/.well-known/agent-skills/freightfloor/SKILL.md']) {
+        const res = await app.inject({ method: 'GET', url, headers });
+        expect(res.statusCode).toBe(200);
+        expect(res.body).not.toMatch(/https?:\/\/[^\s`]*`/);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+});

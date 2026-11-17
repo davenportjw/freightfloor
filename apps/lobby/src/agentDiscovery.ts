@@ -94,9 +94,9 @@ ${origin}/openapi.json.
 
 | Endpoint | Returns |
 | --- | --- |
-| \`${origin}/api/network\` | \`sites[]\` (id, state \`live\`/\`online\`/\`break\`/\`offline\`, drivers, spectators, maxDrivers, shipped, tier, phase), top-10 human \`leaderboard[]\`, \`queueSize\`, \`maxTotalDrivers\` |
-| \`${origin}/api/daily\` | Today's Daily Shift: \`dayKey\`, \`number\`, \`modifier\`, \`resetsAt\` (epoch ms), \`total\`, ranked \`top[]\` |
-| \`${origin}/healthz/\` | \`{ "ok": true, "service": "lobby" }\` |
+| <${origin}/api/network> | \`sites[]\` (id, state \`live\`/\`online\`/\`break\`/\`offline\`, drivers, spectators, maxDrivers, shipped, tier, phase), top-10 human \`leaderboard[]\`, \`queueSize\`, \`maxTotalDrivers\` |
+| <${origin}/api/daily> | Today's Daily Shift: \`dayKey\`, \`number\`, \`modifier\`, \`resetsAt\` (epoch ms), \`total\`, ranked \`top[]\` |
+| <${origin}/healthz/> | \`{ "ok": true, "service": "lobby" }\` |
 
 Poll politely (no more than once every few seconds). Don't call \`/api/join\`, \`/api/queue/*\`, or
 \`/ws\`: they start real game sessions, are reserved for human players in a browser, and reject
@@ -122,13 +122,17 @@ Agent audience: AI agents and automated clients reading Freight Floor (${origin}
 ## Registration
 
 There is no agent registration, OAuth issuer, or API key. Freight Floor doesn't provision credentials
-for agents, and \`${origin}/.well-known/oauth-protected-resource\` isn't published because no endpoint is
-protected by OAuth.
+for agents, and no OAuth Protected Resource Metadata (\`/.well-known/oauth-protected-resource\`) is
+published because no endpoint is protected by OAuth.
 
 ## Supported methods
 
-- **None (public read-only).** \`GET ${origin}/api/network\`, \`GET ${origin}/api/daily\`, and
-  \`GET ${origin}/healthz/\` need no credentials. See ${origin}/openapi.json.
+- **None (public read-only).** These need no credentials (\`GET\`):
+  - <${origin}/api/network>
+  - <${origin}/api/daily>
+  - <${origin}/healthz/>
+
+  See <${origin}/openapi.json>.
 
 ## Credential use
 
