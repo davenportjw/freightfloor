@@ -31,8 +31,9 @@ describe("What's new changelog", () => {
     }
   });
 
-  it('highlights the Daily Shift and the graphics upgrade', () => {
+  it('highlights Floor Trials, Daily Shift, and the graphics upgrade', () => {
     const titles = CHANGELOG.flatMap((r) => r.items.map((i) => i.title));
+    expect(titles).toContain('Floor Trials');
     expect(titles).toContain('Daily Shift');
     expect(CHANGELOG.some((r) => r.title === 'Graphics upgrade')).toBe(true);
   });

@@ -1,5 +1,5 @@
 /**
- * Floor Trials (prototype): short single-player precision levels built on the real
+ * Floor Trials: short single-player precision levels built on the real
  * warehouse map and the authoritative human driving model (`stepHuman`).
  *
  * A trial owns a private `World` (no AI, no spawns; `tick()` is never called) plus one

@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 /**
- * Floor Trials (prototype): Flarts-style level select + gameplay in one pane.
+ * Floor Trials: Flarts-style level select + gameplay in one pane.
  *
  * Runs the deterministic trial sim (`@warehouse/sim` trials.ts) locally at a fixed 10 Hz and
  * renders with the main game's WarehouseRenderer. Progress (best stars / time per level) is

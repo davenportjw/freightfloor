@@ -240,6 +240,16 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
   );
   whatsNewLink.dataset.introTab = 'whatsnew';
 
+  const trialsLink = el(
+    'a',
+    {
+      class: 'btn intro-ai-link intro-trials-link',
+      title: 'Solo stacking challenges with 3-star par times',
+      attrs: { href: '/trials.html' },
+    },
+    ['★ Floor Trials'],
+  );
+
   // ---- How to Play ----
   const step = (n: string, icon: string, title: string, body: Array<Node | string> | HTMLElement): HTMLElement =>
     el('li', { class: 'intro-step' }, [
@@ -1287,6 +1297,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     whatsNewPane.hidden = view !== 'whatsnew';
     aiLink.hidden = ai;
     aiLink.setAttribute('aria-expanded', String(ai));
+    trialsLink.hidden = view !== 'play';
     whatsNewLink.hidden = view === 'whatsnew';
     backLink.hidden = view === 'play';
     if (view === 'whatsnew') {
@@ -1416,7 +1427,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
           ],
         ),
       ]),
-      el('div', { class: 'intro-tabs', attrs: { 'aria-label': 'Intro sections' } }, [aiLink, whatsNewLink, backLink]),
+      el('div', { class: 'intro-tabs', attrs: { 'aria-label': 'Intro sections' } }, [aiLink, trialsLink, whatsNewLink, backLink]),
       playPane,
       aiPane,
       lifecyclePane,

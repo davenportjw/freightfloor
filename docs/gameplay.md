@@ -366,9 +366,9 @@ This table, the in-app **All controls** table (`HOTKEYS` in `apps/client/src/ui/
 
 Typed orders go through Model Armor and the same limiter as the buttons. Natural-language district/bay routing commands (e.g. `"get hazmats to returns"`, `"move cold storage to bay E2"`) execute directly via `dispatchOrderRoute`, while ambiguous or exploratory commands (e.g. `"help"`, `"what can I do"`, `"reroute"`) open the live `a2uiScreen` clarification builder.
 
-## 8. Floor Trials (prototype)
+## 8. Floor Trials
 
-**Floor Trials** (`/trials.html`, also in the ☰ menu) is a solo level mode. Each level is a short delivery puzzle on the Denver floor: lift the listed pallets, stack them, and drop them at their dock bays. The level list and the game share one screen. Pick a level on the left rail and play it in the stage. Everything runs in the browser. The rules live in the deterministic sim module `packages/sim/src/trials.ts`.
+**Floor Trials** (`/trials.html`, also on the intro screen and in the ☰ menu) is a solo level mode. Each level is a short delivery puzzle on the Denver floor: lift the listed pallets, stack them, and drop them at their dock bays. The level list and the game share one screen. Pick a level on the left rail and play it in the stage. Everything runs in the browser. The rules live in the deterministic sim module `packages/sim/src/trials.ts`.
 
 ### Rules
 

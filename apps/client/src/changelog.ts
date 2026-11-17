@@ -34,6 +34,24 @@ export interface ChangelogRelease {
 /** Newest first. */
 export const CHANGELOG: readonly ChangelogRelease[] = [
   {
+    date: '2026-11-16',
+    title: 'Floor Trials',
+    items: [
+      {
+        kind: 'new',
+        title: 'Floor Trials',
+        body: 'Six solo precision challenges at /trials.html (open ★ Floor Trials on the intro or from the ☰ menu). Stack up to three pallets high, manage load sway around corners and over spills, dodge collapsing racks, and beat par times for ★★★.',
+        commits: ['945e3a5', 'f03cfa4', '029bda9'],
+      },
+      {
+        kind: 'improved',
+        title: 'Calibrated AI confidence',
+        body: 'Click any AI forklift to see calibrated confidence scores alongside its live move choices.',
+        commits: ['61752a8'],
+      },
+    ],
+  },
+  {
     date: '2026-11-12',
     title: 'Daily Shift',
     items: [

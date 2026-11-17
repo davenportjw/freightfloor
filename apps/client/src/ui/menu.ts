@@ -208,7 +208,7 @@ export function mountMenu(menuBtn: HTMLElement, root: HTMLElement, ctx: UiCtx): 
             'a',
             {
               class: 'menu-item menu-trials-link',
-              title: 'Solo stacking levels with stars (prototype)',
+              title: 'Solo stacking challenges with 3-star par times',
               attrs: { href: '/trials.html' },
             },
             [el('span', { class: 'grow', text: 'Floor Trials' }), el('span', { class: 'muted', text: '★' })],
