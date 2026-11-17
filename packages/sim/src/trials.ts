@@ -108,15 +108,29 @@ export const SWAY_C = 3.5;
 export const SWAY_GAIN = [0, 0.55, 1.0, 1.55] as const;
 /** Hard-braking deceleration (tiles/min²) above which braking feeds the sway. */
 export const SWAY_BRAKE_FREE = 7;
+/** Braking lean is capped at this deceleration (the hardest pedal brake, boost brake = 14). */
+export const SWAY_BRAKE_MAX = 14;
+/**
+ * Lurch gain for speed shed faster than SWAY_BRAKE_MAX in one tick. Letting go of boost
+ * snaps the truck back to cruise; that whips the stack but never counts as an impact.
+ */
+export const SWAY_LURCH = 0.5;
+/** Cruise top speed (highway). Above it, extra boost speed only partly feeds turning sway. */
+export const SWAY_BOOST_KNEE = 4.25;
+/** Fraction of speed above SWAY_BOOST_KNEE that feeds turning sway. */
+export const SWAY_BOOST_SLOPE = 0.5;
 /** Minimum pre-impact speed for a rack strike. */
 export const RACK_HIT_SPEED = 2.0;
 /** Wall-hit speed that kicks the load (matches the engine's COLLISION_SPEED). */
 export const SWAY_WALL_SPEED = 1.65;
 /**
- * Single-tick speed loss that counts as an impact. Hardest braking (boost brake, 14/min²)
- * sheds at most 1.4 per 0.1-min tick, so anything larger means the truck hit something.
+ * Single-tick speed loss (per 0.1-min tick) that counts as an impact. Hardest braking (boost
+ * brake, 14/min²) sheds at most 1.4 per tick, so a bigger loss means the truck hit something,
+ * unless it is still rolling faster than IMPACT_REST (letting go of boost).
  */
 export const IMPACT_DROP = 1.5;
+/** An impact leaves the truck below this speed; the slowest cruise (hazmat) is 1.89. */
+export const IMPACT_REST = 1.0;
 /** Game-min that fallen-rack debris blocks the aisle. */
 export const DEBRIS_TTL = 20;
 /** Pick / drop reach from the truck centre, in tiles. */
@@ -245,6 +259,16 @@ const wrapAngle = (a: number): number => {
 
 const distTo = (v: Vehicle, tx: number, ty: number): number =>
   Math.hypot(v.px - (tx + 0.5), v.py - (ty + 0.5));
+
+/**
+ * Speed that drives turning sway: full speed up to cruise, then SWAY_BOOST_SLOPE of the
+ * boost surplus, so boosting through a bend is risky without being instantly fatal.
+ */
+export function swaySpeed(speed: number): number {
+  const s = Math.abs(speed);
+  const eff = s <= SWAY_BOOST_KNEE ? s : SWAY_BOOST_KNEE + (s - SWAY_BOOST_KNEE) * SWAY_BOOST_SLOPE;
+  return Math.sign(speed) * eff;
+}
 
 /**
  * One sway integration step. Pure: returns the new `{sway, swayVel}`.
@@ -524,6 +548,10 @@ export function stepTrial(tr: Trial, input: DriverInput, dt = 0.1): void {
     strike(tr, 'crash', 'Boost crash! The stack hit the floor.', v.tile.x, v.tile.y);
   }
 
+  // Walls, racks and trucks stop the truck (near) dead. Letting go of boost also sheds a lot
+  // of speed in one tick, but leaves the truck rolling at cruise, so it is never an impact.
+  const impact =
+    Math.abs(prevSpeed) - Math.abs(v.speedNow) > IMPACT_DROP * (dt / 0.1) && Math.abs(v.speedNow) < IMPACT_REST;
   const n = Math.min(3, v.cargo.length);
   if (n === 0) {
     st.sway = 0;
@@ -532,12 +560,18 @@ export function stepTrial(tr: Trial, input: DriverInput, dt = 0.1): void {
     const g = SWAY_GAIN[n];
     const yaw = Math.max(-4, Math.min(4, wrapAngle(v.angle - prevAngle) / dt));
     const speed = v.speedNow;
-    let force = -g * speed * yaw;
-    const decel = (Math.abs(prevSpeed) - Math.abs(speed)) / dt;
-    if (speed !== 0 && decel > SWAY_BRAKE_FREE && decel * dt <= IMPACT_DROP) {
-      force += (decel - SWAY_BRAKE_FREE) * 0.8 * g * (Math.sign(st.sway) || 1);
-    }
+    const lean = Math.sign(st.sway) || 1;
+    let force = -g * swaySpeed(speed) * yaw;
     let kick = 0;
+    const drop = Math.abs(prevSpeed) - Math.abs(speed);
+    if (!impact && drop > 0) {
+      // Braking leans the stack (capped at the hardest pedal brake). Shedding boost speed
+      // faster than that (letting go of boost snaps the truck back to cruise) is a lurch.
+      const decel = drop / dt;
+      if (decel > SWAY_BRAKE_FREE) force += (Math.min(decel, SWAY_BRAKE_MAX) - SWAY_BRAKE_FREE) * 0.8 * g * lean;
+      const excess = drop - SWAY_BRAKE_MAX * dt;
+      if (excess > 0) kick += excess * SWAY_LURCH * g * lean;
+    }
     const key = `${v.tile.x},${v.tile.y}`;
     const onSpill = w.spills.some((h) => h.x === v.tile.x && h.y === v.tile.y && h.until > w.t);
     if (onSpill && Math.abs(speed) > 1.2 && st.lastSpill !== key) {
@@ -545,8 +579,8 @@ export function stepTrial(tr: Trial, input: DriverInput, dt = 0.1): void {
       st.lastSpill = key;
     }
     if (!onSpill) st.lastSpill = null;
-    if (Math.abs(prevSpeed) > SWAY_WALL_SPEED && Math.abs(prevSpeed) - Math.abs(speed) > IMPACT_DROP * (dt / 0.1)) {
-      kick += Math.abs(prevSpeed) * 0.9 * g * (Math.sign(st.sway) || 1);
+    if (impact && Math.abs(prevSpeed) > SWAY_WALL_SPEED) {
+      kick += Math.abs(prevSpeed) * 0.9 * g * lean;
     }
     const next = stepSway(st.sway, st.swayVel, force, kick, dt);
     st.sway = next.sway;
@@ -554,7 +588,6 @@ export function stepTrial(tr: Trial, input: DriverInput, dt = 0.1): void {
     if (Math.abs(st.sway) >= 1) toppleTop(tr);
   }
 
-  const impact = Math.abs(prevSpeed) - Math.abs(v.speedNow) > IMPACT_DROP * (dt / 0.1);
   if (Math.abs(prevSpeed) >= RACK_HIT_SPEED && impact && st.status === 'running') {
     rackStrike(tr, prevSpeed);
   }
