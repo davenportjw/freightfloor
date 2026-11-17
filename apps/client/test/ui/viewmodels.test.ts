@@ -1096,10 +1096,10 @@ describe('Shift Briefing / Help modal (mountHelp, How to Play + "How the AI work
       store.setRackLiftMinigame(true);
       help.update();
       expect(steps[1]!.textContent).toBe(
-        'Pull up to a glowing rack pallet, hold Pick to raise forks (L1–L3), and release Pick in the sweet spot.',
+        'Pull up to a glowing pallet and tap Pick to grab it. At racks, hold Pick to raise forks (L1–L3) and release in the sweet spot for a bonus.',
       );
       expect(interactRow.children[1]?.textContent).toBe(
-        'Hold & release at rack to lift (L1–L3), or tap at bay / charger / spill',
+        'Tap to pick / drop / charge / spill · Hold at a rack to lift for a bonus (L1–L3)',
       );
 
       expect(lifecyclePane.textContent).toContain('Joystick steering & physics');

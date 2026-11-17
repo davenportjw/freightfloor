@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createWorld, postOrder } from '@warehouse/sim';
 import { ClientStore, RACK_LIFT_KEY, readRackLiftOverride } from '../src/state.js';
-import { RackLiftController, TWO_TAP_THRESHOLD_MS } from '../src/ui/rackLiftMinigame.js';
+import { QUICK_TAP_THRESHOLD_MS, RackLiftController } from '../src/ui/rackLiftMinigame.js';
 
 function createMemoryStorage(): Storage {
   const map = new Map<string, string>();
@@ -110,43 +110,34 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
     expect(ctrl.lastFlash(1800)?.grade).toBe('perfect');
   });
 
-  it('5. quick-tapping E (< 140ms) on an L2 rack order switches to twoTapConfirm mode instead of scraping at fork=0.08, and a second tap commits', () => {
-    const world = createWorld({ seed: 42 });
-    const v = world.vehicles[0]!;
-    v.cargo = [];
-    const order = postOrder(world)!;
-    order.slot = { ...order.slot, id: 'R1-1', zone: 'A', level: 1 };
-    expect(order.slot.level).toBe(1);
+  it('5. a quick tap of E (< 140ms) on an L1/L2/L3 rack order is one press: a plain ungraded pickup, no second tap needed', () => {
+    for (const level of [0, 1, 2] as const) {
+      const world = createWorld({ seed: 42 });
+      const v = world.vehicles[0]!;
+      v.cargo = [];
+      const order = postOrder(world)!;
+      order.slot = { ...order.slot, id: 'R1-1', zone: 'A', level };
 
-    v.x = order.slot.ax;
-    v.y = order.slot.ay;
-    v.px = v.x + 0.5;
-    v.py = v.y + 0.5;
+      v.x = order.slot.ax;
+      v.y = order.slot.ay;
+      v.px = v.x + 0.5;
+      v.py = v.y + 0.5;
 
-    const ctrl = new RackLiftController();
-    const downRes = ctrl.onKeyDown(2000, world, v, true);
-    expect(downRes).toEqual({ action: 'lifting', level: 1 });
+      const ctrl = new RackLiftController();
+      const downRes = ctrl.onKeyDown(2000, world, v, true);
+      expect(downRes).toEqual({ action: 'lifting', level });
 
-    // Release after 80ms (< TWO_TAP_THRESHOLD_MS = 140ms)
-    expect(80).toBeLessThan(TWO_TAP_THRESHOLD_MS);
-    const upRes = ctrl.onKeyUp(2080, v);
-    expect(upRes).toEqual({ action: 'continue_two_tap' });
-    expect(ctrl.isActive()).toBe(true);
-    expect(ctrl.isTwoTapConfirmPending()).toBe(true);
+      expect(80).toBeLessThan(QUICK_TAP_THRESHOLD_MS);
+      const sent: (number | undefined)[] = [];
+      ctrl.onInteractUp(2080, world, v, (fh) => sent.push(fh));
+      // Exactly one plain interact (no forkHeight ⇒ server does a standard pickup, no grade).
+      expect(sent).toEqual([undefined]);
+      expect(ctrl.isActive()).toBe(false);
+      expect(ctrl.lastFlash(2100)).toBeNull();
 
-    // Step ~410ms so fork reaches ~0.54 (L2 sweet spot)
-    ctrl.step(410, world, v, true);
-    expect(v.fork).toBeGreaterThan(0.45);
-    expect(v.fork).toBeLessThan(0.65);
-
-    // Second keydown commits at the current fork height
-    const secondTap = ctrl.onKeyDown(2490, world, v, true);
-    expect(secondTap.action).toBe('commit');
-    if (secondTap.action === 'commit') {
-      expect(secondTap.evaluation.grade).toBe('perfect');
-      expect(secondTap.forkHeight).toBeCloseTo(v.fork, 3);
+      // A later press starts a fresh lift instead of committing a stale one.
+      expect(ctrl.onKeyDown(2600, world, v, true).action).toBe('lifting');
     }
-    expect(ctrl.isActive()).toBe(false);
   });
 
   it('6. non-rack interactions (inbound DOCK-* pickup, outbound bay drop, charger) always return { action: "immediate" } even when enabled', () => {
@@ -333,12 +324,12 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
       expect(explainer.textContent).toContain('Clean Lift');
       expect(explainer.textContent).toContain('Rack Scrape');
       expect(steps[1]?.textContent).toBe(
-        'Pull up to a glowing rack pallet, hold E to raise forks (L1–L3), and release E in the sweet spot.',
+        'Pull up to a glowing pallet and tap E to grab it. At racks, hold E to raise forks (L1–L3) and release in the sweet spot for a bonus.',
       );
       expect(liftChip.hidden).toBe(false);
       expect(liftChip.style.display).toBe('');
       expect(eRow.children[1]?.textContent).toBe(
-        'Hold & release at rack to lift (L1–L3), or press at bay / charger',
+        'Tap to pick / drop / charge · Hold at a rack to lift for a bonus (L1–L3)',
       );
 
       // Disable again -> reverts cleanly and hides the explanation
@@ -384,7 +375,7 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
     }
   });
 
-  it('8. mountObjective shows Hold E · L3 and [L3] in objective text when rackLiftMinigame is enabled on an L3 rack order, and reverts to E when false', async () => {
+  it('8. mountObjective shows Tap E · hold for bonus · L3 and [L3] in objective text when rackLiftMinigame is enabled on an L3 rack order, and reverts to E when false', async () => {
     class MiniNode {
       children: Array<MiniElement | MiniText> = [];
       get textContent(): string {
@@ -487,12 +478,12 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
         () => 'Steady',
       );
 
-      // Enabled: shows [L3], hold E, and · Hold E · L3 badge
+      // Enabled: shows [L3] and the · Tap E · hold for bonus · L3 badge
       store.setRackLiftMinigame(true);
       objMod.update();
       expect(objectiveEl.textContent).toContain('[L3]');
       expect(objectiveEl.textContent).toContain('hold E');
-      expect(objectiveEl.textContent).toContain('· Hold E · L3');
+      expect(objectiveEl.textContent).toContain('· Tap E · hold for bonus · L3');
 
       // Disabled: reverts to standard press E and · E
       store.setRackLiftMinigame(false);
@@ -500,7 +491,7 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
       expect(objectiveEl.textContent).not.toContain('[L3]');
       expect(objectiveEl.textContent).toContain('press E');
       expect(objectiveEl.textContent).toContain('· E');
-      expect(objectiveEl.textContent).not.toContain('Hold E · L3');
+      expect(objectiveEl.textContent).not.toContain('hold for bonus');
     } finally {
       (globalThis as Record<string, unknown>).document = prevDoc;
     }
