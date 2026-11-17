@@ -52,6 +52,15 @@ import {
   validateDisplayName,
   type ModelArmorClient,
 } from '@warehouse/armor';
+import {
+  FirestoreTrialGhostStore,
+  InMemoryTrialGhostStore,
+  registerTrialRoutes,
+  TRIAL_RUN_RATE_PER_MIN,
+  type TrialGhostStore,
+} from './trials.js';
+
+export * from './trials.js';
 
 export const LOBBY_VERSION = 1;
 export const HEARTBEAT_STALE_MS = 15_000;
@@ -272,6 +281,10 @@ export interface LobbyStore {
   getDailyTop?(dayKey: string, limit: number): Promise<{ total: number; top: StoredDailyScore[] }>;
   /** One player's Daily entry (by opaque publicId) and its 1-based rank, or null. */
   getDailyEntry?(dayKey: string, publicId: string): Promise<{ rank: number; entry: StoredDailyScore } | null>;
+  /** Floor Trials shared ghost runs (`trials/{levelId}_r{rev}/runs/{clientId}`). */
+  trialGhosts?: TrialGhostStore;
+  /** Stored human callsign for a raw clientId (`players/{clientId}.name`), or null. */
+  getPlayerName?(clientId: string): Promise<string | null>;
 }
 
 /** Public fields of a `daily{suffix}/{dayKey}/daily_scores/{clientId}` doc (written by the site). */
@@ -524,6 +537,7 @@ export class FirestoreLobbyStore implements LobbyStore {
   private readonly pendingDrivers = new Map<SiteId, Map<string, number>>();
   private readonly wokenUntil = new Map<SiteId, number>();
   private readonly localQueue = new Map<string, QueueEntry>();
+  readonly trialGhosts: TrialGhostStore;
 
   constructor(db?: Firestore, siteUrls?: Partial<Record<SiteId, string>>) {
     this.suffix = process.env.SUFFIX || '';
@@ -538,6 +552,13 @@ export class FirestoreLobbyStore implements LobbyStore {
           'davenporter-freightfloor',
         databaseId: process.env.FIRESTORE_DATABASE_ID || '(default)',
       });
+    this.trialGhosts = new FirestoreTrialGhostStore(this.db, (base) => this.colName(base));
+  }
+
+  async getPlayerName(clientId: string): Promise<string | null> {
+    const snap = await this.db.collection(this.colName('players')).doc(clientId).get();
+    const data = snap.exists ? (snap.data() ?? {}) : {};
+    return typeof data.name === 'string' && data.name && !data.isBot ? data.name : null;
   }
 
   private colName(base: string): string {
@@ -1118,6 +1139,12 @@ export class InMemoryLobbyStore implements LobbyStore {
   public wokenSites: SiteId[] = [];
   /** Daily scores per day key (tests seed them with `setDailyScore`). */
   private daily = new Map<string, StoredDailyScore[]>();
+  readonly trialGhosts: TrialGhostStore = new InMemoryTrialGhostStore();
+
+  async getPlayerName(clientId: string): Promise<string | null> {
+    const p = this.players.get(clientId);
+    return p && p.name && !p.isBot ? p.name : null;
+  }
 
   setDailyScore(dayKey: string, row: StoredDailyScore): void {
     const rows = (this.daily.get(dayKey) ?? []).filter((r) => r.publicId !== row.publicId);
@@ -2957,6 +2984,25 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
       req.log.error({ err }, 'daily board read failed');
       return reply.code(503).send({ error: 'daily_unavailable', message: 'Daily leaderboard is unavailable right now.' });
     }
+  });
+
+  // ---- Floor Trials shared ghost runs (best run per player per level revision) ----
+  const trialLimiter = new TokenBucketRateLimiter(TRIAL_RUN_RATE_PER_MIN, TRIAL_RUN_RATE_PER_MIN / 60_000);
+  registerTrialRoutes(app, {
+    store: store.trialGhosts ?? null,
+    now: nowFn,
+    publicIdFor: (clientId) => publicIdFor(clientId, secret),
+    nameFor: async (clientId) => {
+      try {
+        const stored = store.getPlayerName ? await store.getPlayerName(clientId) : null;
+        if (stored) return stored;
+      } catch {
+        // Fall back to the deterministic generated callsign below.
+      }
+      return generateDriverCallsign(clientId);
+    },
+    isCrawler: isCrawlerUserAgent,
+    allowSubmit: (ip, nowMs) => trialLimiter.allow(ip, nowMs),
   });
 
   app.get('/api/network', async (req, reply) => {

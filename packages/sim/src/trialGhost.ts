@@ -29,6 +29,7 @@
  * Events that happen at level time t (a pick between two ticks) attach to sample round(t × 10).
  * A 90 s run is ~900 samples at ~4–5 bytes each, i.e. ~5–6 KB of base64.
  */
+import { TRIAL_GHOST_TRACK_MAX_CHARS } from '@warehouse/protocol';
 import { createTrial, starsFor, TRIAL_BAY_REACH, TRIAL_LIFT_SPEED, TRIAL_MAX_STRIKES, trialLevel } from './trials.js';
 import type { Trial, TrialEventKind, TrialLevel } from './trials.js';
 
@@ -38,7 +39,7 @@ export const TRIAL_GHOST_DT = 0.1;
 /** Longest run a ghost may cover (seconds of level time). */
 export const TRIAL_GHOST_MAX_TIME = 600;
 /** Hard cap on the encoded track length (base64url chars). */
-export const TRIAL_GHOST_MAX_CHARS = 48_000;
+export const TRIAL_GHOST_MAX_CHARS = TRIAL_GHOST_TRACK_MAX_CHARS;
 /**
  * Max truck travel per tick (tiles): boost top speed is 3.15 × 2.2 × 1.35 ≈ 9.36 tiles/min
  * (0.94 tiles per tick); the extra covers quantization and wall-slide nudges.

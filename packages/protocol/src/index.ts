@@ -2139,3 +2139,72 @@ export const DailyBoardResponseSchema = z.object({
   you: z.object({ rank: z.number().int().positive(), pts: z.number().int(), tape: z.string() }).nullable(),
 });
 export type DailyBoardResponse = z.infer<typeof DailyBoardResponseSchema>;
+
+// ---------------------------------------------------------------------------------------------
+// Floor Trials shared ghost runs (`/api/trials/:levelId/*`). The track codec and plausibility
+// rules live in `@warehouse/sim` (trialGhost.ts); these are the HTTP contracts.
+// ---------------------------------------------------------------------------------------------
+
+/** Max length of an encoded ghost track (base64url chars; a 90 s run is ~5–6 K). */
+export const TRIAL_GHOST_TRACK_MAX_CHARS = 48_000;
+export const TRIAL_LEVEL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
+export const TrialLevelIdSchema = z.string().regex(TRIAL_LEVEL_ID_PATTERN);
+export const TrialGhostTrackSchema = z
+  .string()
+  .min(4)
+  .max(TRIAL_GHOST_TRACK_MAX_CHARS)
+  .regex(/^[A-Za-z0-9_-]+$/);
+
+/** `POST /api/trials/:levelId/runs`: a finished winning run with its recorded trajectory. */
+export const TrialRunSubmitSchema = z
+  .object({
+    /** Browser-local raw clientId (bearer credential; never echoed back). */
+    clientId: z.string().min(1).max(128),
+    /** Level rules revision the run was driven on (`trialRev(level)`). */
+    rev: z.number().int().min(1).max(1000),
+    /** Level time in seconds (multiple of 0.1). */
+    time: z.number().positive().max(600),
+    stars: z.number().int().min(1).max(3),
+    strikes: z.number().int().min(0).max(2),
+    track: TrialGhostTrackSchema,
+  })
+  .strict();
+export type TrialRunSubmit = z.infer<typeof TrialRunSubmitSchema>;
+
+export const TrialRunSubmitResponseSchema = z.object({
+  ok: z.literal(true),
+  /** True when this run replaced (or created) the player's stored best for the level. */
+  improved: z.boolean(),
+  /** The player's stored best after this submit. */
+  best: z.object({ time: z.number(), stars: z.number().int() }),
+  /** 1-based world rank of the stored best (competition ranking by time). */
+  rank: z.number().int().positive(),
+  total: z.number().int().nonnegative(),
+});
+export type TrialRunSubmitResponse = z.infer<typeof TrialRunSubmitResponseSchema>;
+
+/** One shared ghost: a player's best run on a level revision. */
+export const TrialGhostSchema = z.object({
+  rank: z.number().int().positive(),
+  /** Opaque player id (`p1_…`), never the raw clientId. */
+  publicId: z.string(),
+  name: z.string(),
+  time: z.number(),
+  stars: z.number().int(),
+  strikes: z.number().int(),
+  track: z.string(),
+});
+export type TrialGhost = z.infer<typeof TrialGhostSchema>;
+
+/** `GET /api/trials/:levelId/ghosts[?time=<my best>]`. */
+export const TrialGhostsResponseSchema = z.object({
+  levelId: TrialLevelIdSchema,
+  rev: z.number().int().positive(),
+  /** Players with a stored run on this level revision. */
+  total: z.number().int().nonnegative(),
+  /** Fastest runs (time asc), up to 3. */
+  top: z.array(TrialGhostSchema),
+  /** The run just faster than `time` (null without `time`, or when `time` already leads). */
+  next: TrialGhostSchema.nullable(),
+});
+export type TrialGhostsResponse = z.infer<typeof TrialGhostsResponseSchema>;
