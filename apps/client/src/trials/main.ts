@@ -8,6 +8,7 @@
  */
 import {
   IMPACT_DROP,
+  IMPACT_REST,
   TRIAL_LEVELS,
   TRIAL_MAX_STRIKES,
   createTrial,
@@ -202,9 +203,12 @@ function stepWithFx(now: number): void {
   const side = Math.sign(trial.state.sway) || 1;
   stepTrial(trial, input());
   const drop = prevSpeed - Math.abs(v.speedNow);
-  if (drop > IMPACT_DROP) {
+  if (drop > IMPACT_DROP && Math.abs(v.speedNow) < IMPACT_REST) {
     fx.kick(3 + prevSpeed * 2.2, now);
     if (!reducedMotion()) freezeUntil = now + HITSTOP_MS;
+  } else if (drop > IMPACT_DROP && v.cargo.length) {
+    // Letting go of boost: a light lurch, no hitstop.
+    fx.kick(1.5 + drop * 0.4, now);
   }
   const ca = Math.cos(pose.a);
   const sa = Math.sin(pose.a);

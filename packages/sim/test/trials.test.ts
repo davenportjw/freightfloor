@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  SWAY_BOOST_KNEE,
   TRIAL_LEVELS,
   createTrial,
   findPath,
   starsFor,
   stepSway,
   stepTrial,
+  swaySpeed,
   trialGuide,
   trialInteract,
   type DriverInput,
@@ -136,6 +138,64 @@ describe('load sway', () => {
     const t = tr.state.t;
     run(tr, FWD, 5);
     expect(tr.state.t).toBe(t);
+  });
+});
+
+describe('boost with a load', () => {
+  const BOOST: DriverInput = { up: true, down: false, left: false, right: false, boost: true };
+  const BOOST_LEFT: DriverInput = { ...BOOST, left: true };
+  const BOOST_BRAKE: DriverInput = { up: false, down: true, left: false, right: false, boost: true };
+  const CRUISE: DriverInput = { ...BOOST, boost: false };
+
+  function boosted(n: number): Trial {
+    const tr = createTrial('tower-of-three');
+    onHighway(tr, 10);
+    load(tr, n);
+    run(tr, BOOST, 8);
+    expect(tr.vehicle.speedNow).toBeGreaterThan(SWAY_BOOST_KNEE * 1.5);
+    return tr;
+  }
+
+  it('swaySpeed is full up to cruise and damped above it', () => {
+    expect(swaySpeed(3)).toBe(3);
+    expect(swaySpeed(-3)).toBe(-3);
+    expect(swaySpeed(SWAY_BOOST_KNEE + 2)).toBeCloseTo(SWAY_BOOST_KNEE + 1);
+  });
+
+  it.each([1, 2, 3])('letting go of boost on a straight lurches %i pallet(s) without a topple', (n) => {
+    const tr = boosted(n);
+    let peak = 0;
+    for (let i = 0; i < 12; i++) {
+      stepTrial(tr, CRUISE);
+      peak = Math.max(peak, Math.abs(tr.state.sway));
+    }
+    expect(peak).toBeGreaterThan(0.1);
+    expect(tr.state.strikes).toBe(0);
+    expect(tr.vehicle.cargo).toHaveLength(n);
+  });
+
+  it.each([1, 2, 3])('braking hard from boost keeps %i pallet(s) on a straight', (n) => {
+    const tr = boosted(n);
+    run(tr, BOOST_BRAKE, 10);
+    expect(tr.state.strikes).toBe(0);
+    expect(tr.vehicle.cargo).toHaveLength(n);
+  });
+
+  it('a steering tap at boost speed is survivable with a full stack', () => {
+    const tr = boosted(3);
+    run(tr, BOOST_LEFT, 1);
+    run(tr, BOOST, 6);
+    expect(tr.state.strikes).toBe(0);
+  });
+
+  it('a boosted bend with a full stack still tips it', () => {
+    const tr = createTrial('tower-of-three');
+    onHighway(tr, 25);
+    load(tr, 3);
+    run(tr, BOOST, 8);
+    run(tr, BOOST_LEFT, 6);
+    expect(tr.state.strikes).toBeGreaterThanOrEqual(1);
+    expect(tr.vehicle.cargo.length).toBeLessThan(3);
   });
 });
 
