@@ -516,11 +516,11 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       );
       if (rackLift) {
         step2Body.replaceChildren(
-          'Pull up to a glowing rack pallet, hold ',
+          'Pull up to a glowing pallet and tap ',
           kbd('Pick'),
-          ' to raise forks (L1–L3), and release ',
+          ' to grab it. At racks, hold ',
           kbd('Pick'),
-          ' in the sweet spot.',
+          ' to raise forks (L1–L3) and release in the sweet spot for a bonus.',
         );
       } else {
         step2Body.replaceChildren('Pull up to a glowing pallet and tap ', kbd('Pick'), ' on the bottom-right.');
@@ -545,11 +545,11 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       );
       if (rackLift) {
         step2Body.replaceChildren(
-          'Pull up to a glowing rack pallet, hold ',
+          'Pull up to a glowing pallet and tap ',
           kbd('E'),
-          ' to raise forks (L1–L3), and release ',
+          ' to grab it. At racks, hold ',
           kbd('E'),
-          ' in the sweet spot.',
+          ' to raise forks (L1–L3) and release in the sweet spot for a bonus.',
         );
       } else {
         step2Body.replaceChildren('Pull up to a glowing pallet and press ', kbd('E'), '.');
@@ -584,13 +584,15 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
           b('L2 Mid'),
           ', ',
           b('L3 High'),
-          '). At a rack, hold ',
+          '). ',
+          b('Tap'),
+          ' ',
           kbd(keyLabel),
-          ' to raise your 3D forks along the vertical gauge and release ',
+          ' for a standard grab: one press, no bonus, no penalty. ',
+          b('Hold'),
+          ' ',
           kbd(keyLabel),
-          ' inside the green target band. A quick tap of ',
-          kbd(keyLabel),
-          ' is a standard grab with no bonus or penalty.',
+          ' to raise your forks along the vertical gauge and release inside the green band for a bonus.',
         ]),
         el('div', { class: 'intro-lift-grades' }, [
           el('span', { class: 'intro-lift-grade good' }, [
@@ -612,10 +614,10 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
         }),
       );
       if (hotkeyECell) {
-        hotkeyECell.textContent = 'Hold & release at rack to lift (L1–L3), or press at bay / charger';
+        hotkeyECell.textContent = 'Tap to pick / drop / charge · Hold at a rack to lift for a bonus (L1–L3)';
       }
       if (touchInteractCell) {
-        touchInteractCell.textContent = 'Hold & release at rack to lift (L1–L3), or tap at bay / charger / spill';
+        touchInteractCell.textContent = 'Tap to pick / drop / charge / spill · Hold at a rack to lift for a bonus (L1–L3)';
       }
     } else {
       perfectLiftChip.hidden = true;

@@ -324,12 +324,12 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
       expect(explainer.textContent).toContain('Clean Lift');
       expect(explainer.textContent).toContain('Rack Scrape');
       expect(steps[1]?.textContent).toBe(
-        'Pull up to a glowing rack pallet, hold E to raise forks (L1–L3), and release E in the sweet spot.',
+        'Pull up to a glowing pallet and tap E to grab it. At racks, hold E to raise forks (L1–L3) and release in the sweet spot for a bonus.',
       );
       expect(liftChip.hidden).toBe(false);
       expect(liftChip.style.display).toBe('');
       expect(eRow.children[1]?.textContent).toBe(
-        'Hold & release at rack to lift (L1–L3), or press at bay / charger',
+        'Tap to pick / drop / charge · Hold at a rack to lift for a bonus (L1–L3)',
       );
 
       // Disable again -> reverts cleanly and hides the explanation
@@ -375,7 +375,7 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
     }
   });
 
-  it('8. mountObjective shows Hold E · L3 and [L3] in objective text when rackLiftMinigame is enabled on an L3 rack order, and reverts to E when false', async () => {
+  it('8. mountObjective shows Tap E · hold for bonus · L3 and [L3] in objective text when rackLiftMinigame is enabled on an L3 rack order, and reverts to E when false', async () => {
     class MiniNode {
       children: Array<MiniElement | MiniText> = [];
       get textContent(): string {
@@ -478,12 +478,12 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
         () => 'Steady',
       );
 
-      // Enabled: shows [L3], hold E, and · Hold E · L3 badge
+      // Enabled: shows [L3] and the · Tap E · hold for bonus · L3 badge
       store.setRackLiftMinigame(true);
       objMod.update();
       expect(objectiveEl.textContent).toContain('[L3]');
       expect(objectiveEl.textContent).toContain('hold E');
-      expect(objectiveEl.textContent).toContain('· Hold E · L3');
+      expect(objectiveEl.textContent).toContain('· Tap E · hold for bonus · L3');
 
       // Disabled: reverts to standard press E and · E
       store.setRackLiftMinigame(false);
@@ -491,7 +491,7 @@ describe('RackLiftController & Rack Lift Minigame feature flag', () => {
       expect(objectiveEl.textContent).not.toContain('[L3]');
       expect(objectiveEl.textContent).toContain('press E');
       expect(objectiveEl.textContent).toContain('· E');
-      expect(objectiveEl.textContent).not.toContain('Hold E · L3');
+      expect(objectiveEl.textContent).not.toContain('hold for bonus');
     } finally {
       (globalThis as Record<string, unknown>).document = prevDoc;
     }

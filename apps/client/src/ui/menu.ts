@@ -333,7 +333,7 @@ export function mountFlyouts(root: HTMLElement, ctx: UiCtx): UiModule & { panels
     }),
     el('div', { class: 'sub', text: 'Gameplay' }),
     el('div', { class: 'row' }, [rackLiftBtn]),
-    el('div', { class: 'hint', text: 'Hold E at racks to raise forks to shelf L1 / L2 / L3 and release in the sweet spot.' }),
+    el('div', { class: 'hint', text: 'Tap E for a normal one-press grab. Hold E at racks to raise forks to shelf L1 / L2 / L3 and release in the sweet spot for a bonus.' }),
     el('div', { class: 'row' }, [dispatchBtn]),
     el('div', { class: 'hint', text: 'Once per Blitz run: pick a dispatch move in 8 s and see what Gemini would have done.' }),
   );

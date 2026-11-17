@@ -1,5 +1,5 @@
 /**
- * Opt-in 3D Vertical Rack Lift Minigame ("Option A: Hold E to Raise Forks & Release E to Grab").
+ * Opt-in 3D Vertical Rack Lift Minigame (tap E = standard grab; hold E = graded lift).
  *
  * - Default OFF (`store.isRackLiftEnabled() === false`); when disabled, `onInteractDown`
  *   immediately sends `{ type: 'interact' }` with no `forkHeight`, preserving 100% existing behavior.

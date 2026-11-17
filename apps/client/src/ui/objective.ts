@@ -227,7 +227,9 @@ export function mountObjective(
           ? el(
               'span',
               { class: 'dist' },
-              rackLiftLevel !== null ? [' · Hold ', kbd('E'), ` · L${rackLiftLevel + 1}`] : [' · ', kbd('E')],
+              rackLiftLevel !== null
+                ? [' · Tap ', kbd('E'), ' · hold for bonus', ` · L${rackLiftLevel + 1}`]
+                : [' · ', kbd('E')],
             )
           : null,
       ]);

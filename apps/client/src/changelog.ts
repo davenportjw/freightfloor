@@ -49,6 +49,12 @@ export const CHANGELOG: readonly ChangelogRelease[] = [
         body: 'Click any AI forklift to see calibrated confidence scores alongside its live move choices.',
         commits: ['61752a8'],
       },
+      {
+        kind: 'fixed',
+        title: 'One-press pickups in Lift Mode',
+        body: 'Tapping E at an upper rack shelf no longer needs a second press. Tap E for a standard grab (no bonus, no penalty); hold E and release in the sweet spot for a Perfect Lift bonus. Same in Cab View.',
+        commits: ['cb44870'],
+      },
     ],
   },
   {
