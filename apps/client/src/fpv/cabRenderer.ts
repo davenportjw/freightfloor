@@ -23,7 +23,7 @@ import type { GuideInfo, RenderOptions } from '../renderer.js';
 import { rackLiftFlashAlpha } from '../ui/rackLiftMinigame.js';
 import { arrowColor, BUBBLE_MS, CALLOUT_MS, calloutColor, guideUrgency, wrapBubbleText, type Callout, type RivalBubble } from '../render/fx.js';
 import { forkHeightM, isoZ, ISO_PX_PER_M, liftWindowM, beamTopM, TILE_M } from '../render/liftGeometry.js';
-import { VehiclePoseResolver, type Pose } from '../render/motion.js';
+import { markerFade, VehiclePoseResolver, type Pose } from '../render/motion.js';
 import { Painter } from '../render/painter.js';
 import { conveyorTotes, drawCargoItem, drawCharger, drawCone, drawConveyorItem, drawRack, drawStruct, getSiteVisuals, teamColor } from '../render/scenery.js';
 import { dockParts, dockTruckFrame, rigParts, SimClock, type RigBox } from '../render/trucks.js';
@@ -303,11 +303,12 @@ class Batch {
   }
 }
 
-/** Flat floor decals (rings / discs) with per-instance colour. */
+/** Flat floor decals (rings / discs) with per-instance colour and opacity. */
 class FlatBatch {
   mesh: THREE.InstancedMesh;
   private readonly m = new THREE.Matrix4();
   private readonly c = new THREE.Color();
+  private readonly alpha: THREE.InstancedBufferAttribute;
   private n = 0;
 
   constructor(scene: THREE.Scene, geo: THREE.BufferGeometry, opacity: number, cap = 512) {
@@ -320,6 +321,18 @@ class FlatBatch {
       polygonOffsetUnits: -2,
       side: THREE.DoubleSide,
     });
+    // Per-instance opacity multiplier (so expiring markers can fade instead of vanishing).
+    this.alpha = new THREE.InstancedBufferAttribute(new Float32Array(cap).fill(1), 1);
+    this.alpha.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('instanceAlpha', this.alpha);
+    mat.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute float instanceAlpha;\nvarying float vInstanceAlpha;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvInstanceAlpha = instanceAlpha;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying float vInstanceAlpha;')
+        .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.a *= vInstanceAlpha;');
+    };
     this.mesh = new THREE.InstancedMesh(geo, mat, cap);
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.mesh.frustumCulled = false;
@@ -332,8 +345,9 @@ class FlatBatch {
     this.n = 0;
   }
 
-  add(gx: number, gy: number, rTiles: number, css: string): void {
+  add(gx: number, gy: number, rTiles: number, css: string, alpha = 1): void {
     if (this.n >= this.mesh.instanceMatrix.count) return;
+    this.alpha.setX(this.n, Math.max(0, Math.min(1, alpha)));
     const [r, g, b] = parseColor(css);
     const s = rTiles * TILE_M;
     this.m.makeRotationX(-Math.PI / 2).premultiply(new THREE.Matrix4().makeScale(s, 1, s));
@@ -347,6 +361,7 @@ class FlatBatch {
     this.mesh.count = this.n;
     this.mesh.instanceMatrix.needsUpdate = true;
     if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+    this.alpha.needsUpdate = true;
   }
 }
 
@@ -1085,10 +1100,12 @@ export class CabRenderer {
     // Same pulse periods as the iso renderer (~0.94 s / ~1.6 s); these used to cycle every 150 /
     // 260 ms, a 4-7 Hz strobe in Cab View.
     const mp = this.reducedMotion ? 0.5 : (Math.sin(nowMs / 150) + 1) / 2;
+    const smoothT = this.dockClock.update(world.t, nowMs);
     for (const m of world.markers) {
-      if (m.until <= world.t) continue;
+      const fade = markerFade(m.until, smoothT); // fade out over the last half game-minute
+      if (fade <= 0) continue;
       const inc = m.kind === 'incident';
-      this.rings.add(m.x + 0.5, m.y + 0.5, 0.5 + 0.35 * mp * (inc ? 1 : 0.6), inc ? '#DC2626' : '#D97706');
+      this.rings.add(m.x + 0.5, m.y + 0.5, 0.5 + 0.35 * mp * (inc ? 1 : 0.6), inc ? '#DC2626' : '#D97706', fade);
     }
     if (g && g.x != null && g.y != null) {
       const pulse = this.reducedMotion ? 0.5 : (Math.sin(nowMs / 260) + 1) / 2;

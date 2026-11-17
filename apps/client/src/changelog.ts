@@ -52,8 +52,8 @@ export const CHANGELOG: readonly ChangelogRelease[] = [
       {
         kind: 'fixed',
         title: 'Smoother motion across the floor',
-        body: 'Conveyor totes roll steadily down each belt instead of stuttering tile to tile, and dock trucks glide at an even pace. Forks rise and lower smoothly on every forklift, your truck no longer jumps when Co-Pilot takes over or hands back control, and floating labels, callouts and incident markers ease and fade instead of snapping. The flashing lights in Cab View are calmer too.',
-        commits: ['f13201b'],
+        body: 'Conveyor totes roll steadily down each belt instead of stuttering tile to tile, and dock trucks glide at an even pace. Forks rise and lower smoothly on every forklift, your truck no longer jumps when Co-Pilot takes over or hands back control, and floating labels, callouts and incident markers ease and fade instead of snapping. The camera glides over when you start driving or follow a truck, Floor Trials ghost trails no longer shimmer, and the flashing lights in Cab View are calmer too.',
+        commits: ['f13201b', 'HEAD_PLACEHOLDER'],
       },
       {
         kind: 'improved',

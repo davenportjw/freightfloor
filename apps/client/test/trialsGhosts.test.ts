@@ -132,3 +132,36 @@ describe('Floor Trials ghosts: lobby calls', () => {
     expect(Object.keys(sent!.body).sort()).toEqual(['clientId', 'rev', 'stars', 'strikes', 'time', 'track']);
   });
 });
+
+describe('trials ghost trail drawing', () => {
+  it('starts the bright segment at the interpolated ghost position and keeps a fixed sample parity', async () => {
+    const { drawGhostTrail } = await import('../src/trials/ghosts.js');
+    const { sampleGhost } = await import('@warehouse/sim');
+    const n = 80;
+    const xs = Array.from({ length: n }, (_, i) => i * 0.2);
+    const ys = Array.from({ length: n }, (_, i) => Math.sin(i / 5));
+    const track = { x: xs, y: ys, a: xs.map(() => 0), fork: xs.map(() => 0), sway: xs.map(() => 0), stack: xs.map(() => 0), events: [] };
+    const ghost = { slot: 'world', name: 'W', time: 8, track, key: 'k' } as unknown as Parameters<typeof drawGhostTrail>[1];
+    const paths = (t: number) => {
+      const out: Array<Array<[number, number]>> = [];
+      const ctx = {
+        save() {}, restore() {}, setLineDash() {}, stroke() {},
+        beginPath() { out.push([]); },
+        moveTo(x: number, y: number) { out[out.length - 1]!.push([x, y]); },
+        lineTo(x: number, y: number) { out[out.length - 1]!.push([x, y]); },
+        globalAlpha: 1, lineCap: '', lineJoin: '', strokeStyle: '', lineWidth: 1,
+      };
+      const pt = { ctx, cam: { zoom: 1 }, P: (x: number, y: number) => [x, y], circleGrid: () => [], poly() {} };
+      drawGhostTrail(pt as unknown as Parameters<typeof drawGhostTrail>[0], ghost, t);
+      return out;
+    };
+    for (const t of [1.0, 1.03, 1.05, 1.08, 1.1]) {
+      const bright = paths(t)[1]!;
+      const g = sampleGhost(track as never, t);
+      expect(bright[0]![0]).toBeCloseTo(g.x, 9);
+      expect(bright[0]![1]).toBeCloseTo(g.y, 9);
+      // interior vertices are the even-indexed samples only
+      for (const [x] of bright.slice(1, -1)) expect(Math.round(x / 0.2) % 2).toBe(0);
+    }
+  });
+});

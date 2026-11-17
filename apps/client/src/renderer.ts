@@ -206,6 +206,10 @@ interface SceneItem {
   fn: () => void;
 }
 
+/** How long (ms) a newly acquired follow target uses the slower glide ease. */
+const FOLLOW_GLIDE_MS = 700;
+/** Position / rotation / zoom time constant (ms) while gliding to a new follow target. */
+const FOLLOW_GLIDE_TAU_MS = 200;
 const DRAG_THRESHOLD = 4;
 const PICK_RADIUS = 1.1;
 
@@ -238,6 +242,10 @@ export class WarehouseRenderer {
   private needsFit = true;
   private lastMap: WorldMap | null = null;
   private followId: string | null = null;
+  /** Until this time (ms) a freshly acquired follow target glides in with a slower ease. */
+  private followGlideUntil = 0;
+  /** Zoom the camera is easing to while acquiring a follow target (null = leave zoom alone). */
+  private followZoomTarget: number | null = null;
   /** Floor-view Follow target (only used when this client is not driving). */
   private manualFollow: string | null = null;
   /** Tile under the cursor while in cone mode (null when off-canvas or dragging). */
@@ -339,6 +347,7 @@ export class WarehouseRenderer {
 
   /** Zoom about the screen centre. */
   zoomBy(factor: number): void {
+    this.followZoomTarget = null; // a manual zoom wins over the follow glide
     Object.assign(this.cam, zoomAt(this.cam, this.VW / 2, this.VH / 2, factor));
   }
 
@@ -453,6 +462,7 @@ export class WarehouseRenderer {
         if (this.pinch) {
           const next = this.pointers.pair();
           if (next) {
+            this.followZoomTarget = null;
             Object.assign(this.cam, pinchStep(this.cam, this.pinch, next));
             this.pinch = next;
           }
@@ -530,6 +540,7 @@ export class WarehouseRenderer {
       (e) => {
         e.preventDefault();
         const [mx, my] = this.local(e);
+        this.followZoomTarget = null; // a manual zoom wins over the follow glide
         Object.assign(this.cam, zoomAt(this.cam, mx, my, Math.exp(-e.deltaY * 0.0015)));
       },
       { passive: false },
@@ -564,6 +575,7 @@ export class WarehouseRenderer {
       this.mapKey = key;
       this.needsFit = true;
     }
+    const fitted = this.needsFit;
     if (this.needsFit) this.fit();
     this.coneMode = opts.coneMode;
     this.updateCursor();
@@ -596,6 +608,7 @@ export class WarehouseRenderer {
     );
     if (!me) {
       this.followId = null;
+      this.followZoomTarget = null;
       this.followAnchorY = 0.5;
       if (this.cam.rot) {
         const curCenter = unproject(this.cam, this.VW / 2, this.VH / 2);
@@ -611,19 +624,33 @@ export class WarehouseRenderer {
       const targetRot = headingUp ? headingUpRotation(p.a) : 0;
       // Heading-up mode looks ahead: the forklift sits in the lower quarter of the screen.
       const targetAnchorY = headingUp ? HEADING_UP_ANCHOR_Y : 0.5;
+      let cut = false;
       if (this.followId !== me.id) {
         this.followId = me.id;
-        if (this.cam.zoom < 0.9) this.cam.zoom = 1;
-        this.cam.rot = targetRot;
-        this.followAnchorY = targetAnchorY;
-        const t = anchorOn(this.cam, p.x, p.y, this.VW / 2, this.VH * targetAnchorY);
-        this.cam.x = t.x;
-        this.cam.y = t.y;
-      } else {
+        // New follow target (start driving, Follow a rival, switch vehicles): glide over to it,
+        // easing zoom in too. Hard cut only after a re-fit (site change / map rebuild) or under
+        // reduced motion.
+        cut = fitted || this.reducedMotion;
+        if (cut) {
+          if (this.cam.zoom < 0.9) this.cam.zoom = 1;
+          this.cam.rot = targetRot;
+          this.followAnchorY = targetAnchorY;
+          const t = anchorOn(this.cam, p.x, p.y, this.VW / 2, this.VH * targetAnchorY);
+          this.cam.x = t.x;
+          this.cam.y = t.y;
+          this.followGlideUntil = 0;
+          this.followZoomTarget = null;
+        } else {
+          this.followGlideUntil = nowMs + FOLLOW_GLIDE_MS;
+          this.followZoomTarget = this.cam.zoom < 0.9 ? 1 : null;
+        }
+      }
+      if (!cut) {
+        const gliding = nowMs < this.followGlideUntil;
         const curRot = this.cam.rot ?? 0;
         const rotDiff = wrapAngle(targetRot - curRot);
         if (Math.abs(rotDiff) >= 1e-4) {
-          const rotAlpha = this.reducedMotion ? 1 : 1 - Math.exp(-dtMs / 45);
+          const rotAlpha = this.reducedMotion ? 1 : 1 - Math.exp(-dtMs / (gliding ? FOLLOW_GLIDE_TAU_MS : 45));
           const beforePivot = project(this.cam, p.x, p.y);
           this.cam.rot = curRot + rotDiff * rotAlpha;
           const afterPivot = project(this.cam, p.x, p.y);
@@ -632,9 +659,14 @@ export class WarehouseRenderer {
         } else {
           this.cam.rot = targetRot;
         }
-        const alpha = this.reducedMotion ? 1 : 1 - Math.exp(-dtMs / 65);
+        const alpha = this.reducedMotion ? 1 : 1 - Math.exp(-dtMs / (gliding ? FOLLOW_GLIDE_TAU_MS : 65));
         const anchorSy = this.VH * this.followAnchorY;
         const curCenter = unproject(this.cam, this.VW / 2, anchorSy);
+        if (this.followZoomTarget !== null) {
+          const zDiff = this.followZoomTarget - this.cam.zoom;
+          this.cam.zoom = Math.abs(zDiff) < 1e-3 ? this.followZoomTarget : this.cam.zoom + zDiff * alpha;
+          if (this.cam.zoom === this.followZoomTarget) this.followZoomTarget = null;
+        }
         const fx = curCenter.x + (p.x - curCenter.x) * alpha;
         const fy = curCenter.y + (p.y - curCenter.y) * alpha;
         // Ease the screen anchor itself so toggling camera modes slides rather than snaps.

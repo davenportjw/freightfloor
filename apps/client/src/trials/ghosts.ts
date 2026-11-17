@@ -222,15 +222,30 @@ export function drawGhostTrail(pt: Painter, g: ShownGhost, t: number, dim = 1): 
   if (n < 2) return;
   const color = SLOT_COLOR[g.slot];
   const z = pt.cam.zoom;
+  /** Track point at fractional sample index `f` (linear, like `sampleGhost`). */
+  const at = (f: number): [number, number] => {
+    const i = Math.max(0, Math.min(n - 1, Math.floor(f)));
+    const j = Math.min(n - 1, i + 1);
+    const u = Math.max(0, Math.min(1, f - i));
+    return pt.P(tk.x[i] + (tk.x[j] - tk.x[i]) * u, tk.y[i] + (tk.y[j] - tk.y[i]) * u);
+  };
+  // Polyline from fractional index `from` to `to`: exact interpolated end points, and only the
+  // even-indexed samples in between (fixed parity), so the bright head tracks the smoothly lerped
+  // ghost truck instead of stepping at 10 Hz, and the line no longer swaps between odd and even
+  // samples every 100 ms (which made it wobble on curves).
   const stroke = (from: number, to: number, alpha: number, width: number) => {
-    if (to - from < 1) return;
+    if (to - from < 0.05) return;
     ctx.beginPath();
-    for (let i = from; i <= to; i += i + 2 <= to ? 2 : 1) {
+    const [x0, y0] = at(from);
+    ctx.moveTo(x0, y0);
+    let i = Math.floor(from) + 1;
+    if (i & 1) i++;
+    for (; i < to; i += 2) {
       const [sx, sy] = pt.P(tk.x[i], tk.y[i]);
-      if (i === from) ctx.moveTo(sx, sy);
-      else ctx.lineTo(sx, sy);
-      if (i === to) break;
+      ctx.lineTo(sx, sy);
     }
+    const [x1, y1] = at(to);
+    ctx.lineTo(x1, y1);
     ctx.strokeStyle = rgba(color, alpha);
     ctx.lineWidth = width;
     ctx.stroke();
@@ -241,8 +256,8 @@ export function drawGhostTrail(pt: Painter, g: ShownGhost, t: number, dim = 1): 
   ctx.lineJoin = 'round';
   ctx.setLineDash([]);
   stroke(0, n - 1, 0.22, Math.max(2, 3 * z));
-  const i0 = Math.max(0, Math.min(n - 1, Math.floor(t / 0.1)));
-  stroke(i0, Math.min(n - 1, i0 + 30), 0.5, Math.max(2.5, 4 * z));
+  const f0 = Math.max(0, Math.min(n - 1, t / 0.1));
+  stroke(f0, Math.min(n - 1, f0 + 30), 0.5, Math.max(2.5, 4 * z));
   for (const e of tk.events) {
     if (e.kind !== 'pick' && e.kind !== 'drop' && e.kind !== 'stow') continue;
     const ring = pt.circleGrid(tk.x[e.i], tk.y[e.i], 0.2, 16);
