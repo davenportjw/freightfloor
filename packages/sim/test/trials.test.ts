@@ -10,6 +10,7 @@ import {
   swaySpeed,
   trialGuide,
   trialInteract,
+  trialSection,
   type DriverInput,
   type Trial,
 } from '../src/index.js';
@@ -46,7 +47,8 @@ describe('Floor Trials levels', () => {
     expect(world.orders).toHaveLength(level.pallets.length);
     for (const o of world.orders) {
       expect(findPath(world, level.start.x, level.start.y, o.slot.ax, o.slot.ay)).not.toBeNull();
-      expect(world.map.bays.some((b) => b.id === o.bay)).toBe(true);
+      if (o.putaway) expect(findPath(world, level.start.x, level.start.y, o.putaway.ax, o.putaway.ay)).not.toBeNull();
+      else expect(world.map.bays.some((b) => b.id === o.bay)).toBe(true);
     }
     expect(tr.state.par).toBeGreaterThan(5);
     expect(tr.state.status).toBe('ready');
@@ -279,7 +281,9 @@ function autoplay(tr: Trial): void {
 }
 
 describe('solvability', () => {
-  it.each(TRIAL_LEVELS.map((l) => [l.id]))('%s can be cleared cleanly by a cautious driver', (id) => {
+  // Challenge levels (7–18) need charger stops, door waits and traffic dodging: see
+  // trials-challenges.test.ts, which drives them with the guided driver in trialDriver.ts.
+  it.each(TRIAL_LEVELS.filter((l) => trialSection(l) === 'start').map((l) => [l.id]))('%s can be cleared cleanly by a cautious driver', (id) => {
     const tr = createTrial(id);
     autoplay(tr);
     expect(tr.state.status).toBe('won');

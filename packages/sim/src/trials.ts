@@ -12,18 +12,56 @@
  * - **Strikes**: every topple, boost crash or fallen rack is a strike. 3 strikes fails the
  *   level; any strike caps the star rating.
  *
+ * Levels 7–18 ("Challenges") layer opt-in mechanics on top (see trialMechanics.ts): inbound
+ * putaway and cross-dock flows, glass and heavy pallets, pre-placed cones, a battery budget with
+ * chargers, timed dock windows, scripted traffic and a client-side visibility radius. A level
+ * that sets none of the optional fields plays exactly like levels 1–6.
+ *
  * Everything here is deterministic and pure TypeScript so the client can run it locally at
  * a fixed 10 Hz and the same rules stay unit-testable.
  */
 import { createWorld, spawnPlayerVehicle, stepHuman } from './engine.js';
 import { findPath, isBlocked } from './map.js';
-import type { DriverInput, Order, Point, Vehicle, World } from './types.js';
+import {
+  BATTERY_LOW,
+  CHARGE_MAX_SPEED,
+  CHARGE_RATE,
+  FRAGILE_SWAY_LIMIT,
+  TRAFFIC_COOLDOWN,
+  TRAFFIC_HIT,
+  TRAFFIC_KICK,
+  stackWeightFactor,
+  trafficPose,
+  windowState,
+  windowWait,
+  type TrialBattery,
+  type TrialTraffic,
+  type TrialWindow,
+} from './trialMechanics.js';
+import { CHALLENGE_LEVELS } from './trialChallenges.js';
+import type { DriverInput, Order, Point, Slot, Vehicle, World } from './types.js';
 
+export * from './trialMechanics.js';
+
+/**
+ * One pallet to move. Exactly one source (`rack` or `from`) and one destination (`bay` or `to`):
+ * - outbound pick: `{ rack, bay }` (levels 1–6)
+ * - inbound putaway: `{ from, to }`, from a dock to a marked rack slot
+ * - cross-dock: `{ from, bay }`, from an inbound dock straight to an outbound bay
+ */
 export interface TrialPallet {
-  /** Rack tile id (`map.racks[].id`, e.g. `H2-3`); the pallet waits on its access tile. */
-  rack: string;
+  /** Source rack tile id (`map.racks[].id`, e.g. `H2-3`); the pallet waits on its access tile. */
+  rack?: string;
+  /** Inbound source: a west receiving dock (`W1`–`W4`) or bay id; the pallet waits on the dock apron. */
+  from?: string;
   /** Outbound bay id the pallet must reach (e.g. `E2`). */
-  bay: string;
+  bay?: string;
+  /** Putaway destination rack id: stow the pallet at that rack's access tile. */
+  to?: string;
+  /** Glass: the stack tips at FRAGILE_SWAY_LIMIT and a fallen glass pallet fails the level. */
+  fragile?: boolean;
+  /** Heavy: steadies the stack from the bottom, tips it sooner from the top. */
+  heavy?: boolean;
 }
 
 export interface TrialLevel {
@@ -42,19 +80,46 @@ export interface TrialLevel {
   rackHp?: number;
   /** Wet-floor tiles placed at level start. */
   spills?: Point[];
-  /** Par multiplier for levels whose hazards force slower or longer lines (default 1). */
+  /**
+   * Par multiplier (default 1): above 1 for hazards that force slower or longer lines, below 1
+   * to tighten par where long straights or window waits make the reference route generous.
+   */
   parScale?: number;
+  /** Pre-placed cones (blocked tiles) that narrow the aisles. */
+  cones?: Point[];
+  /** Battery budget; without it the truck never runs flat. */
+  battery?: TrialBattery;
+  /** Timed acceptance windows per bay id; unlisted bays are always open. */
+  windows?: Record<string, TrialWindow>;
+  /** Scripted AI forklifts on deterministic loops; touching one is a strike. */
+  traffic?: TrialTraffic[];
+  /** Client-only: visibility radius in tiles (Lights Out fog). The sim ignores it. */
+  visibility?: number;
 }
+
+/** Level-select section: 1–6 teach the basics, 7–18 add one twist at a time. */
+export type TrialSection = 'start' | 'challenge';
+export const TRIAL_SECTIONS: ReadonlyArray<{ id: TrialSection; title: string }> = [
+  { id: 'start', title: 'Getting started' },
+  { id: 'challenge', title: 'Challenges' },
+];
+export const trialSection = (level: Pick<TrialLevel, 'num'>): TrialSection => (level.num <= 6 ? 'start' : 'challenge');
 
 export type TrialStatus = 'ready' | 'running' | 'won' | 'failed';
 
 export type TrialEventKind =
   | 'pick'
   | 'drop'
+  | 'stow'
   | 'topple'
   | 'crash'
   | 'rack_warn'
   | 'rack_fall'
+  | 'traffic'
+  | 'shatter'
+  | 'closed'
+  | 'charge'
+  | 'battery_low'
   | 'hint'
   | 'won'
   | 'failed';
@@ -91,6 +156,14 @@ export interface TrialState {
   lastSpill: string | null;
   /** Sequence number of the last emitted event. */
   eventSeq: number;
+  /** Battery charge (%) on battery levels, otherwise null. */
+  battery: number | null;
+  /** True while parked on a working charger and gaining charge. */
+  charging: boolean;
+  /** Low-battery warning already shown (re-arms after charging back up). */
+  lowWarned: boolean;
+  /** Per traffic forklift: level time until it can strike again. */
+  trafficCool: number[];
 }
 
 export interface Trial {
@@ -98,6 +171,8 @@ export interface Trial {
   world: World;
   vehicle: Vehicle;
   state: TrialState;
+  /** Level pallet spec per order id (weight, glass, flow). */
+  specs: ReadonlyMap<number, TrialPallet>;
 }
 
 export const TRIAL_MAX_STRIKES = 3;
@@ -146,6 +221,8 @@ export const TRIAL_PAR_SPEED = 3.15;
 /** Star thresholds as multiples of par. */
 export const STAR_3 = 1.25;
 export const STAR_2 = 1.7;
+/** Guide: another inbound pallet from the same dock tops up the stack only within this range (tiles). */
+export const DOCK_STACK_RANGE = 4;
 
 const E = 0;
 const W = Math.PI;
@@ -244,6 +321,7 @@ export const TRIAL_LEVELS: readonly TrialLevel[] = [
     ],
     stackMax: 3,
   },
+  ...CHALLENGE_LEVELS,
 ];
 
 export function trialLevel(id: string): TrialLevel | null {
@@ -327,35 +405,157 @@ function pathLen(w: World, a: Point, b: Point): number {
   return p.length;
 }
 
+/** Centre tile of an inbound dock: a west receiving dock (`W1`–`W4`) or a bay's middle tile. */
+function dockCentre(w: World, id: string): Point | null {
+  const west = w.map.westDocks.find((d) => d.id === id);
+  if (west) return { x: west.x, y: west.y };
+  const bay = w.map.bays.find((b) => b.id === id);
+  return bay ? (bay.tiles[1] ?? bay.tiles[0]) : null;
+}
+
 /**
- * Par time: trips in level order, grouped by bay and limited by `stackMax`, at cruise speed
- * plus a fixed handling time per pick and drop.
+ * Pickup slot for every level pallet, in level order. Rack pallets wait on the rack's access
+ * tile; inbound pallets fill free apron tiles around their dock, nearest first.
  */
-export function trialPar(w: World, level: TrialLevel): number {
-  const trips: TrialPallet[][] = [];
-  for (const p of level.pallets) {
-    const last = trips[trips.length - 1];
-    if (last && last.length < level.stackMax && last[0].bay === p.bay) last.push(p);
-    else trips.push([p]);
-  }
-  let at: Point = { x: level.start.x, y: level.start.y };
-  let tiles = 0;
-  for (const trip of trips) {
-    for (const p of trip) {
+function palletPickups(w: World, level: TrialLevel): Slot[] {
+  const used = new Map<string, number>();
+  return level.pallets.map((p) => {
+    if (p.rack) {
       const slot = w.map.slots.find((s) => s.rackId === p.rack);
       if (!slot) throw new Error(`Floor Trials: unknown rack ${p.rack}`);
-      const to = { x: slot.ax, y: slot.ay };
-      tiles += pathLen(w, at, to);
-      at = to;
+      return { ...slot };
     }
-    const drop = bayApproach(w, trip[0].bay);
-    if (!drop) throw new Error(`Floor Trials: bay ${trip[0].bay} unreachable`);
-    tiles += pathLen(w, at, drop);
-    at = drop;
+    if (!p.from) throw new Error('Floor Trials: pallet needs a rack or a from dock');
+    const c = dockCentre(w, p.from);
+    if (!c) throw new Error(`Floor Trials: unknown dock ${p.from}`);
+    const apron: Point[] = [];
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const x = c.x + dx;
+        const y = c.y + dy;
+        if (Math.hypot(dx, dy) > 2.3 || isBlocked(w, x, y)) continue;
+        if (w.map.bays.some((b) => b.tiles.some((t) => t.x === x && t.y === y))) continue;
+        apron.push({ x, y });
+      }
+    }
+    apron.sort((a, b) => Math.hypot(a.x - c.x, a.y - c.y) - Math.hypot(b.x - c.x, b.y - c.y) || a.y - b.y || a.x - b.x);
+    const n = used.get(p.from) ?? 0;
+    used.set(p.from, n + 1);
+    const t = apron[n];
+    if (!t) throw new Error(`Floor Trials: dock ${p.from} apron is full`);
+    return { key: `${t.x},${t.y}`, rackId: p.from, zone: 'dock', rx: t.x, ry: t.y, ax: t.x, ay: t.y, level: 0 };
+  });
+}
+
+/** Where a pallet is delivered: the bay approach tile, or the putaway rack's access tile. */
+function destPoint(w: World, p: TrialPallet): Point {
+  if (p.to) {
+    const slot = w.map.slots.find((s) => s.rackId === p.to);
+    if (!slot) throw new Error(`Floor Trials: unknown rack ${p.to}`);
+    return { x: slot.ax, y: slot.ay };
   }
-  const handles = level.pallets.length + trips.length;
-  const base = tiles / TRIAL_PAR_SPEED + handles * TRIAL_HANDLE_TIME;
+  if (!p.bay) throw new Error('Floor Trials: pallet needs a bay or a to rack');
+  const drop = bayApproach(w, p.bay);
+  if (!drop) throw new Error(`Floor Trials: bay ${p.bay} unreachable`);
+  return drop;
+}
+
+const destKey = (p: TrialPallet): string => (p.to ? `r:${p.to}` : `b:${p.bay}`);
+/** Par trip grouping: outbound pallets share a trip per bay; inbound pallets per source dock. */
+const tripKey = (p: TrialPallet): string => (p.from ? `s:${p.from}` : destKey(p));
+
+interface ParStop {
+  at: Point;
+  kind: 'pick' | 'drop' | 'charge';
+  bay?: string;
+  dwell: number;
+}
+
+/**
+ * Par time: trips in level order (grouped by `tripKey`, limited by `stackMax`) at cruise speed,
+ * plus a fixed handling time per pick and per drop stop. Challenge levels add the cheapest
+ * single charger detour (with just enough charge) on battery levels and the wait for each
+ * closed dock window on the way.
+ */
+export function trialPar(w: World, level: TrialLevel): number {
+  const pickups = palletPickups(w, level);
+  const trips: number[][] = [];
+  level.pallets.forEach((p, i) => {
+    const last = trips[trips.length - 1];
+    if (last && last.length < level.stackMax && tripKey(level.pallets[last[0]]) === tripKey(p)) last.push(i);
+    else trips.push([i]);
+  });
+  const stops: ParStop[] = [];
+  for (const trip of trips) {
+    for (const i of trip) stops.push({ at: { x: pickups[i].ax, y: pickups[i].ay }, kind: 'pick', dwell: TRIAL_HANDLE_TIME });
+    const seen = new Set<string>();
+    for (const i of trip) {
+      const p = level.pallets[i];
+      if (seen.has(destKey(p))) continue;
+      seen.add(destKey(p));
+      stops.push({ at: destPoint(w, p), kind: 'drop', bay: p.to ? undefined : p.bay, dwell: TRIAL_HANDLE_TIME });
+    }
+  }
+  const start: Point = { x: level.start.x, y: level.start.y };
+  const legs: number[] = [];
+  let at = start;
+  for (const s of stops) {
+    legs.push(pathLen(w, at, s.at));
+    at = s.at;
+  }
+  if (level.battery) insertChargeStop(w, level.battery, start, stops, legs);
+
+  let tiles = 0;
+  for (const n of legs) tiles += n;
+  const handles = stops.filter((s) => s.kind !== 'charge').length;
+  let extra = 0;
+  if (level.battery || level.windows) {
+    let t = 0;
+    stops.forEach((s, i) => {
+      t += legs[i] / TRIAL_PAR_SPEED;
+      if (s.kind === 'drop' && s.bay) {
+        const wait = windowWait(level.windows, s.bay, t);
+        t += wait;
+        extra += wait;
+      }
+      if (s.kind === 'charge') extra += s.dwell;
+      t += s.dwell;
+    });
+  }
+  const base = tiles / TRIAL_PAR_SPEED + handles * TRIAL_HANDLE_TIME + extra;
   return Math.round(base * (level.parScale ?? 1) * 10) / 10;
+}
+
+/**
+ * Inserts the cheapest feasible charger visit into a battery level's par route (in place). The
+ * truck may charge only as much as the rest of the route needs; no detour if the start charge
+ * already covers it.
+ */
+function insertChargeStop(w: World, bat: TrialBattery, start: Point, stops: ParStop[], legs: number[]): void {
+  const total = legs.reduce((a, b) => a + b, 0) * bat.perTile;
+  if (total <= bat.start) return;
+  let best: { k: number; c: Point; toC: number; fromC: number; need: number; cost: number } | null = null;
+  let before = 0;
+  for (let k = 0; k < stops.length; k++) {
+    const from = k === 0 ? start : stops[k - 1].at;
+    let after = 0;
+    for (let j = k + 1; j < legs.length; j++) after += legs[j];
+    for (const c of bat.chargers) {
+      const toC = pathLen(w, from, c);
+      const used = (before + toC) * bat.perTile;
+      if (used > bat.start) continue;
+      const fromC = pathLen(w, c, stops[k].at);
+      const arrive = bat.start - used;
+      const need = Math.max(0, (fromC + after) * bat.perTile - arrive);
+      if (arrive + need > 100) continue;
+      const cost = (toC + fromC - legs[k]) / TRIAL_PAR_SPEED + need / CHARGE_RATE;
+      if (!best || cost < best.cost) best = { k, c, toC, fromC, need, cost };
+    }
+    before += legs[k];
+  }
+  if (!best) throw new Error('Floor Trials: battery level cannot be finished with one charge');
+  stops.splice(best.k, 0, { at: best.c, kind: 'charge', dwell: best.need / CHARGE_RATE });
+  legs.splice(best.k, 1, best.toC, best.fromC);
 }
 
 /** Builds a fresh, deterministic trial for `levelId`. */
@@ -379,15 +579,21 @@ export function createTrial(levelId: string): Trial {
   v.speedNow = 0;
   v.battery = 100;
   v.state = 'driven';
-  for (const p of level.pallets) {
-    const slot = w.map.slots.find((s) => s.rackId === p.rack);
-    if (!slot) throw new Error(`Floor Trials: unknown rack ${p.rack}`);
-    if (!w.map.bays.some((b) => b.id === p.bay)) throw new Error(`Floor Trials: unknown bay ${p.bay}`);
+  for (const c of level.cones ?? []) w.cones.add(`${c.x},${c.y}`);
+  const pickups = palletPickups(w, level);
+  const specs = new Map<number, TrialPallet>();
+  level.pallets.forEach((p, i) => {
+    if (p.bay && !w.map.bays.some((b) => b.id === p.bay)) throw new Error(`Floor Trials: unknown bay ${p.bay}`);
+    const stow = p.to ? w.map.slots.find((s) => s.rackId === p.to) : undefined;
+    if (p.to && !stow) throw new Error(`Floor Trials: unknown rack ${p.to}`);
+    const dest = p.bay ?? p.to;
+    if (!dest) throw new Error('Floor Trials: pallet needs a bay or a to rack');
     const o: Order = {
       id: w.nextOrderId++,
-      sku: `TRL-${p.rack}`,
-      slot: { ...slot },
-      bay: p.bay,
+      sku: `TRL-${p.rack ?? p.from}`,
+      slot: pickups[i],
+      // Putaway pallets carry their rack id here so labels read "Pallet → H2-3".
+      bay: dest,
       p0: false,
       value: 1,
       created: 0,
@@ -396,8 +602,10 @@ export function createTrial(levelId: string): Trial {
       claimant: null,
       card: null,
     };
+    if (stow) o.putaway = { ...stow };
     w.orders.push(o);
-  }
+    specs.set(o.id, p);
+  });
   for (const s of level.spills ?? []) {
     w.spills.push({ id: w.nextHazardId++, x: s.x, y: s.y, born: 0, until: 1e9 });
   }
@@ -418,8 +626,12 @@ export function createTrial(levelId: string): Trial {
     events: [],
     lastSpill: null,
     eventSeq: 0,
+    battery: level.battery ? level.battery.start : null,
+    charging: false,
+    lowWarned: false,
+    trafficCool: (level.traffic ?? []).map(() => 0),
   };
-  return { level, world: w, vehicle: v, state };
+  return { level, world: w, vehicle: v, state, specs };
 }
 
 const hasInput = (i: DriverInput): boolean => Boolean(i.up || i.down || i.left || i.right);
@@ -464,8 +676,24 @@ function toppleTop(tr: Trial): void {
   v.orders = v.orders.filter((x) => x.id !== o.id);
   tr.state.sway *= 0.3;
   tr.state.swayVel = 0;
-  strike(tr, 'topple', 'Load tipped! Top pallet fell.', tx, ty);
+  if (tr.specs.get(o.id)?.fragile) shatter(tr, tx, ty);
+  else strike(tr, 'topple', 'Load tipped! Top pallet fell.', tx, ty);
 }
+
+/** A glass pallet hit the floor: instant fail (not a strike). */
+function shatter(tr: Trial, x: number, y: number): void {
+  const st = tr.state;
+  tr.world.markers.push({ x, y, until: tr.world.t + 6, kind: 'incident' });
+  emit(tr, 'shatter', 'Glass pallet shattered!', x, y);
+  if (st.status === 'running' || st.status === 'ready') {
+    st.status = 'failed';
+    tr.vehicle.speedNow = 0;
+    emit(tr, 'failed', 'Broken glass. Level failed.');
+  }
+}
+
+const isFragile = (tr: Trial, o: Order): boolean => Boolean(tr.specs.get(o.id)?.fragile);
+const isHeavy = (tr: Trial, o: Order): boolean => Boolean(tr.specs.get(o.id)?.heavy);
 
 function rackAt(w: World, x: number, y: number) {
   return w.map.racks.find((r) => r.x === x && r.y === y) ?? null;
@@ -537,6 +765,9 @@ export function stepTrial(tr: Trial, input: DriverInput, dt = 0.1): void {
   const prevSpeed = v.speedNow;
   const prevAngle = v.angle;
   const prevCargo = v.cargo.length;
+  const prevLoad = tr.specs.size && v.cargo.some((o) => isFragile(tr, o)) ? v.cargo.slice() : null;
+  const prevPx = v.px;
+  const prevPy = v.py;
   stepHuman(w, v, input, dt);
   w.t += dt;
   st.t = Math.round((st.t + dt) * 1000) / 1000;
@@ -546,6 +777,7 @@ export function stepTrial(tr: Trial, input: DriverInput, dt = 0.1): void {
     st.sway = 0;
     st.swayVel = 0;
     strike(tr, 'crash', 'Boost crash! The stack hit the floor.', v.tile.x, v.tile.y);
+    if (prevLoad?.some((o) => isFragile(tr, o) && !v.cargo.includes(o))) shatter(tr, v.tile.x, v.tile.y);
   }
 
   // Walls, racks and trucks stop the truck (near) dead. Letting go of boost also sheds a lot
@@ -557,7 +789,8 @@ export function stepTrial(tr: Trial, input: DriverInput, dt = 0.1): void {
     st.sway = 0;
     st.swayVel = 0;
   } else {
-    const g = SWAY_GAIN[n];
+    let g: number = SWAY_GAIN[n];
+    if (tr.specs.size) g *= stackWeightFactor(v.cargo.slice(0, 3).map((o) => isHeavy(tr, o)));
     const yaw = Math.max(-4, Math.min(4, wrapAngle(v.angle - prevAngle) / dt));
     const speed = v.speedNow;
     const lean = Math.sign(st.sway) || 1;
@@ -585,11 +818,17 @@ export function stepTrial(tr: Trial, input: DriverInput, dt = 0.1): void {
     const next = stepSway(st.sway, st.swayVel, force, kick, dt);
     st.sway = next.sway;
     st.swayVel = next.swayVel;
-    if (Math.abs(st.sway) >= 1) toppleTop(tr);
+    const limit = tr.specs.size && v.cargo.some((o) => isFragile(tr, o)) ? FRAGILE_SWAY_LIMIT : 1;
+    if (Math.abs(st.sway) >= limit) toppleTop(tr);
   }
 
   if (Math.abs(prevSpeed) >= RACK_HIT_SPEED && impact && st.status === 'running') {
     rackStrike(tr, prevSpeed);
+  }
+
+  if (tr.level.traffic && st.status === 'running') stepTraffic(tr, prevSpeed);
+  if (st.battery !== null && tr.level.battery && st.status === 'running') {
+    stepBattery(tr, tr.level.battery, Math.hypot(v.px - prevPx, v.py - prevPy), dt);
   }
 
   if (st.debris.length) {
@@ -606,7 +845,76 @@ export function stepTrial(tr: Trial, input: DriverInput, dt = 0.1): void {
   }
 }
 
-/** The E key: deliver at a matching bay, otherwise lift the nearest floor pallet. */
+/** Scripted forklifts: touching one stops the truck, kicks the load and costs a strike. */
+function stepTraffic(tr: Trial, prevSpeed: number): void {
+  const st = tr.state;
+  const v = tr.vehicle;
+  (tr.level.traffic ?? []).forEach((tk, i) => {
+    if (st.status !== 'running' || st.t < (st.trafficCool[i] ?? 0)) return;
+    const p = trafficPose(tk, st.t);
+    if (Math.hypot(v.px - p.x, v.py - p.y) >= TRAFFIC_HIT) return;
+    st.trafficCool[i] = st.t + TRAFFIC_COOLDOWN;
+    v.speedNow = 0;
+    const n = Math.min(3, v.cargo.length);
+    if (n) st.swayVel += (Math.sign(st.sway) || 1) * TRAFFIC_KICK * SWAY_GAIN[n] * Math.max(1, Math.abs(prevSpeed));
+    strike(tr, 'traffic', 'Traffic! You clipped a forklift.', v.tile.x, v.tile.y);
+  });
+}
+
+/** Battery levels: drain by distance, charge while parked on a working charger, fail when flat. */
+function stepBattery(tr: Trial, bat: TrialBattery, dist: number, dt: number): void {
+  const st = tr.state;
+  const v = tr.vehicle;
+  let b = (st.battery ?? 0) - dist * bat.perTile;
+  const onCharger =
+    Math.abs(v.speedNow) < CHARGE_MAX_SPEED && bat.chargers.some((c) => c.x === v.tile.x && c.y === v.tile.y);
+  if (onCharger && b < 100) {
+    b = Math.min(100, b + CHARGE_RATE * dt);
+    if (!st.charging) emit(tr, 'charge', 'Charging…', v.tile.x, v.tile.y);
+    st.charging = true;
+  } else if (st.charging) {
+    st.charging = false;
+    emit(tr, 'charge', `Charged to ${Math.floor(b)}%.`, v.tile.x, v.tile.y);
+  }
+  if (b > BATTERY_LOW + 10) st.lowWarned = false;
+  if (b <= BATTERY_LOW && !st.lowWarned && b > 0) {
+    st.lowWarned = true;
+    emit(tr, 'battery_low', 'Battery low! Head for a charger.', v.tile.x, v.tile.y);
+  }
+  st.battery = Math.max(0, b);
+  if (b <= 0) {
+    st.status = 'failed';
+    v.speedNow = 0;
+    emit(tr, 'failed', 'Battery flat. Level failed.');
+  }
+}
+
+/** Marks `load` delivered, emits the drop / stow event and settles the win. */
+function deliver(tr: Trial, load: Order[], kind: 'drop' | 'stow', text: string, x?: number, y?: number): TrialEvent {
+  const st = tr.state;
+  const v = tr.vehicle;
+  if (st.status === 'ready') st.status = 'running';
+  v.cargo = v.cargo.filter((o) => !load.includes(o));
+  for (const o of load) {
+    o.state = 'done';
+    st.delivered++;
+  }
+  v.orders = v.orders.filter((x) => !load.includes(x));
+  if (!v.cargo.length) {
+    st.sway = 0;
+    st.swayVel = 0;
+  }
+  const ev = emit(tr, kind, text, x, y);
+  if (st.delivered >= st.total) {
+    st.status = 'won';
+    v.speedNow = 0;
+    st.stars = starsFor(st.t, st.par, st.strikes);
+    emit(tr, 'won', `Level clear in ${st.t.toFixed(1)}s.`);
+  }
+  return ev;
+}
+
+/** The E key: deliver at a matching bay or stow slot, otherwise lift the nearest floor pallet. */
 export function trialInteract(tr: Trial): TrialEvent | null {
   const st = tr.state;
   const w = tr.world;
@@ -616,29 +924,20 @@ export function trialInteract(tr: Trial): TrialEvent | null {
   if (v.cargo.length) {
     for (const b of w.map.bays) {
       if (!b.tiles.some((t) => distTo(v, t.x, t.y) <= TRIAL_BAY_REACH)) continue;
-      const load = v.cargo.filter((o) => o.bay === b.id);
+      const load = v.cargo.filter((o) => o.bay === b.id && !o.putaway);
       if (!load.length) continue;
-      if (st.status === 'ready') st.status = 'running';
-      v.cargo = v.cargo.filter((o) => o.bay !== b.id);
-      for (const o of load) {
-        o.state = 'done';
-        st.delivered++;
+      const win = windowState(tr.level.windows, b.id, st.t);
+      if (win && !win.open) {
+        return emit(tr, 'closed', `Bay ${b.id} is closed. Opens in ${win.left.toFixed(1)}s.`, b.tiles[1]?.x, b.tiles[1]?.y);
       }
-      v.orders = v.orders.filter((x) => !load.includes(x));
       const bs = w.bays.find((x) => x.id === b.id);
       if (bs) bs.load += load.length;
-      if (!v.cargo.length) {
-        st.sway = 0;
-        st.swayVel = 0;
-      }
-      const ev = emit(tr, 'drop', `Delivered ${load.length} to Bay ${b.id}.`, b.tiles[1]?.x, b.tiles[1]?.y);
-      if (st.delivered >= st.total) {
-        st.status = 'won';
-        v.speedNow = 0;
-        st.stars = starsFor(st.t, st.par, st.strikes);
-        emit(tr, 'won', `Level clear in ${st.t.toFixed(1)}s.`);
-      }
-      return ev;
+      return deliver(tr, load, 'drop', `Delivered ${load.length} to Bay ${b.id}.`, b.tiles[1]?.x, b.tiles[1]?.y);
+    }
+    const stow = v.cargo.filter((o) => o.putaway && distTo(v, o.putaway.ax, o.putaway.ay) <= TRIAL_REACH);
+    if (stow.length) {
+      const ids = stow.map((o) => o.putaway!.rackId).join(', ');
+      return deliver(tr, stow, 'stow', `Stowed in ${ids}.`, stow[0].putaway!.rx, stow[0].putaway!.ry);
     }
   }
   if (v.cargo.length >= tr.level.stackMax) {
@@ -661,27 +960,95 @@ export function trialInteract(tr: Trial): TrialEvent | null {
   best.pickedAt = w.t;
   v.cargo.push(best);
   v.orders.push(best);
-  return emit(tr, 'pick', `Lifted pallet for Bay ${best.bay} (${v.cargo.length}/${tr.level.stackMax}).`);
+  const spec = tr.specs.get(best.id);
+  const what = best.putaway ? `for ${best.putaway.rackId}` : `for Bay ${best.bay}`;
+  const tag = spec?.fragile ? 'glass pallet' : spec?.heavy ? 'heavy pallet' : 'pallet';
+  return emit(tr, 'pick', `Lifted ${tag} ${what} (${v.cargo.length}/${tr.level.stackMax}).`);
 }
 
-/** Renderer guide pill: next pallet to lift, or the bay for the top pallet. */
-export function trialGuide(tr: Trial): {
-  kind: 'pick' | 'drop';
+/** Guide pill target: next pallet to lift, where to drop / stow, or a charger detour. */
+export interface TrialGuide {
+  kind: 'pick' | 'drop' | 'charge';
   x: number;
   y: number;
   inRange: boolean;
-  order: { id: number; bay: string };
-} | null {
+  /** The pallet this step is about (for a charge detour: the next pallet target after it). */
+  order: { id: number; bay: string; putaway?: { rackId: string; ax: number; ay: number } };
+  /** Drop into a rack slot (putaway) rather than a bay. */
+  stow?: boolean;
+}
+
+const guideOrder = (o: Order): TrialGuide['order'] =>
+  o.putaway ? { id: o.id, bay: o.bay, putaway: { rackId: o.putaway.rackId, ax: o.putaway.ax, ay: o.putaway.ay } } : { id: o.id, bay: o.bay };
+
+/** Renderer guide pill: next pallet to lift, the bay (or slot) for the load, or a charger. */
+export function trialGuide(tr: Trial): TrialGuide | null {
   const st = tr.state;
   const w = tr.world;
   const v = tr.vehicle;
   if (st.status === 'won' || st.status === 'failed') return null;
-  const open = w.orders.filter((o) => o.state === 'open');
-  const top = v.cargo[v.cargo.length - 1];
-  const full = v.cargo.length >= tr.level.stackMax;
-  const sameBayOpen = top ? open.filter((o) => o.bay === top.bay) : open;
-  if (top && (full || !sameBayOpen.length)) {
-    const tiles = bayTiles(w, top.bay);
+  const target = palletGuide(tr);
+  if (!target || !tr.level.battery || st.battery === null) return target;
+  const c = chargeDetour(tr, tr.level.battery, target);
+  if (!c) return target;
+  return { kind: 'charge', x: c.x, y: c.y, inRange: v.tile.x === c.x && v.tile.y === c.y, order: target.order };
+
+  function palletGuide(tr: Trial): TrialGuide | null {
+    const open = w.orders.filter((o) => o.state === 'open');
+    const top = v.cargo[v.cargo.length - 1];
+    const full = v.cargo.length >= tr.level.stackMax;
+    const topFrom = top ? tr.specs.get(top.id)?.from : undefined;
+    // Outbound: same bay stacks. Inbound: pallets from the same dock stack while still at it.
+    const sameDock = (o: Order): boolean =>
+      !!topFrom && tr.specs.get(o.id)?.from === topFrom && distTo(v, o.slot.ax, o.slot.ay) <= DOCK_STACK_RANGE;
+    let cands = top ? open.filter((o) => (topFrom ? sameDock(o) : o.bay === top.bay)) : open;
+    if (top && (full || !cands.length)) return dropGuide(tr);
+    // Heavy pallets first: while the stack is all heavy (or empty), prefer another heavy one.
+    if (tr.specs.size && v.cargo.every((o) => isHeavy(tr, o)) && cands.some((o) => isHeavy(tr, o))) {
+      cands = cands.filter((o) => isHeavy(tr, o));
+    }
+    let best: Order | null = null;
+    let bd = Infinity;
+    for (const o of cands) {
+      const d = distTo(v, o.slot.ax, o.slot.ay);
+      if (d < bd) {
+        bd = d;
+        best = o;
+      }
+    }
+    if (!best) return null;
+    return { kind: 'pick', x: best.slot.ax, y: best.slot.ay, inRange: bd <= TRIAL_REACH, order: guideOrder(best) };
+  }
+
+  function dropGuide(tr: Trial): TrialGuide | null {
+    // One destination: go there. Mixed loads (cross-dock, putaway): soonest reachable first,
+    // counting the wait for a closed dock window.
+    let pick = v.cargo[v.cargo.length - 1];
+    if (v.cargo.some((o) => o.bay !== pick.bay)) {
+      let bestScore = Infinity;
+      for (const o of v.cargo) {
+        const p = o.putaway ? { x: o.putaway.ax, y: o.putaway.ay } : bayTiles(w, o.bay)[1];
+        if (!p) continue;
+        const travel = distTo(v, p.x, p.y) / TRIAL_PAR_SPEED;
+        const score = travel + (o.putaway ? 0 : windowWait(tr.level.windows, o.bay, st.t + travel));
+        if (score < bestScore) {
+          bestScore = score;
+          pick = o;
+        }
+      }
+    }
+    if (pick.putaway) {
+      const d = distTo(v, pick.putaway.ax, pick.putaway.ay);
+      return {
+        kind: 'drop',
+        x: pick.putaway.ax,
+        y: pick.putaway.ay,
+        inRange: d <= TRIAL_REACH,
+        order: guideOrder(pick),
+        stow: true,
+      };
+    }
+    const tiles = bayTiles(w, pick.bay);
     let bt = tiles[0];
     let bd = Infinity;
     for (const t of tiles) {
@@ -692,23 +1059,49 @@ export function trialGuide(tr: Trial): {
       }
     }
     if (!bt) return null;
-    return { kind: 'drop', x: bt.x, y: bt.y, inRange: bd <= TRIAL_BAY_REACH, order: { id: top.id, bay: top.bay } };
+    return { kind: 'drop', x: bt.x, y: bt.y, inRange: bd <= TRIAL_BAY_REACH, order: guideOrder(pick) };
   }
-  let best: Order | null = null;
-  let bd = Infinity;
-  for (const o of sameBayOpen) {
-    const d = distTo(v, o.slot.ax, o.slot.ay);
-    if (d < bd) {
-      bd = d;
-      best = o;
+}
+
+const detourCache = new WeakMap<Trial, { key: string; charger: Point | null }>();
+
+/**
+ * Battery levels: the charger to visit before `target`, or null. Keeps guiding to the charger
+ * while charging until full; otherwise detours when, after reaching the target, the truck could
+ * no longer make it to a charger (unless the target finishes the level within the charge).
+ */
+function chargeDetour(tr: Trial, bat: TrialBattery, target: TrialGuide): Point | null {
+  const st = tr.state;
+  const v = tr.vehicle;
+  const w = tr.world;
+  const battery = st.battery ?? 0;
+  if (st.charging && battery < 99.5) return { x: v.tile.x, y: v.tile.y };
+  if (!bat.chargers.length) return null;
+  const tgt: Point = target.kind === 'drop' && !target.stow ? (bayApproach(w, target.order.bay) ?? target) : target;
+  const key = `${v.tile.x},${v.tile.y}|${tgt.x},${tgt.y}|${Math.floor(battery)}|${v.cargo.length}|${st.delivered}`;
+  const hit = detourCache.get(tr);
+  if (hit?.key === key) return hit.charger;
+  const len = (a: Point, b: Point): number => {
+    if (a.x === b.x && a.y === b.y) return 0;
+    return findPath(w, a.x, a.y, b.x, b.y)?.length ?? Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+  };
+  const toTarget = len(v.tile, tgt);
+  const lastDrop =
+    target.kind === 'drop' && w.orders.every((o) => o.state === 'done' || (v.cargo.includes(o) && o.bay === target.order.bay));
+  let charger: Point | null = null;
+  if (!(lastDrop && toTarget * bat.perTile * 1.1 < battery)) {
+    let near = bat.chargers[0];
+    for (const c of bat.chargers) {
+      if (Math.hypot(c.x - tgt.x, c.y - tgt.y) < Math.hypot(near.x - tgt.x, near.y - tgt.y)) near = c;
+    }
+    const need = (toTarget + len(tgt, near)) * bat.perTile * 1.1 + 2;
+    if (battery < need) {
+      charger = bat.chargers[0];
+      for (const c of bat.chargers) {
+        if (Math.hypot(c.x - v.px, c.y - v.py) < Math.hypot(charger.x - v.px, charger.y - v.py)) charger = c;
+      }
     }
   }
-  if (!best) return null;
-  return {
-    kind: 'pick',
-    x: best.slot.ax,
-    y: best.slot.ay,
-    inRange: bd <= TRIAL_REACH,
-    order: { id: best.id, bay: best.bay },
-  };
+  detourCache.set(tr, { key, charger });
+  return charger;
 }
