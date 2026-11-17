@@ -282,7 +282,7 @@ canvas.cab-overlay { pointer-events: none; }
   color: var(--blue-d);
   background: var(--blue-l);
   border: 1px solid #bfdbfe;
-  padding: 2px 8px;
+  padding: 1px 8px;
   border-radius: 999px;
 }
 .intro-head__titles h2 { margin: 0; font-size: 20px; font-weight: 800; color: var(--ink); }
@@ -312,6 +312,79 @@ canvas.cab-overlay { pointer-events: none; }
 }
 .help-card.intro-modal .intro-step {
   padding: 13px 12px 12px;
+}
+/* Main intro: pinned head/tabs/footer; only .intro-body scrolls. */
+.help-card.intro-main {
+  overflow: hidden;
+  gap: 10px;
+  padding: 14px 24px 14px;
+}
+.intro-main > * { flex-shrink: 0; }
+.intro-main > .intro-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0 -8px;
+  padding: 1px 8px;
+}
+.intro-main .intro-logo-banner { width: min(100% - 88px, 340px); }
+.help-card.intro-main .intro-pane { gap: 9px; }
+.intro-main .intro-step { padding: 10px 10px 10px; }
+.intro-main .intro-step__icon { font-size: 28px; }
+.intro-main .intro-step__title { margin: 6px 0 2px; font-size: 16px; }
+.intro-main .intro-step__body { font-size: 13.5px; }
+.intro-main .intro-footer { padding-top: 12px; }
+.intro-main .intro-spinup { padding: 8px 12px; gap: 3px; }
+/* Small screens: keep the pinned chrome short so the scrolling body still has room. */
+@media (max-width: 640px), (max-height: 720px) {
+  .intro-main .intro-spinup__quip { display: none; }
+}
+@media (max-width: 640px) {
+  .help-card.intro-main { padding: 14px 14px 12px; }
+  .intro-main .intro-tabs { gap: 6px; }
+  .intro-main .intro-tabs .btn { padding: 5px 10px; font-size: 12px; }
+  .intro-main .intro-steps { gap: 8px; }
+  .intro-main .intro-step {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr);
+    column-gap: 10px;
+    align-items: center;
+    text-align: left;
+    padding: 8px 10px;
+  }
+  .intro-main .intro-step__icon { grid-row: span 2; font-size: 26px; text-align: center; }
+  .intro-main .intro-step__num { top: 4px; left: 4px; width: 18px; height: 18px; font-size: 11px; line-height: 18px; }
+  .intro-main .intro-step__title { margin: 0; font-size: 15px; }
+  .intro-main .intro-footer { gap: 8px; }
+  .intro-main .intro-footer__ctas { width: 100%; }
+  .intro-main .intro-footer__ctas > * { flex: 1 1 0; justify-content: center; }
+}
+.intro-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 11px;
+}
+.intro-options .intro-lift-mode[data-enabled='true'][data-role='intro-lift-mode'] { grid-column: 1 / -1; }
+@media (max-width: 640px) { .intro-options { grid-template-columns: 1fr; } }
+.intro-footer__ctas { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-left: auto; }
+.intro-trials-btn {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 700;
+  border-radius: 11px;
+  color: var(--violet);
+  background: #f5f3ff;
+  border: 1px solid #ddd6fe;
+}
+.intro-trials-btn:hover,
+.intro-trials-btn:focus-visible {
+  background: #ede9fe;
+  border-color: var(--violet);
+  color: var(--violet);
 }
 .intro-logo-banner {
   display: block;
@@ -413,7 +486,7 @@ canvas.cab-overlay { pointer-events: none; }
 .whatsnew-item { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 10px; align-items: start; }
 .whatsnew-kind {
   justify-self: start;
-  padding: 2px 8px;
+  padding: 1px 8px;
   font-size: 11px;
   font-weight: 700;
   border: 1px solid var(--line);
@@ -500,6 +573,7 @@ canvas.cab-overlay { pointer-events: none; }
   flex-wrap: wrap;
 }
 .intro-lift-mode__info {
+  flex: 1 1 240px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -539,7 +613,7 @@ canvas.cab-overlay { pointer-events: none; }
   gap: 6px;
   flex-shrink: 0;
 }
-.intro-camera .intro-lift-mode__info { flex: 1 1 260px; }
+.intro-camera .intro-lift-mode__info { flex: 1 1 200px; }
 .help-card.intro-modal .intro-lift-mode { padding: 8px 12px; gap: 8px; }
 .help-card.intro-modal .intro-start-btn { padding: 9px 22px; font-size: 15px; }
 .intro-lift-toggle.active,
@@ -788,7 +862,7 @@ canvas.cab-overlay { pointer-events: none; }
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.04em;
-  padding: 2px 8px;
+  padding: 1px 8px;
   border-radius: 999px;
   background: #fef3c7;
   color: #92400e;
@@ -1271,7 +1345,7 @@ canvas.cab-overlay { pointer-events: none; }
   letter-spacing: 0.06em;
   color: var(--teal-d);
   background: #ccfbf1;
-  padding: 2px 8px;
+  padding: 1px 8px;
   border-radius: 999px;
 }
 .ad-title-row {
@@ -1290,7 +1364,7 @@ canvas.cab-overlay { pointer-events: none; }
 .ad-veh-badge {
   font-size: 12px;
   font-weight: 700;
-  padding: 2px 8px;
+  padding: 1px 8px;
   border-radius: 999px;
   background: var(--soft);
   border: 1px solid var(--line-2);

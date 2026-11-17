@@ -240,12 +240,14 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
   );
   whatsNewLink.dataset.introTab = 'whatsnew';
 
+  // Floor Trials is a second way to play, so it sits next to Start driving in the pinned footer
+  // (always visible) instead of among the info tabs at the top of a scrolling card.
   const trialsLink = el(
     'a',
     {
-      class: 'btn intro-ai-link intro-trials-link',
-      title: 'Solo stacking challenges with 3-star par times',
-      attrs: { href: '/trials.html' },
+      class: 'btn intro-trials-btn',
+      title: 'Six solo stacking challenges with 3-star par times',
+      attrs: { href: '/trials.html', 'data-role': 'intro-trials-link' },
     },
     ['★ Floor Trials'],
   );
@@ -275,7 +277,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
   const step3Body = el('p', { class: 'intro-step__body' }, ['Drop it at the blue Shipping Bay with ', kbd('E'), '.']);
   const perfectLiftChip = el('span', { class: 'intro-chip' }, ['+$5–$10 perfect lift']);
   perfectLiftChip.hidden = true;
-  const boostChip = el('span', { class: 'intro-chip' }, ['Hold ', kbd('Shift'), ' to boost — crashing drops your load']);
+  const boostChip = el('span', { class: 'intro-chip' }, ['Hold ', kbd('Shift'), ' to boost']);
   const chargeChip = el('span', { class: 'intro-chip' }, ['🔋 Low? Park on a green pad, press ', kbd('E')]);
   const manualSteeringText = el('span', { text: ' WASD steering & physics' });
   const manualOfferText = el('span', { text: ' Ranks 3 offers (Q), auto-picks in 5s' });
@@ -343,10 +345,9 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       el('div', { class: 'intro-lift-mode__bar' }, [
         el('div', { class: 'intro-lift-mode__info' }, [
           el('span', { class: 'intro-lift-mode__title' }, ['🏗️ ', b('Lift Mode')]),
-          el('span', { class: 'intro-lift-mode__flag num', text: 'FEATURE FLAG' }),
           el('span', {
             class: 'intro-lift-mode__sub',
-            text: 'Opt-in 3D vertical rack shelf lifting (L1–L3) with sweet-spot bonuses.',
+            text: 'Opt-in 3D rack lifting (L1–L3) with sweet-spot bonuses.',
           }),
         ]),
         liftModeBtn,
@@ -470,10 +471,9 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       el('div', { class: 'intro-lift-mode__bar' }, [
         el('div', { class: 'intro-lift-mode__info' }, [
           el('span', { class: 'intro-lift-mode__title' }, ['🎥 ', b('Camera')]),
-          el('span', { class: 'intro-lift-mode__flag num', text: 'R · P' }),
           el('span', {
             class: 'intro-lift-mode__sub',
-            text: 'Forklift Up rotates the floor as you steer (R). Cab View drives from the seat with Lift Mode on (P).',
+            text: 'Rotate with your forklift (R) or drive from the seat (P).',
           }),
         ]),
         el('div', { class: 'intro-camera__btns' }, [driveCameraBtn, cabViewBtn]),
@@ -526,7 +526,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
         step2Body.replaceChildren('Pull up to a glowing pallet and tap ', kbd('Pick'), ' on the bottom-right.');
       }
       step3Body.replaceChildren('Drop it at the blue Shipping Bay by tapping ', kbd('Drop'), '.');
-      boostChip.replaceChildren('Hold ', kbd('Boost'), ' to boost — crashing drops your load');
+      boostChip.replaceChildren('Hold ', kbd('Boost'), ' to boost');
       chargeChip.replaceChildren('🔋 Low? Park on a green pad, tap ', kbd('Charge'));
       manualSteeringText.textContent = ' Joystick steering & physics';
       manualOfferText.textContent = ' Ranks 3 offers, auto-picks in 5s';
@@ -555,7 +555,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
         step2Body.replaceChildren('Pull up to a glowing pallet and press ', kbd('E'), '.');
       }
       step3Body.replaceChildren('Drop it at the blue Shipping Bay with ', kbd('E'), '.');
-      boostChip.replaceChildren('Hold ', kbd('Shift'), ' to boost — crashing drops your load');
+      boostChip.replaceChildren('Hold ', kbd('Shift'), ' to boost');
       chargeChip.replaceChildren('🔋 Low? Park on a green pad, press ', kbd('E'));
       manualSteeringText.textContent = ' WASD steering & physics';
       manualOfferText.textContent = ' Ranks 3 offers (Q), auto-picks in 5s';
@@ -662,10 +662,10 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
         boostChip,
         chargeChip,
       ]),
-      dailyBox,
-      liftModeBox,
-      cameraBox,
       el('p', { class: 'intro-goal' }, ['Out-ship the AI forklifts and finish the shift ', b('#1'), '.']),
+      dailyBox,
+      // Lift Mode + Camera side by side; Lift Mode spans both columns while its explainer is open.
+      el('div', { class: 'intro-options' }, [liftModeBox, cameraBox]),
       el('details', { class: 'intro-keys' }, [
         el('summary', { text: 'All controls' }),
         controlsTable,
@@ -1297,7 +1297,6 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
     whatsNewPane.hidden = view !== 'whatsnew';
     aiLink.hidden = ai;
     aiLink.setAttribute('aria-expanded', String(ai));
-    trialsLink.hidden = view !== 'play';
     whatsNewLink.hidden = view === 'whatsnew';
     backLink.hidden = view === 'play';
     if (view === 'whatsnew') {
@@ -1380,7 +1379,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
       assignedBadge,
       davenporterLink,
     ]),
-    startBtn,
+    el('div', { class: 'intro-footer__ctas' }, [trialsLink, startBtn]),
   ]);
   footer.addEventListener('submit', (ev) => {
     ev.preventDefault();
@@ -1390,7 +1389,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
   const card = el(
     'div',
     {
-      class: 'hud help-card intro-modal',
+      class: 'hud help-card intro-modal intro-main',
       attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'helpTitle' },
     },
     [
@@ -1427,11 +1426,10 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
           ],
         ),
       ]),
-      el('div', { class: 'intro-tabs', attrs: { 'aria-label': 'Intro sections' } }, [aiLink, trialsLink, whatsNewLink, backLink]),
-      playPane,
-      aiPane,
-      lifecyclePane,
-      whatsNewPane,
+      el('div', { class: 'intro-tabs', attrs: { 'aria-label': 'Intro sections' } }, [aiLink, whatsNewLink, backLink]),
+      // Only the body scrolls: the logo, tabs, spin-up status, and footer (Floor Trials / Start
+      // driving) stay pinned so neither way to play can scroll out of view.
+      el('div', { class: 'intro-body' }, [playPane, aiPane, lifecyclePane, whatsNewPane]),
       spinupBox,
       footer,
     ],
