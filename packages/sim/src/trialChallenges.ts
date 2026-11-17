@@ -30,7 +30,7 @@ export const CHALLENGE_LEVELS: readonly TrialLevel[] = [
     num: 8,
     name: 'Fragile',
     blurb: 'Glass pallets tip early, and broken glass ends the run.',
-    tip: 'Blue pallets are glass: the load meter turns red sooner. Corner gently with glass aboard.',
+    tip: 'GLASS pallets tip at half the sway and shatter if they fall. Corner gently with glass aboard.',
     start: { x: 34, y: 21, angle: E },
     pallets: [
       { rack: 'V2-2', bay: 'E5', fragile: true },
@@ -45,7 +45,7 @@ export const CHALLENGE_LEVELS: readonly TrialLevel[] = [
     num: 9,
     name: 'Heavy Bottom',
     blurb: 'Mixed weights. Heavy pallets go on the bottom.',
-    tip: 'Dark pallets are heavy: lift them first. Heavy on top of light tips much sooner.',
+    tip: 'Lift HEAVY pallets first: they steady the stack from below, but tip it fast from the top.',
     start: { x: 34, y: 4, angle: E },
     pallets: [
       { rack: 'G1-2', bay: 'E1', heavy: true },
@@ -71,6 +71,12 @@ export const CHALLENGE_LEVELS: readonly TrialLevel[] = [
     ],
     stackMax: 3,
     cones: [
+      { x: 18, y: 11 },
+      { x: 18, y: 12 },
+      { x: 23, y: 12 },
+      { x: 23, y: 13 },
+      { x: 28, y: 11 },
+      { x: 28, y: 12 },
       { x: 32, y: 19 },
       { x: 32, y: 20 },
       { x: 36, y: 20 },
