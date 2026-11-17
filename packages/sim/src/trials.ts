@@ -21,7 +21,7 @@
  * a fixed 10 Hz and the same rules stay unit-testable.
  */
 import { createWorld, spawnPlayerVehicle, stepHuman } from './engine.js';
-import { findPath, isBlocked } from './map.js';
+import { buildMap, findPath, isBlocked } from './map.js';
 import {
   BATTERY_LOW,
   CHARGE_MAX_SPEED,
@@ -326,6 +326,39 @@ export const TRIAL_LEVELS: readonly TrialLevel[] = [
 
 export function trialLevel(id: string): TrialLevel | null {
   return TRIAL_LEVELS.find((l) => l.id === id) ?? null;
+}
+
+/** A tile where a level's pallets can be delivered, with the reach `trialInteract` allows. */
+export interface TrialDropTarget extends Point {
+  kind: 'bay' | 'stow';
+  /** Bay id or putaway rack id. */
+  id: string;
+  /** Max distance (tiles) from the truck centre to the tile centre for a valid drop. */
+  reach: number;
+}
+
+/**
+ * Every valid drop tile for a level: all tiles of each destination bay (reach TRIAL_BAY_REACH)
+ * and the access tile of each putaway rack slot (reach TRIAL_REACH). Pure; for replay validators.
+ */
+export function trialDropTargets(level: TrialLevel): TrialDropTarget[] {
+  const map = buildMap(0, 'den-1');
+  const out: TrialDropTarget[] = [];
+  const seen = new Set<string>();
+  for (const p of level.pallets) {
+    if (p.bay && !seen.has(`b:${p.bay}`)) {
+      seen.add(`b:${p.bay}`);
+      for (const t of map.bays.find((b) => b.id === p.bay)?.tiles ?? []) {
+        out.push({ x: t.x, y: t.y, kind: 'bay', id: p.bay, reach: TRIAL_BAY_REACH });
+      }
+    }
+    if (p.to && !seen.has(`r:${p.to}`)) {
+      seen.add(`r:${p.to}`);
+      const s = map.slots.find((x) => x.rackId === p.to);
+      if (s) out.push({ x: s.ax, y: s.ay, kind: 'stow', id: p.to, reach: TRIAL_REACH });
+    }
+  }
+  return out;
 }
 
 const wrapAngle = (a: number): number => {
@@ -937,7 +970,7 @@ export function trialInteract(tr: Trial): TrialEvent | null {
     const stow = v.cargo.filter((o) => o.putaway && distTo(v, o.putaway.ax, o.putaway.ay) <= TRIAL_REACH);
     if (stow.length) {
       const ids = stow.map((o) => o.putaway!.rackId).join(', ');
-      return deliver(tr, stow, 'stow', `Stowed in ${ids}.`, stow[0].putaway!.rx, stow[0].putaway!.ry);
+      return deliver(tr, stow, 'stow', `Stowed ${stow.length} in ${ids}.`, stow[0].putaway!.rx, stow[0].putaway!.ry);
     }
   }
   if (v.cargo.length >= tr.level.stackMax) {

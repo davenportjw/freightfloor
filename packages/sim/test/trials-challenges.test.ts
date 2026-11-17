@@ -6,7 +6,9 @@ import {
   HEAVY_TOP_GAIN,
   STAR_2,
   TRAFFIC_COOLDOWN,
+  TRIAL_BAY_REACH,
   TRIAL_LEVELS,
+  TRIAL_REACH,
   createTrial,
   findPath,
   isBlocked,
@@ -16,6 +18,7 @@ import {
   trafficTiles,
   trialGuide,
   trialInteract,
+  trialDropTargets,
   trialPar,
   trialSection,
   windowState,
@@ -359,7 +362,26 @@ describe('putaway and cross-dock', () => {
   });
 });
 
+describe('drop targets', () => {
+  it('trialDropTargets lists every bay tile and putaway slot a level delivers to', () => {
+    for (const level of TRIAL_LEVELS) {
+      const targets = trialDropTargets(level);
+      const tr = createTrial(level.id);
+      for (const o of tr.world.orders) {
+        if (o.putaway) {
+          expect(targets).toContainEqual({ x: o.putaway.ax, y: o.putaway.ay, kind: 'stow', id: o.putaway.rackId, reach: TRIAL_REACH });
+        } else {
+          const bay = tr.world.map.bays.find((b) => b.id === o.bay)!;
+          for (const t of bay.tiles) expect(targets).toContainEqual({ x: t.x, y: t.y, kind: 'bay', id: o.bay, reach: TRIAL_BAY_REACH });
+        }
+      }
+      expect(targets.every((t) => t.reach > 0)).toBe(true);
+    }
+  });
+});
+
 describe('cones', () => {
+
   it('cone-maze cones block their tiles but leave every target routable', () => {
     const tr = createTrial('cone-maze');
     for (const c of tr.level.cones!) expect(isBlocked(tr.world, c.x, c.y)).toBe(true);
