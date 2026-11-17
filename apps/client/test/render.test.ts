@@ -567,3 +567,88 @@ describe('render/scenery & multi-site visual themes', () => {
 
 
 
+
+describe('render/scenery conveyorTotes', () => {
+  it('moves every tote continuously along its own belt run (no per-tile teleports)', async () => {
+    const { conveyorTotes, CONVEYOR_SPEED } = await import('../src/render/scenery.js');
+    const map = buildMap();
+    expect(map.conveyors.length).toBeGreaterThan(0);
+    const dt = 1 / 60;
+    for (let t = 0; t < 20; t += 0.37) {
+      const a = new Map(conveyorTotes(map.conveyors, t).map((x) => [x.index, x]));
+      const b = conveyorTotes(map.conveyors, t + dt);
+      for (const tb of b) {
+        const ta = a.get(tb.index);
+        if (!ta) continue; // just faded in at the head of a run
+        const dy = tb.y - ta.y;
+        if (dy < 0) {
+          // only a fully faded tote may wrap from tail back to head
+          expect(ta.alpha).toBeLessThan(0.1);
+          expect(tb.alpha).toBeLessThan(0.1);
+        } else {
+          expect(dy).toBeCloseTo(CONVEYOR_SPEED * dt, 9);
+          expect(tb.x).toBe(ta.x);
+        }
+      }
+    }
+  });
+
+  it('keeps totes on conveyor tiles and fades them at run ends', async () => {
+    const { conveyorTotes } = await import('../src/render/scenery.js');
+    const map = buildMap();
+    const tiles = new Set(map.conveyors.map((c) => `${c.x},${c.y}`));
+    const totes = conveyorTotes(map.conveyors, 12.34);
+    expect(totes.length).toBeGreaterThan(0);
+    for (const t of totes) {
+      expect(tiles.has(`${t.x},${t.tileY0}`)).toBe(true);
+      expect(tiles.has(`${t.x},${t.tileY1}`)).toBe(true);
+      expect(t.alpha).toBeGreaterThan(0);
+      expect(t.alpha).toBeLessThanOrEqual(1);
+    }
+    expect(conveyorTotes([], 5)).toEqual([]);
+  });
+});
+
+describe('render/motion VehiclePoseResolver', () => {
+  it('blends the local truck across a prediction → server-interpolation handover', async () => {
+    const { VehiclePoseResolver } = await import('../src/render/motion.js');
+    const r = new VehiclePoseResolver();
+    const veh = (px: number) => [{ id: 'me', px, py: 5, angle: 0, state: 'toPick', fork: 0 }];
+    // Server samples: truck moving +x at 2 tiles/s.
+    for (let i = 0; i <= 10; i++) r.resolve(i * 0.1, veh(i * 0.2), 1000 + i * 100, 'me', { x: i * 0.2, y: 5, a: 0 });
+    const lastLocal = r.resolve(1.0, veh(2), 2000, 'me', { x: 2, y: 5, a: 0 }).get('me')!;
+    expect(lastLocal.x).toBeCloseTo(2, 9);
+    // Hand over to the server (Co-Pilot): the tracker runs ~250 ms behind, but no jump.
+    const first = r.resolve(1.0, veh(2), 2016, 'me', null).get('me')!;
+    expect(Math.abs(first.x - lastLocal.x)).toBeLessThan(0.05);
+    // ...and the offset decays away.
+    let p = first;
+    for (let ms = 2032; ms <= 3000; ms += 16) p = r.resolve(1.0, veh(2), ms, 'me', null).get('me')!;
+    expect(p.x).toBeCloseTo(r.tracker.pose('me', 3000)!.x, 3);
+  });
+
+  it('eases fork height instead of stepping with the 10 Hz server value', async () => {
+    const { VehiclePoseResolver } = await import('../src/render/motion.js');
+    const r = new VehiclePoseResolver();
+    const v = (fork: number) => [{ id: 'r1', px: 1, py: 1, angle: 0, fork }];
+    r.resolve(0, v(0), 0, null, null);
+    r.resolve(0.1, v(0.7), 16, null, null);
+    const f1 = r.fork('r1', 0.7);
+    expect(f1).toBeGreaterThan(0);
+    expect(f1).toBeLessThan(0.7);
+    for (let ms = 32; ms <= 600; ms += 16) r.resolve(0.1, v(0.7), ms, null, null);
+    expect(r.fork('r1', 0.7)).toBeCloseTo(0.7, 3);
+    // snapForkId (rack-lift minigame driving it locally) bypasses easing
+    r.resolve(0.2, v(0.1), 616, null, null, 'r1');
+    expect(r.fork('r1', 0.1)).toBe(0.1);
+    const veh = { id: 'r1', fork: 0.1 };
+    expect(r.withFork(veh)).toBe(veh);
+  });
+
+  it('fades expiring markers over the last half game-minute', async () => {
+    const { markerFade } = await import('../src/render/motion.js');
+    expect(markerFade(10, 9)).toBe(1);
+    expect(markerFade(10, 9.75)).toBeCloseTo(0.5, 9);
+    expect(markerFade(10, 10)).toBe(0);
+  });
+});

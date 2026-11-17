@@ -233,7 +233,9 @@ export function vehicleParts(
       const tierH = height * CARRIED_Z;
       const isTop = i === cargo.length - 1;
       const warn = isTop && lean ? lean.warn : 0;
-      const flash = warn > 0 ? warn * (0.7 + 0.3 * Math.sin(nowMs / (110 - 50 * warn))) : 0;
+      // Fixed flash rate: scaling the sine's period by `warn` made its phase (nowMs / period) leap
+      // every frame as the lean changed, so the load strobed randomly instead of pulsing.
+      const flash = warn > 0 ? warn * (0.7 + 0.3 * Math.sin(nowMs / 75)) : 0;
       for (const q of prims) {
         const partZ0 = zz + q.z0 * CARRIED_Z;
         const partH = q.h * CARRIED_Z;
@@ -415,7 +417,8 @@ export function computeChargeVisualCue(
     (((nowMs % CHARGE_CUE_PERIOD_MS) + CHARGE_CUE_PERIOD_MS) % CHARGE_CUE_PERIOD_MS) /
     CHARGE_CUE_PERIOD_MS;
   const zOffset = phase * 22;
-  const alpha = Math.max(0.15, Math.sin(phase * Math.PI));
+  // Fades fully out at the wrap (the old 0.15 floor left the label visible as it jumped back down).
+  const alpha = Math.sin(phase * Math.PI);
   const ringZ = 4 + phase * 26;
   const ringRadius = 0.56 + 0.14 * Math.sin(phase * Math.PI);
   return { active: true, label, zOffset, alpha, ringRadius, ringZ };

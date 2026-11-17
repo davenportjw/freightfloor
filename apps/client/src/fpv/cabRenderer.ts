@@ -20,11 +20,12 @@ import {
   type WorldMap,
 } from '@warehouse/sim';
 import type { GuideInfo, RenderOptions } from '../renderer.js';
+import { rackLiftFlashAlpha } from '../ui/rackLiftMinigame.js';
 import { arrowColor, BUBBLE_MS, CALLOUT_MS, calloutColor, guideUrgency, wrapBubbleText, type Callout, type RivalBubble } from '../render/fx.js';
 import { forkHeightM, isoZ, ISO_PX_PER_M, liftWindowM, beamTopM, TILE_M } from '../render/liftGeometry.js';
-import { PoseTracker, type Pose } from '../render/motion.js';
+import { VehiclePoseResolver, type Pose } from '../render/motion.js';
 import { Painter } from '../render/painter.js';
-import { drawCargoItem, drawCharger, drawCone, drawConveyorItem, drawRack, drawStruct, getSiteVisuals, teamColor } from '../render/scenery.js';
+import { conveyorTotes, drawCargoItem, drawCharger, drawCone, drawConveyorItem, drawRack, drawStruct, getSiteVisuals, teamColor } from '../render/scenery.js';
 import { dockParts, dockTruckFrame, rigParts, SimClock, type RigBox } from '../render/trucks.js';
 import { footprintOf, modelOf, vehicleParts, type Part } from '../render/vehicles.js';
 import { WheelOdometer, type WheelMotion } from '../render/wheels.js';
@@ -363,7 +364,7 @@ export class CabRenderer {
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
   private readonly forkCam: THREE.PerspectiveCamera;
-  private readonly tracker = new PoseTracker();
+  private readonly tracker = new VehiclePoseResolver();
   private readonly dockClock = new SimClock();
   private readonly rec = new PrimRecorder();
   private readonly meRec = new PrimRecorder();
@@ -417,7 +418,8 @@ export class CabRenderer {
   private lastMs = 0;
   private reducedMotion = false;
   private visible = false;
-  private callouts: Array<Callout & { born: number }> = [];
+  private callouts: Array<Callout & { born: number; slot?: number }> = [];
+  private lastCalloutMs = 0;
   private bubbles: Array<RivalBubble & { born: number }> = [];
   private poses = new Map<string, Pose>();
   /** Free-look offsets (rad) from dragging the cab view; spring back to 0 on release. */
@@ -579,8 +581,13 @@ export class CabRenderer {
   }
 
   pushCallout(c: Callout, nowMs: number): void {
+    this.callouts = this.callouts.filter((x) => nowMs - x.born < CALLOUT_MS);
+    // Over the cap: fade the oldest out quickly instead of deleting it at full opacity.
+    for (let i = 0; i < this.callouts.length - 3; i++) {
+      const old = this.callouts[i]!;
+      old.born = Math.min(old.born, nowMs - CALLOUT_MS * 0.85);
+    }
     this.callouts.push({ ...c, born: nowMs });
-    if (this.callouts.length > 4) this.callouts.shift();
   }
 
   pushBubble(b: RivalBubble, nowMs: number): void {
@@ -819,17 +826,18 @@ export class CabRenderer {
     }
 
     // Poses: same smoothing as the iso renderer (predicted pose for me, interpolation for rivals).
-    this.tracker.update(world.t, nowMs, world.vehicles);
-    const poses = new Map<string, Pose>();
-    for (const v of world.vehicles) {
-      let p: Pose | null;
-      if (v.id === opts.myVid) {
-        p = opts.myPose ?? (v.state === 'driven' ? { x: v.px, y: v.py, a: v.angle } : this.tracker.pose(v.id, nowMs));
-      } else p = this.tracker.pose(v.id, nowMs);
-      poses.set(v.id, p ?? { x: v.px, y: v.py, a: v.angle });
-    }
+    const poses = this.tracker.resolve(
+      world.t,
+      world.vehicles,
+      nowMs,
+      opts.myVid,
+      opts.myPose,
+      opts.rackLift?.active ? (opts.myVid ?? null) : null,
+    );
     this.poses = poses;
-    const me = opts.myVid ? world.vehicles.find((v) => v.id === opts.myVid) : undefined;
+    const meRaw = opts.myVid ? world.vehicles.find((v) => v.id === opts.myVid) : undefined;
+    // Eased fork height for the cab camera, mast and fork-cam (the server steps it at 10 Hz).
+    const me = meRaw ? this.tracker.withFork(meRaw) : undefined;
     if (!me) {
       // Cab view only makes sense while driving; main.ts switches back to iso, draw nothing.
       this.gl.clear();
@@ -904,16 +912,11 @@ export class CabRenderer {
     }
     // Conveyor totes.
     const dockT = this.dockClock.update(world.t, nowMs);
-    const NCV = map.conveyors.length;
-    if (NCV) {
-      for (let i = 0; i < 16; i++) {
-        const p = (dockT * 0.6 + (i * NCV) / 16) % NCV;
-        const c = map.conveyors[Math.floor(p)];
-        if (!c) continue;
-        const fy = p - Math.floor(p);
-        drawConveyorItem(rec.asPainter(), c.x, c.y + fy * 0.6, 8.5, i, world.siteId);
-      }
+    for (const tote of conveyorTotes(map.conveyors, dockT)) {
+      rec.alphaMul = tote.alpha;
+      drawConveyorItem(rec.asPainter(), tote.x, tote.y, 8.5, tote.index, world.siteId);
     }
+    rec.alphaMul = 1;
     // Dock rigs (west receiving + east shipping).
     const blink = this.reducedMotion ? true : Math.floor(nowMs / 380) % 2 === 0;
     const rigs: Array<{ dockX: number; cy: number; dir: 1 | -1; kind: 'ship' | 'net' | 'receive'; fill: number; departUntil: number; doorPallets: number | null }> = [];
@@ -974,7 +977,7 @@ export class CabRenderer {
       const fp = footprintOf(modelOf(v.type));
       this.shadows.add(p.x + Math.cos(p.a) * fp.ox, p.y + Math.sin(p.a) * fp.ox, fp.len, fp.wid, p.a);
       const motion = this.motionFor(v.id, p, nowMs);
-      for (const q of vehicleParts(v, p, nowMs, world.siteId, true, 0, { motion, lugs: Boolean(motion) })) recordPart(rec, q, p.a);
+      for (const q of vehicleParts(this.tracker.withFork(v), p, nowMs, world.siteId, true, 0, { motion, lugs: Boolean(motion) })) recordPart(rec, q, p.a);
     }
     this.shadows.end();
     const opaque = rec.prims.filter((p) => p.alpha >= 0.99);
@@ -1079,14 +1082,16 @@ export class CabRenderer {
       const left = Math.max(0, Math.min(1, (h.until - world.t) / 30));
       this.discs.add(h.x + 0.5, h.y + 0.5, 0.42 + 0.08 * left, '#FACC15');
     }
-    const mp = this.reducedMotion ? 0.5 : (Math.sin((nowMs / 150) * Math.PI * 2) + 1) / 2;
+    // Same pulse periods as the iso renderer (~0.94 s / ~1.6 s); these used to cycle every 150 /
+    // 260 ms, a 4-7 Hz strobe in Cab View.
+    const mp = this.reducedMotion ? 0.5 : (Math.sin(nowMs / 150) + 1) / 2;
     for (const m of world.markers) {
       if (m.until <= world.t) continue;
       const inc = m.kind === 'incident';
       this.rings.add(m.x + 0.5, m.y + 0.5, 0.5 + 0.35 * mp * (inc ? 1 : 0.6), inc ? '#DC2626' : '#D97706');
     }
     if (g && g.x != null && g.y != null) {
-      const pulse = this.reducedMotion ? 0.5 : (Math.sin((nowMs / 260) * Math.PI * 2) + 1) / 2;
+      const pulse = this.reducedMotion ? 0.5 : (Math.sin(nowMs / 260) + 1) / 2;
       this.rings.add(g.x + 0.5, g.y + 0.5, g.inRange ? 0.75 : 0.55 + 0.15 * pulse, g.inRange ? '#16A34A' : '#2563EB');
     }
     this.rings.end();
@@ -1280,16 +1285,27 @@ export class CabRenderer {
     if (flash) {
       const age = Math.max(0, performance.now() - flash.at);
       const col = flash.grade === 'perfect' ? '#16A34A' : flash.grade === 'clean' ? '#0284C7' : '#EA580C';
-      this.pill.pill(flash.label, VW / 2, VH * 0.3 - Math.min(28, (age / 1350) * 26), col);
+      ctx.save();
+      ctx.globalAlpha = rackLiftFlashAlpha(age);
+      this.pill.pill(flash.label, VW / 2, VH * 0.3 - (this.reducedMotion ? 0 : Math.min(28, (age / 1350) * 26)), col);
+      ctx.restore();
     }
 
     // Callouts float up from the lower centre (where your forks are).
+    // Stack from the newest (slot 0) with eased slots, so neither a new callout nor the oldest
+    // expiring jumps the rest of the stack by a whole row.
     this.callouts = this.callouts.filter((c) => nowMs - c.born < CALLOUT_MS);
+    const cdt = this.lastCalloutMs > 0 ? Math.max(0, Math.min(100, nowMs - this.lastCalloutMs)) : 0;
+    this.lastCalloutMs = nowMs;
+    const cease = this.reducedMotion ? 1 : 1 - Math.exp(-cdt / 90);
+    const cn = this.callouts.length;
     this.callouts.forEach((c, i) => {
       const k = (nowMs - c.born) / CALLOUT_MS;
+      const target = cn - 1 - i;
+      c.slot = c.slot === undefined ? target : c.slot + (target - c.slot) * cease;
       ctx.save();
       ctx.globalAlpha = Math.max(0, 1 - k * k);
-      this.pill.pill(c.text, VW / 2, VH * 0.58 - k * 40 - i * 26, calloutColor(c.tone));
+      this.pill.pill(c.text, VW / 2, VH * 0.58 - (this.reducedMotion ? 0 : k * 40) - c.slot * 26, calloutColor(c.tone));
       ctx.restore();
     });
 

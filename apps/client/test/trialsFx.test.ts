@@ -110,3 +110,19 @@ describe('stack lean rendering helpers', () => {
     expect(bent.map((q) => q.hex)).not.toEqual(straight.map((q) => q.hex));
   });
 });
+
+describe('trials tumble landing', () => {
+  it('lands square to the grid and holds that heading through the bounce', async () => {
+    const { tumblePose, TUMBLE_MS, BOUNCE_MS } = await import('../src/trials/fx.js');
+    for (const angle of [0, 0.3, 1.1, -2.4]) {
+      for (const side of [1, -1]) {
+        const t = { orderId: 1, from: { x: 0, y: 0, z: 20 }, to: { x: 1, y: 0 }, angle, side, startMs: 0 };
+        const land = tumblePose(t, TUMBLE_MS).angle;
+        const q = land / (Math.PI / 2);
+        expect(Math.abs(q - Math.round(q))).toBeLessThan(1e-9);
+        expect(tumblePose(t, TUMBLE_MS - 1).angle).toBeCloseTo(land, 1);
+        expect(tumblePose(t, TUMBLE_MS + BOUNCE_MS).angle).toBe(land);
+      }
+    }
+  });
+});

@@ -29,6 +29,15 @@ import {
 
 /** Releases shorter than this are a quick tap: a plain, ungraded pickup/stow. */
 export const QUICK_TAP_THRESHOLD_MS = 140;
+/** How long the rack-lift result badge shows (ms). */
+export const RACK_LIFT_FLASH_MS = 850;
+/** Fade (ms) at the end of the result badge's life. */
+const RACK_LIFT_FLASH_FADE_MS = 200;
+
+/** Opacity of the rack-lift result badge `ageMs` after it appeared: fades out over its last 200 ms. */
+export function rackLiftFlashAlpha(ageMs: number): number {
+  return Math.max(0, Math.min(1, (RACK_LIFT_FLASH_MS - ageMs) / RACK_LIFT_FLASH_FADE_MS));
+}
 
 export interface RackLiftGaugeLayout {
   isCompact: boolean;
@@ -181,7 +190,7 @@ export class RackLiftController {
       this.flash = null;
       return null;
     }
-    return { ...this.flash, at: this.flash.untilMs - 850 };
+    return { ...this.flash, at: this.flash.untilMs - RACK_LIFT_FLASH_MS };
   }
 
   onKeyDown(
@@ -321,7 +330,7 @@ export class RackLiftController {
         slot: this.slot,
         forkHeight: fork,
         targetLevel: this.targetLevel,
-        untilMs: nowMs + 850,
+        untilMs: nowMs + RACK_LIFT_FLASH_MS,
       };
     } else if (evalRes.grade === 'clean') {
       this.flash = {
@@ -331,7 +340,7 @@ export class RackLiftController {
         slot: this.slot,
         forkHeight: fork,
         targetLevel: this.targetLevel,
-        untilMs: nowMs + 850,
+        untilMs: nowMs + RACK_LIFT_FLASH_MS,
       };
     } else {
       this.flash = {
@@ -341,7 +350,7 @@ export class RackLiftController {
         slot: this.slot,
         forkHeight: fork,
         targetLevel: this.targetLevel,
-        untilMs: nowMs + 850,
+        untilMs: nowMs + RACK_LIFT_FLASH_MS,
       };
     }
     if (this.practice) {

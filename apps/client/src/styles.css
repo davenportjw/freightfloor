@@ -1727,6 +1727,7 @@ canvas.cab-overlay { pointer-events: none; }
 @media (prefers-reduced-motion: reduce) {
   .drawer, .charge-badge { animation: none; transition: none; }
   .btn { transition: none; }
+  #dash .meter .track > i, .touch-dir, .touch-stick-knob { transition: none; }
 }
 
 /* =====================================================================
@@ -1959,7 +1960,7 @@ canvas#world.cone-mode { cursor: crosshair; }
 }
 #dash .meter { display: flex; align-items: center; gap: 8px; font: inherit; font-size: 13px; font-weight: 700; color: var(--ink-2); border: 0; background: none; padding: 0; }
 #dash .meter .track { width: 90px; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
-#dash .meter .track > i { display: block; height: 100%; background: var(--teal); border-radius: 4px; }
+#dash .meter .track > i { display: block; height: 100%; background: var(--teal); border-radius: 4px; transition: width 0.18s ease-out, background-color 0.2s; }
 #dash .meter.low .track > i { background: var(--red); }
 #dash .meter.low { color: var(--red); }
 #dash .meter.boost {

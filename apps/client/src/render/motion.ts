@@ -34,6 +34,15 @@ export function interpAlpha(nowMs: number, changedAtMs: number, intervalMs: numb
   return Math.max(0, Math.min(1, (nowMs - changedAtMs) / intervalMs));
 }
 
+/** Seconds-of-game-time (game-min) over which an expiring floor marker fades out. */
+export const MARKER_FADE_MIN = 0.5;
+
+/** 0..1 opacity of a floor marker expiring at `until`, at smoothed world time `t`. */
+export function markerFade(until: number, t: number): number {
+  if (!Number.isFinite(until) || !Number.isFinite(t)) return 0;
+  return Math.max(0, Math.min(1, (until - t) / MARKER_FADE_MIN));
+}
+
 /** Id of the pose nearest to (gx, gy) strictly within `maxDist` tiles, or null. */
 export function pickNearest(
   poses: Iterable<[string, { x: number; y: number }]>,
@@ -194,5 +203,139 @@ export class PoseTracker {
     this.targetOffset = Number.NaN;
     this.offset = Number.NaN;
     this.lastNowMs = Number.NaN;
+  }
+}
+
+/** Time constant (ms) for hiding the jump when the local vehicle's pose source switches. */
+const HANDOVER_TAU_MS = 140;
+/** Larger source-switch gaps than this (tiles) are real teleports: snap instead of blending. */
+const HANDOVER_MAX_TILES = 1.5;
+/** Fork smoothing time constant (ms). The sim moves the fork ~70% of the way per 100 ms tick. */
+const FORK_TAU_MS = 80;
+
+interface PoseVehicle {
+  id: string;
+  px: number;
+  py: number;
+  angle: number;
+  state?: string;
+  fork?: number;
+}
+
+/**
+ * Per-frame render poses shared by the iso and cab renderers:
+ * - remote vehicles come from the jitter-buffered `PoseTracker`;
+ * - the locally driven vehicle uses its predicted pose, falling back to the tracker during
+ *   server-driven phases (Co-Pilot, auto-dock). The tracker runs `INTERP_DELAY_MS` in the past, so
+ *   every switch between the two used to jump the truck (forward when taking control back, backward
+ *   when handing it over); the gap is now captured and decayed away over ~`HANDOVER_TAU_MS`;
+ * - fork heights (which the server steps at 10 Hz) are eased per vehicle so masts glide.
+ */
+export class VehiclePoseResolver {
+  readonly tracker: PoseTracker;
+  private myId: string | null = null;
+  private mySource: 'local' | 'tracked' | null = null;
+  private myLast: Pose | null = null;
+  private off: Pose = { x: 0, y: 0, a: 0 };
+  private lastMs = Number.NaN;
+  private forks = new Map<string, number>();
+
+  constructor(delayMs = INTERP_DELAY_MS) {
+    this.tracker = new PoseTracker(delayMs);
+  }
+
+  /**
+   * Resolve every vehicle's render pose at `nowMs`. `snapForkId` (e.g. the local vehicle while the
+   * rack-lift minigame drives its fork directly) skips fork easing for that vehicle.
+   */
+  resolve(
+    worldT: number,
+    vehicles: ReadonlyArray<PoseVehicle>,
+    nowMs: number,
+    myVid: string | null | undefined,
+    myPose: Pose | null | undefined,
+    snapForkId: string | null = null,
+  ): Map<string, Pose> {
+    const dtMs = Number.isNaN(this.lastMs) ? 0 : Math.max(0, Math.min(250, nowMs - this.lastMs));
+    this.lastMs = nowMs;
+    this.tracker.update(worldT, nowMs, vehicles as ReadonlyArray<{ id: string; px: number; py: number; angle: number }>);
+    const poses = new Map<string, Pose>();
+    const kf = dtMs > 0 ? 1 - Math.exp(-dtMs / FORK_TAU_MS) : 0;
+    const seen = new Set<string>();
+    for (const v of vehicles) {
+      seen.add(v.id);
+      const raw: Pose = { x: v.px, y: v.py, a: v.angle };
+      let p: Pose;
+      if (myVid && v.id === myVid) p = this.resolveMine(v, myPose, nowMs, dtMs) ?? raw;
+      else p = this.tracker.pose(v.id, nowMs) ?? raw;
+      poses.set(v.id, p);
+      const target = Number.isFinite(v.fork) ? (v.fork as number) : 0;
+      const prev = this.forks.get(v.id);
+      if (prev === undefined || v.id === snapForkId || Math.abs(target - prev) < 1e-3) this.forks.set(v.id, target);
+      else this.forks.set(v.id, prev + (target - prev) * kf);
+    }
+    for (const id of this.forks.keys()) if (!seen.has(id)) this.forks.delete(id);
+    if (!myVid || !seen.has(myVid)) this.resetMine();
+    return poses;
+  }
+
+  /** Eased fork height (0..1) for `id`, or `raw` if unknown. */
+  fork(id: string, raw: number | undefined): number {
+    return this.forks.get(id) ?? (Number.isFinite(raw) ? (raw as number) : 0);
+  }
+
+  /** `v`, or a shallow copy carrying the eased fork when it differs from the server value. */
+  withFork<V extends { id: string; fork: number }>(v: V): V {
+    const f = this.forks.get(v.id);
+    return f === undefined || f === v.fork ? v : { ...v, fork: f };
+  }
+
+  clear(): void {
+    this.tracker.clear();
+    this.forks.clear();
+    this.resetMine();
+    this.lastMs = Number.NaN;
+  }
+
+  private resetMine(): void {
+    this.myId = null;
+    this.mySource = null;
+    this.myLast = null;
+    this.off = { x: 0, y: 0, a: 0 };
+  }
+
+  private resolveMine(v: PoseVehicle, myPose: Pose | null | undefined, nowMs: number, dtMs: number): Pose | null {
+    let source: 'local' | 'tracked';
+    let base: Pose | null;
+    if (myPose) {
+      source = 'local';
+      base = myPose;
+    } else if (v.state === 'driven') {
+      source = 'local';
+      base = { x: v.px, y: v.py, a: v.angle };
+    } else {
+      source = 'tracked';
+      base = this.tracker.pose(v.id, nowMs);
+    }
+    if (!base) return null;
+    if (this.myId !== v.id) {
+      this.resetMine();
+      this.myId = v.id;
+    } else if (this.mySource !== source && this.myLast) {
+      const ox = this.myLast.x - base.x;
+      const oy = this.myLast.y - base.y;
+      this.off =
+        Math.hypot(ox, oy) > HANDOVER_MAX_TILES
+          ? { x: 0, y: 0, a: 0 }
+          : { x: ox, y: oy, a: wrapAngle(this.myLast.a - base.a) };
+    } else if (dtMs > 0) {
+      const k = Math.exp(-dtMs / HANDOVER_TAU_MS);
+      this.off = { x: this.off.x * k, y: this.off.y * k, a: this.off.a * k };
+      if (Math.abs(this.off.x) + Math.abs(this.off.y) + Math.abs(this.off.a) < 1e-4) this.off = { x: 0, y: 0, a: 0 };
+    }
+    this.mySource = source;
+    const p: Pose = { x: base.x + this.off.x, y: base.y + this.off.y, a: base.a + this.off.a };
+    this.myLast = p;
+    return p;
   }
 }

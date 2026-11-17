@@ -100,13 +100,17 @@ export const BOUNCE_MS = 200;
 /** Pose of a tumbling pallet `ms` after it left the stack (centre in tiles, base z in iso-px). */
 export function tumblePose(t: Tumble, ms: number): { x: number; y: number; z: number; angle: number; tilt: number; done: boolean } {
   const u = Math.max(0, ms) / TUMBLE_MS;
+  // Land square to the grid (nearest quarter turn past ~3/4 of a spin) so the hand-off to the
+  // axis-aligned floor pallet doesn't rotate it in one frame.
+  const quarter = Math.PI / 2;
+  const endAngle = Math.round((t.angle + t.side * Math.PI * 0.75) / quarter) * quarter;
   if (u < 1) {
     const e = u * u * (3 - 2 * u); // ease the ground track; the height carries the gravity feel
     return {
       x: t.from.x + (t.to.x - t.from.x) * e,
       y: t.from.y + (t.to.y - t.from.y) * e,
       z: Math.max(0, t.from.z * (1 - u * u) + 9 * u * (1 - u)),
-      angle: t.angle + t.side * u * Math.PI * 0.75,
+      angle: t.angle + (endAngle - t.angle) * u,
       tilt: t.side * Math.sin(u * Math.PI),
       done: false,
     };
@@ -116,7 +120,7 @@ export function tumblePose(t: Tumble, ms: number): { x: number; y: number; z: nu
     x: t.to.x,
     y: t.to.y,
     z: b < 1 ? 3.5 * Math.sin(b * Math.PI) : 0,
-    angle: t.angle + t.side * Math.PI * 0.75,
+    angle: endAngle,
     tilt: 0,
     done: b >= 1,
   };

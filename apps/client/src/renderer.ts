@@ -24,6 +24,7 @@ import {
 } from '@warehouse/sim';
 import {
   computeRackLiftGaugeLayout,
+  rackLiftFlashAlpha,
   type RackLiftController,
   type RackLiftFlash,
   type RackLiftGaugeLayout,
@@ -45,7 +46,7 @@ import {
   type DriveCameraMode,
 } from './render/iso.js';
 export { headingUpRotation, type DriveCameraMode };
-import { pickNearest, PoseTracker, wrapAngle, type Pose } from './render/motion.js';
+import { markerFade, pickNearest, VehiclePoseResolver, wrapAngle, type Pose } from './render/motion.js';
 import { WheelOdometer, type WheelMotion } from './render/wheels.js';
 import { PointerSet, pinchStep, type Pt } from './render/gestures.js';
 import { watchDevicePixelRatio, watchElementSize } from './render/dpr.js';
@@ -65,6 +66,7 @@ import {
 import {
   BG,
   drawCargoItem,
+  conveyorTotes,
   drawConveyorItem,
   drawRack,
   drawStruct,
@@ -218,7 +220,7 @@ export class WarehouseRenderer {
     return { ...this.cam };
   }
   private readonly painter: Painter;
-  private readonly tracker = new PoseTracker();
+  private readonly tracker = new VehiclePoseResolver();
   /** Smoothed world time for the east-dock truck cycle (avoids 10 Hz stepping). */
   private readonly dockClock = new SimClock();
   private poses = new Map<string, Pose>();
@@ -256,7 +258,8 @@ export class WarehouseRenderer {
   private lastRenderMs = 0;
   private readonly cleanup: Array<() => void> = [];
   /** Floating driver callouts (fare ratings, combo resets, ...) with their spawn time. */
-  private callouts: Array<Callout & { born: number }> = [];
+  private callouts: Array<Callout & { born: number; slot?: number }> = [];
+  private lastCalloutMs = 0;
   /** Rival speech bubbles (real Gemini reason / event text) keyed to a vehicle id. */
   private bubbles: Array<RivalBubble & { born: number }> = [];
 
@@ -295,7 +298,14 @@ export class WarehouseRenderer {
 
   /** Float a callout above the driven forklift for CALLOUT_MS (newest stacks on top). */
   pushCallout(c: Callout, nowMs: number): void {
-    this.callouts = this.callouts.filter((x) => nowMs - x.born < CALLOUT_MS).slice(-3);
+    this.callouts = this.callouts.filter((x) => nowMs - x.born < CALLOUT_MS);
+    // Over the 3-callout cap: fast-forward the oldest into their fade instead of deleting them
+    // at full opacity mid-rise.
+    const excess = this.callouts.length - 2;
+    for (let i = 0; i < excess; i++) {
+      const old = this.callouts[i]!;
+      old.born = Math.min(old.born, nowMs - CALLOUT_MS * 0.7);
+    }
     this.callouts.push({ ...c, born: nowMs });
   }
 
@@ -558,20 +568,17 @@ export class WarehouseRenderer {
     this.coneMode = opts.coneMode;
     this.updateCursor();
 
-    // Remote vehicles slide between the last two world.t values; the driven (locally
-    // predicted) vehicle uses its smoothed predicted pose when active, or interpolates
-    // via PoseTracker during server-driven phases (e.g. auto-docking on E).
-    this.tracker.update(world.t, nowMs, world.vehicles);
-    const poses = new Map<string, Pose>();
-    for (const v of world.vehicles) {
-      let p: Pose | null = null;
-      if (v.id === opts.myVid) {
-        p = opts.myPose ?? (v.state === 'driven' ? { x: v.px, y: v.py, a: v.angle } : this.tracker.pose(v.id, nowMs));
-      } else {
-        p = this.tracker.pose(v.id, nowMs);
-      }
-      poses.set(v.id, p ?? { x: v.px, y: v.py, a: v.angle });
-    }
+    // Remote vehicles play back on the jitter-buffered server timeline; the driven (locally
+    // predicted) vehicle uses its smoothed predicted pose when active, or interpolates during
+    // server-driven phases (e.g. auto-docking on E), with source switches blended, not jumped.
+    const poses = this.tracker.resolve(
+      world.t,
+      world.vehicles,
+      nowMs,
+      opts.myVid,
+      opts.myPose,
+      opts.rackLift?.active ? (opts.myVid ?? null) : null,
+    );
     this.poses = poses;
     const wheelMotion = new Map<string, WheelMotion>();
     for (const [id, p] of poses) wheelMotion.set(id, this.wheels.update(id, p, nowMs));
@@ -950,16 +957,20 @@ export class WarehouseRenderer {
     }
     // pulsing incident / near-miss markers
     const mp = this.pulse(150 * Math.PI * 2);
+    const smoothT = this.dockClock.update(world.t, this.nowMs);
     for (const m of world.markers) {
-      if (m.until <= world.t || !this.visible(m.x + 0.5, m.y + 0.5, TW)) continue;
+      const fade = markerFade(m.until, smoothT);
+      if (fade <= 0 || !this.visible(m.x + 0.5, m.y + 0.5, TW)) continue;
       if (opts.markerFilter && !opts.markerFilter(m)) continue;
       const inc = m.kind === 'incident';
+      ctx.globalAlpha = fade; // fade out over the last half game-minute instead of vanishing
       pt.poly(
         pt.circleGrid(m.x + 0.5, m.y + 0.5, 0.5 + 0.35 * mp * (inc ? 1 : 0.6)),
         inc ? 'rgba(220,38,38,0.28)' : 'rgba(245,158,11,0.3)',
         inc ? '#DC2626' : '#D97706',
         2,
       );
+      ctx.globalAlpha = 1;
     }
   }
 
@@ -993,20 +1004,19 @@ export class WarehouseRenderer {
         },
       });
     }
-    // totes riding the conveyor line (positions are a pure function of interpolated sim time)
+    // totes riding the conveyor line (positions are a pure function of smoothed sim time)
     const dockT = this.dockClock.update(world.t, this.nowMs);
-    const NCV = map.conveyors.length;
-    if (NCV) {
-      for (let i = 0; i < 16; i++) {
-        const p = (dockT * 0.6 + (i * NCV) / 16) % NCV;
-        const c = map.conveyors[Math.floor(p)];
-        if (!c || !this.visible(c.x + 0.5, c.y + 0.5)) continue;
-        const fy = p - Math.floor(p);
-        items.push({
-          d: depth(c.x, c.y + fy, 1),
-          fn: () => drawConveyorItem(pt, c.x, c.y + fy * 0.6, 8.5, i, world.siteId),
-        });
-      }
+    for (const tote of conveyorTotes(map.conveyors, dockT)) {
+      if (!this.visible(tote.x + 0.5, tote.y)) continue;
+      items.push({
+        // after every belt tile the tote overlaps, so the next tile's bed never paints over it
+        d: Math.max(depth(tote.x, tote.tileY0, 1), depth(tote.x, tote.tileY1, 1)) + 0.01,
+        fn: () => {
+          if (tote.alpha < 1) ctx.globalAlpha = tote.alpha;
+          drawConveyorItem(pt, tote.x, tote.y, 8.5, tote.index, world.siteId);
+          ctx.globalAlpha = 1;
+        },
+      });
     }
     // west receiving docks: parked rigs whose rear roll-up door opens while inbound pallets
     // (scheduled trailer arrivals and network transfers) wait at that dock for putaway
@@ -1124,7 +1134,7 @@ export class WarehouseRenderer {
       items.push({
         d: rot ? isoDepth(p.x, p.y, rot) - 0.5 : p.x + p.y + 0.5,
         fn: () =>
-          drawVehicle(pt, v, p, {
+          drawVehicle(pt, this.tracker.withFork(v), p, {
             worldT: world.t,
             dim: !!hl && hl !== strat,
             emphasised: v.human || opts.selectedVid === v.id || (!!hl && hl === strat),
@@ -1263,9 +1273,13 @@ export class WarehouseRenderer {
       }
     }
     for (const m of opts.minimalChrome ? [] : world.markers) {
-      if (m.kind !== 'incident' || m.until <= world.t) continue;
+      const fade = markerFade(m.until, this.dockClock.value(this.nowMs));
+      if (m.kind !== 'incident' || fade <= 0) continue;
       const [sx, sy] = pt.P(m.x + 0.5, m.y + 0.5, 46);
+      ctx.save();
+      ctx.globalAlpha = fade;
       pt.pill('Incident', sx, sy, '#DC2626');
+      ctx.restore();
     }
     if (labels && z > 1.1 && !opts.minimalChrome) {
       for (const v of world.vehicles) {
@@ -1413,13 +1427,9 @@ export class WarehouseRenderer {
     const VW = this.VW;
     const VH = this.VH;
     if (label) {
-      const off = bx < 40 || bx > VW - 40 || ty < 70 || by > VH - 40;
-      pt.pill(
-        label,
-        off ? Math.max(70, Math.min(VW - 70, bx)) : bx,
-        off ? Math.max(100, Math.min(VH - 120, ty)) : ty - 12,
-        col,
-      );
+      // One continuous clamp: the old on/off-screen branch jumped the pill ~30-40 px (and
+      // flickered) whenever the target crossed the edge margin.
+      pt.pill(label, Math.max(70, Math.min(VW - 70, bx)), Math.max(100, Math.min(VH - 120, ty - 12)), col);
     }
     if (opts.rackLiftEnabled && (opts.rackLift?.isActive() || (g.inRange && liftLevel !== null))) {
       const gaugeLevel = opts.rackLift?.isActive() ? opts.rackLift.targetLevel : (liftLevel ?? 0);
@@ -1624,10 +1634,14 @@ export class WarehouseRenderer {
     if (!flash) return;
     const pt = this.painter;
     const age = Math.max(0, now - flash.at);
-    const rise = Math.min(28, (age / 1350) * 26);
+    const rise = this.reducedMotion ? 0 : Math.min(28, (age / 1350) * 26);
     const [fx, fy] = pt.P(p.x, p.y, 44);
     const col = flash.grade === 'perfect' ? '#16A34A' : flash.grade === 'clean' ? '#0284C7' : '#EA580C';
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.globalAlpha = rackLiftFlashAlpha(age); // fade out instead of vanishing at full opacity
     pt.pill(flash.label, fx, fy - rise, col);
+    ctx.restore();
   }
 
   /** Arrow hovering above the forklift, pointing (in screen space) at the guide target. */
@@ -1677,11 +1691,18 @@ export class WarehouseRenderer {
     ctx.font = '900 18px Inter, system-ui, sans-serif';
     ctx.lineJoin = 'round';
     const n = this.callouts.length;
+    const dt = this.lastCalloutMs > 0 ? Math.max(0, Math.min(100, now - this.lastCalloutMs)) : 0;
+    this.lastCalloutMs = now;
+    const ease = this.reducedMotion ? 1 : 1 - Math.exp(-dt / 90);
     this.callouts.forEach((c, i) => {
       const k = (now - c.born) / CALLOUT_MS;
       const rise = this.reducedMotion ? 0 : 28 * k;
       ctx.globalAlpha = k < 0.7 ? 1 : Math.max(0, 1 - (k - 0.7) / 0.3);
-      const y = sy - rise - (n - 1 - i) * 22;
+      // Stack slot eases toward its target so a new callout nudges the others up instead of
+      // shoving them 22 px in one frame.
+      const target = n - 1 - i;
+      c.slot = c.slot === undefined ? target : c.slot + (target - c.slot) * ease;
+      const y = sy - rise - c.slot * 22;
       ctx.lineWidth = 4;
       ctx.strokeStyle = 'rgba(255,251,240,0.95)';
       ctx.strokeText(c.text, sx, y);

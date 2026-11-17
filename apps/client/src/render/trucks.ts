@@ -15,7 +15,6 @@ import { isoDepth } from './iso.js';
 import { ISO_PX_PER_M, TILE_M } from './liftGeometry.js';
 import { WHEEL_ISO_STRETCH } from './vehicles.js';
 import type { Painter, Pt } from './painter.js';
-import { interpAlpha } from './motion.js';
 
 /** Game-minutes between a trailer leaving and the next one being docked (sim contract). */
 export const DOCK_SWAP_MIN = 3;
@@ -66,35 +65,64 @@ export function dockTruckFrame(t: number, departUntil: number, swapMin = DOCK_SW
   return { phase: 'arriving', visible: true, dx, alpha: fade(dx), gear: k > 0.97 ? 0 : -1, braking: k > 0.8 };
 }
 
+/** Real ms per game-minute at the sim's fixed 1x rate (TICK_MIN 0.1 per 100 ms tick). */
+const SIM_MS_PER_MIN = 1000;
+/** How far (game-min) the clock may run past the newest sample before holding (server stall). */
+const SIM_CLOCK_LEAD_MAX = 0.3;
+
 /**
- * Smooths 10 Hz world time into a per-frame clock using the same "one snapshot behind"
- * interpolation the vehicles use, so docking rigs glide instead of stepping.
+ * Turns 10 Hz world time into a continuous per-frame clock for the conveyor totes and dock rigs.
+ *
+ * World time always advances at 1 game-min per real second, so instead of interpolating between
+ * the last two packets (which sped up and stalled in step with the 50–200 ms delta jitter, making
+ * the totes judder) this runs at a steady real-time rate. The server→local offset tracks the lower
+ * envelope of packet arrivals and is slewed (max ±8% time warp) like `PoseTracker`, the output never
+ * runs backwards, and it holds `SIM_CLOCK_LEAD_MAX` past the newest sample if the server stalls.
  */
 export class SimClock {
-  private prevT = Number.NaN;
   private currT = Number.NaN;
-  private changedAt = 0;
-  private interval = 120;
+  /** Lower envelope of (arrival ms - server ms). */
+  private targetOffset = Number.NaN;
+  /** Offset used for output; slews toward `targetOffset`. */
+  private offset = Number.NaN;
+  private lastNowMs = Number.NaN;
+  private lastOut = Number.NaN;
 
   update(worldT: number, nowMs: number): number {
+    if (!Number.isFinite(worldT)) return this.value(nowMs);
+    const sample = nowMs - worldT * SIM_MS_PER_MIN;
     if (worldT !== this.currT) {
-      if (Number.isNaN(this.currT) || worldT < this.currT || worldT - this.currT > 1) {
-        this.prevT = worldT; // first sample, rewind or big jump: snap
-      } else {
-        this.prevT = this.value(nowMs);
-        const dt = nowMs - this.changedAt;
-        if (dt > 0) this.interval = this.interval * 0.7 + Math.max(120, Math.min(1000, dt * 1.2)) * 0.3;
-      }
+      const snap = Number.isNaN(this.currT) || worldT < this.currT || worldT - this.currT > 1;
       this.currT = worldT;
-      this.changedAt = nowMs;
+      if (snap) {
+        // first sample, rewind or big jump: snap
+        this.targetOffset = sample;
+        this.offset = sample;
+        this.lastOut = worldT;
+      } else if (Math.abs(sample - this.targetOffset) > 1000) {
+        // resumed after a stall: re-anchor (the monotonic clamp holds until time catches up)
+        this.targetOffset = sample;
+        this.offset = sample;
+      } else if (sample < this.targetOffset) {
+        this.targetOffset = sample; // an earlier arrival than any so far
+      } else {
+        this.targetOffset += (sample - this.targetOffset) * 0.01; // slow upward drift tracking
+      }
     }
+    if (!Number.isNaN(this.offset) && !Number.isNaN(this.lastNowMs) && nowMs > this.lastNowMs) {
+      const maxStep = (nowMs - this.lastNowMs) * 0.08;
+      this.offset += Math.max(-maxStep, Math.min(maxStep, this.targetOffset - this.offset));
+    }
+    this.lastNowMs = nowMs;
     return this.value(nowMs);
   }
 
   value(nowMs: number): number {
     if (Number.isNaN(this.currT)) return 0;
-    const a = interpAlpha(nowMs, this.changedAt, this.interval);
-    return this.prevT + (this.currT - this.prevT) * a;
+    let t = Math.min((nowMs - this.offset) / SIM_MS_PER_MIN, this.currT + SIM_CLOCK_LEAD_MAX);
+    if (t < this.lastOut) t = this.lastOut; // never run backwards
+    this.lastOut = t;
+    return t;
   }
 }
 

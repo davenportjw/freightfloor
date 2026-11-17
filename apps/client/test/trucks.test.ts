@@ -192,14 +192,41 @@ describe('render/trucks west receiving docks (mirrored rig)', () => {
 });
 
 describe('render/trucks SimClock', () => {
-  it('interpolates between 10 Hz world-time samples', () => {
+  it('advances smoothly at 1 game-min per real second between 10 Hz samples', () => {
     const c = new SimClock();
     expect(c.update(5, 1000)).toBe(5);
     c.update(5.1, 1100);
-    const mid = c.update(5.1, 1150);
-    expect(mid).toBeGreaterThan(5);
-    expect(mid).toBeLessThan(5.1);
-    expect(c.update(5.1, 1300)).toBeCloseTo(5.1, 9);
+    expect(c.update(5.1, 1150)).toBeCloseTo(5.15, 9);
+  });
+
+  it('keeps a constant rate under packet jitter (no speed-up / stall)', () => {
+    const c = new SimClock();
+    // Deltas generated every 100 ms but delivered 0-150 ms late.
+    const late = [0, 120, 30, 150, 10, 90, 0, 140, 60, 20];
+    const arrivals = late.map((l, i) => ({ t: 10 + i * 0.1, at: 1000 + i * 100 + l }));
+    let k = 0;
+    let latestT = arrivals[0]!.t;
+    let prev = Number.NaN;
+    const steps: number[] = [];
+    for (let now = 1000; now <= 1900; now += 16) {
+      while (k < arrivals.length && arrivals[k]!.at <= now) latestT = arrivals[k++]!.t;
+      const v = c.update(latestT, now);
+      if (!Number.isNaN(prev)) steps.push(v - prev);
+      prev = v;
+    }
+    for (const d of steps) {
+      expect(d).toBeGreaterThanOrEqual(0); // monotonic
+      expect(d).toBeLessThanOrEqual(0.016 * 1.0001); // never faster than real time
+    }
+    expect(Math.min(...steps.slice(1))).toBeGreaterThan(0.012); // and never stalls
+  });
+
+  it('holds shortly past the newest sample when the server stalls', () => {
+    const c = new SimClock();
+    c.update(5, 0);
+    expect(c.update(5, 2000)).toBeCloseTo(5.3, 9);
+    // resumes after the stall without running backwards
+    expect(c.update(5.1, 2100)).toBeGreaterThanOrEqual(5.3);
   });
 
   it('snaps on rewinds and large jumps', () => {

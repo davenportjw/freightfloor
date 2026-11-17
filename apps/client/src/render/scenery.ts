@@ -575,6 +575,70 @@ export function drawCargoItem(
   }
 }
 
+/** Belt speed (tiles per game-minute, i.e. per real second at 1x). */
+export const CONVEYOR_SPEED = 0.6;
+/** Target spacing between totes on a belt run (tiles, centre to centre). */
+const CONVEYOR_SPACING = 1.25;
+/** Distance (tiles) over which a tote fades in at the run head and out at the run tail. */
+const CONVEYOR_FADE = 0.3;
+/** Half the tote's along-belt depth (tiles); see `drawConveyorItem`. */
+export const CONVEYOR_TOTE_HALF = 0.18;
+
+export interface ConveyorTote {
+  /** Belt tile column (grid x of the conveyor tile). */
+  x: number;
+  /** Tote centre along the belt (grid y, fractional). */
+  y: number;
+  /** 0..1 opacity: totes fade in at the head of a run and out at its tail instead of popping. */
+  alpha: number;
+  /** Stable per-tote index (keeps its livery as it loops). */
+  index: number;
+  /** First and last belt tile rows the tote's footprint overlaps (for depth sorting). */
+  tileY0: number;
+  tileY1: number;
+}
+
+/**
+ * Totes riding the conveyor at smoothed sim time `t`, as a pure function of time. Conveyor tiles
+ * are grouped into contiguous runs (same column, consecutive rows) and each tote travels the full
+ * length of its own run at a constant `CONVEYOR_SPEED`, fading out at the tail and back in at the
+ * head. (The old layout moved each tote 0.6 of a tile and then teleported it 0.4 tiles onward, and
+ * hopped totes between separate bands — the stutter visible on every belt.)
+ */
+export function conveyorTotes(conveyors: ReadonlyArray<{ x: number; y: number }>, t: number): ConveyorTote[] {
+  if (!conveyors.length || !Number.isFinite(t)) return [];
+  const sorted = conveyors.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+  const runs: Array<{ x: number; y0: number; len: number }> = [];
+  for (const c of sorted) {
+    const last = runs[runs.length - 1];
+    if (last && last.x === c.x && c.y === last.y0 + last.len) last.len++;
+    else if (last && last.x === c.x && c.y < last.y0 + last.len) continue; // duplicate tile
+    else runs.push({ x: c.x, y0: c.y, len: 1 });
+  }
+  const out: ConveyorTote[] = [];
+  let index = 0;
+  runs.forEach((run, ri) => {
+    const n = Math.max(1, Math.round(run.len / CONVEYOR_SPACING));
+    const gap = run.len / n;
+    for (let k = 0; k < n; k++, index++) {
+      const raw = t * CONVEYOR_SPEED + k * gap + ri * 0.37;
+      const s = ((raw % run.len) + run.len) % run.len;
+      const alpha = Math.min(1, s / CONVEYOR_FADE, (run.len - s) / CONVEYOR_FADE);
+      if (alpha <= 0.01) continue;
+      const y = run.y0 + s;
+      out.push({
+        x: run.x,
+        y,
+        alpha,
+        index,
+        tileY0: Math.max(run.y0, Math.floor(y - CONVEYOR_TOTE_HALF)),
+        tileY1: Math.min(run.y0 + run.len - 1, Math.floor(y + CONVEYOR_TOTE_HALF)),
+      });
+    }
+  });
+  return out;
+}
+
 /**
  * Draws a moving item on the outbound conveyor belt at `(x, y)` starting at `z0`.
  */
