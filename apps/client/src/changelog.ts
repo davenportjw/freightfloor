@@ -35,13 +35,25 @@ export interface ChangelogRelease {
 export const CHANGELOG: readonly ChangelogRelease[] = [
   {
     date: '2026-11-17',
-    title: 'Trial ghosts',
+    title: 'Floor Trials: Challenges & ghosts',
     items: [
+      {
+        kind: 'new',
+        title: 'Twelve Floor Trials challenges',
+        body: 'Levels 7–18 add one twist at a time: stow inbound pallets into rack slots, sort cross-dock freight, carry glass that shatters and heavy pallets that must ride low, weave through cone mazes, plan a charger stop on a thin battery, beat timed dock doors, dodge forklift traffic and drive with only your headlights. Night Shift throws it all at you at once.',
+        commits: ['f33be31', '0c25f04'],
+      },
       {
         kind: 'new',
         title: 'Ghost runs in Floor Trials',
         body: "Race other players' runs. Translucent ghost trucks drive each level with you: World #1 (the fastest run, with its route and lift stops painted on the floor), the run just faster than your best, and your own best. Clear a level faster than before and your run is shared under your callsign. Press G to switch ghosts or hide them.",
         commits: ['1830788', 'eecf89c', 'a8d1d9d'],
+      },
+      {
+        kind: 'improved',
+        title: 'Floor Trials level list',
+        body: 'The level rail is now split into Getting started and Challenges, and each challenge card shows tags for its twists.',
+        commits: ['0c25f04'],
       },
     ],
   },

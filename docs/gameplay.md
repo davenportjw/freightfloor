@@ -368,7 +368,7 @@ Typed orders go through Model Armor and the same limiter as the buttons. Natural
 
 ## 8. Floor Trials
 
-**Floor Trials** (`/trials.html`, also on the intro screen and in the ☰ menu) is a solo level mode. Each level is a short delivery puzzle on the Denver floor: lift the listed pallets, stack them, and drop them at their dock bays. The level list and the game share one screen. Pick a level on the left rail and play it in the stage. Everything runs in the browser. The rules live in the deterministic sim module `packages/sim/src/trials.ts`.
+**Floor Trials** (`/trials.html`, also on the intro screen and in the ☰ menu) is a solo level mode. Each level is a short delivery puzzle on the Denver floor: lift the listed pallets, stack them, and drop them at their dock bays. The level list and the game share one screen. Pick a level on the left rail and play it in the stage. The rail has two sections: **Getting started** (levels 1–6 teach the basics) and **Challenges** (levels 7–18 add one twist at a time, then combine them); challenge cards show tags for their mechanics. Everything runs in the browser. The rules live in the deterministic sim module `packages/sim/src/trials.ts`, with the challenge mechanics in `trialMechanics.ts` and levels 7–18 in `trialChallenges.ts`.
 
 ### Rules
 
@@ -381,8 +381,24 @@ Typed orders go through Model Armor and the same limiter as the buttons. Natural
 | Falling racks | Hitting a rack at more than 2 tiles/s damages it. Racks warn on the first hit and fall on the second (`rackHp` 2, or 1 on Wobbly Racks). A fallen rack drops debris onto a neighbouring floor tile, blocking it for 20 s, and costs 1 strike. |
 | Spills | Crossing a spill faster than 1.2 tiles/s kicks the stack once per puddle. Creep across or drive around. |
 | Strikes | **3 strikes fail the level** (`TRIAL_MAX_STRIKES`). |
-| Stars | Par time is the sum of planned trips at cruise speed (`trialPar`). ★★★ means within 1.25× par, ★★ within 1.7× par, ★ any finish. Each strike lowers the cap by one star (1 strike caps at ★★, 2 strikes at ★). The clock starts on your first input. |
-| Unlocks | A level unlocks once the previous level has at least 1 star. Best stars and time are saved per browser. |
+| Stars | Par time is the sum of planned trips at cruise speed (`TRIAL_PAR_SPEED = 3.15` tiles/s) plus 0.6 s per pick and per drop stop (`trialPar`). Trips follow the level's pallet order: outbound pallets share a trip per bay, inbound pallets per source dock, up to `stackMax`. Battery levels add the cheapest single charger detour with just enough charge; dock-window levels add the wait for each shut door; `parScale` then scales the total. ★★★ means within 1.25× par, ★★ within 1.7× par, ★ any finish. Each strike lowers the cap by one star (1 strike caps at ★★, 2 strikes at ★). The clock starts on your first input. |
+| Unlocks | A level unlocks once the previous level has at least 1 star (sequential across both sections). Best stars and time are saved per browser. |
+
+### Challenge mechanics
+
+Every mechanic is opt-in per level through an optional `TrialLevel` field, so levels 1–6 play exactly as before (a regression test replays them bit-for-bit).
+
+| Mechanic | Field | Rules |
+|---|---|---|
+| Putaway | pallet `{ from, to }` | Inbound pallets wait on the apron of a receiving dock (`W1`–`W4`, or a bay). Lift them, then stop on the glowing access tile of the marked rack slot and press `E` to **stow** (within 1.6 tiles). Bays never accept a putaway pallet. |
+| Cross-dock | pallet `{ from, bay }` | Inbound pallets go straight to outbound bays. A mixed stack is fine: each bay takes only its own pallets. |
+| Glass | pallet `fragile` | A stack carrying glass tips at `FRAGILE_SWAY_LIMIT = 0.55` instead of 1.0. If a glass pallet falls (topple or boost crash) it shatters and the level fails at once (not a strike). A plain pallet falling off a glass base is a normal strike. |
+| Weight | pallet `heavy` | A heavy bottom pallet steadies the stack (sway gain × `HEAVY_BASE_GAIN = 0.8`); each heavy pallet resting on a light one makes it top-heavy (× `HEAVY_TOP_GAIN = 1.6`). The guide lifts heavy pallets first. |
+| Cones | `cones` | Pre-placed cones block tiles and squeeze roads into one-tile gates. Clipping one is a wall hit. |
+| Battery | `battery: { start, perTile, chargers }` | Charge drains by distance driven (`perTile` % per tile). Parking (below 0.3 tiles/s) on one of the level's green chargers adds `CHARGE_RATE = 30` % per second. A warning shows at `BATTERY_LOW = 20` %; at 0 % the level fails. When the charge would not last to the next target and on to a charger, the guide points at the nearest charger and holds you there until full. |
+| Dock windows | `windows: { [bay]: { period, open, offset } }` | A bay accepts drops only while `(t + offset) mod period < open` on the level clock. A shut door refuses the drop with the time until it opens. Bays show **OPEN** / **SHUT** with a countdown. |
+| Traffic | `traffic: [{ path, speed, phase }]` | Orange AI forklifts drive fixed axis-aligned loops (two points = a shuttle) at constant speed. Their pose is a pure function of the level clock (`trafficPose`). Coming within `TRAFFIC_HIT = 0.8` tiles stops your truck, kicks the load and costs 1 strike; the same forklift can't strike again for `TRAFFIC_COOLDOWN = 3` s. |
+| Lights Out | `visibility` | Client only: everything beyond `visibility` tiles of the truck is darkened (a static, soft-edged fog that also respects reduced motion). Floor labels are hidden; the guide arrow stays visible. |
 
 ### Ghost runs
 
@@ -411,6 +427,7 @@ These effects are drawn by the client only and never change the rules. Under *pr
 - **Topple:** a dropped pallet arcs from its place in the stack to the floor tile where it landed, bounces once, and scatters cartons and dust. It only becomes liftable on the floor after the bounce.
 - **Impacts:** hard hits shake the screen in proportion to speed and pause the sim for 70 ms. Rack wobbles, rack falls and boost crashes shake harder, and a falling rack throws up dust.
 - **Quiet labels:** the stage hides multiplayer chrome (vehicle id and battery tags, incident pills, order numbers). The pick guide reads `E · Lift pallet` or `Pallet → <bay>`. The strike ring for a fallen pallet appears only after its tumble lands.
+- **Challenge overlays** (`src/trials/challenges.ts`): putaway target slots (teal, with the rack id while carried), `GLASS` / `HEAVY` tags over floor pallets, green rings on working chargers plus a **Battery** pill, bay doors tinted green/red with an **OPEN / SHUT** countdown, orange traffic forklifts with their hit ring and a dashed lane line, and the Lights Out fog. The stack pill lists carried glass / heavy pallets bottom to top, and the bottom line explains charging, shut doors, stowing and glass. Under reduced motion nothing pulses or blinks.
 
 ### Controls
 
@@ -426,6 +443,23 @@ Keyboard: `W A S D` / arrows to drive, `Shift` to boost, `E` to lift or drop, `R
 | 4 | Wet Floor | 3 | Six spills on the main road (par × 1.25) |
 | 5 | Wobbly Racks | 3 | Racks fall on the first hard hit |
 | 6 | Rush Hour | 3 | Six pallets across bays E7 and E8 |
+
+**Challenges**
+
+| # | Level | Stack | Pallets | Par | Twist |
+|---|---|---|---|---|---|
+| 7 | Putaway | 2 | 4 | 29.6 s | Inbound from dock W2 to four marked rack slots |
+| 8 | Fragile | 2 | 4 | 37.3 s | Two glass pallets to E5 / E6 |
+| 9 | Heavy Bottom | 3 | 6 | 40.7 s | Three heavy pallets; stack order matters |
+| 10 | Cone Maze | 3 | 3 | 27.2 s | 24 cones turn both main roads into slaloms |
+| 11 | Low Battery | 2 | 4 | 70.5 s | 55 % charge, 0.6 %/tile; one charger stop at the south bank (par × 0.92) |
+| 12 | Dock Windows | 3 | 5 | 50.9 s | E3 and E4 doors alternate (16 s cycle, 6 s open; par × 0.9) |
+| 13 | Traffic | 3 | 6 | 51.1 s | Three forklifts shuttle across the roads at x = 40 / 45 / 50 |
+| 14 | Lights Out | 2 | 4 | 26.0 s | 4.5-tile visibility, hidden cones and spills, drop at RET (par × 1.15) |
+| 15 | Wet & Wobbly | 3 | 6 | 58.5 s | Nine spills and 1-hit racks |
+| 16 | Cross-Dock | 3 | 6 | 77.0 s | Sort inbound W3 freight to E3 / E5 / E7 (par × 0.92) |
+| 17 | Rush Hour II | 3 | 9 | 90.7 s | Traffic + alternating E7 / E8 doors (par × 1.1) |
+| 18 | Night Shift | 3 | 6 | 63.1 s | Everything: dark, traffic, doors, battery, glass, heavy, putaway, spills, cones, 1-hit racks (par × 0.9) |
 
 ### Controls
 

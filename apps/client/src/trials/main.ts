@@ -12,10 +12,12 @@ import {
   IMPACT_REST,
   TRIAL_LEVELS,
   TRIAL_MAX_STRIKES,
+  TRIAL_SECTIONS,
   createTrial,
   stepTrial,
   trialGuide,
   trialInteract,
+  trialSection,
   type DriverInput,
   type Trial,
   type TrialEvent,
@@ -26,6 +28,7 @@ import type { Pose } from '../render/motion.js';
 import { forkHeightM, isoZ } from '../render/liftGeometry.js';
 import { CARGO_TIER_Z, cargoOffset } from '../render/vehicles.js';
 import { StackWhip, TrialFx } from './fx.js';
+import { batteryHud, challengeIntent, drawChallengeWorld, drawFog, mechanicTags, stackSummary } from './challenges.js';
 import { TrialGhosts } from './ghosts.js';
 
 const STEP_MS = 100; // 1 tick = 0.1 game-min = 100 ms real time (matches TICK_MIN)
@@ -69,6 +72,7 @@ const els = {
   timer: $('trTimer'),
   strikes: $('trStrikes'),
   stack: $('trStack'),
+  battery: $('trBattery'),
   meter: $('trMeter'),
   meterFill: $('trMeterFill'),
   intent: $('trIntent'),
@@ -106,6 +110,8 @@ const ghosts = new TrialGhosts({
   })(),
   reducedMotion,
 });
+/** Ghost opacity factor under Lights Out fog (still visible: they are the teaching aid). */
+const GHOST_FOG_DIM = 0.75;
 /** Ghost clock (level seconds): follows the drawn player pose, keeps running after the finish. */
 let ghostT = 0;
 
@@ -130,27 +136,35 @@ const starRow = (n: number): string => `<b>${'★'.repeat(n)}</b>${'★'.repeat(
 function renderLevels(): void {
   els.levels.innerHTML = '';
   let total = 0;
-  for (const level of TRIAL_LEVELS) {
-    const best = progress[level.id];
-    total += best?.stars ?? 0;
-    const li = document.createElement('li');
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'tr-level';
-    btn.disabled = !unlocked(level);
-    btn.setAttribute('aria-current', String(level.id === trial.level.id));
-    btn.innerHTML = `
-      <span class="tr-level__num">${level.num}</span>
-      <span>
-        <div class="tr-level__name">${level.name}</div>
-        <div class="tr-level__blurb">${btn.disabled ? 'Clear the previous level to unlock.' : level.blurb}</div>
-        <div class="tr-level__stars">${starRow(best?.stars ?? 0)}${
-          best ? `<span class="tr-level__best">${best.time.toFixed(1)}s</span>` : ''
-        }</div>
-      </span>`;
-    btn.addEventListener('click', () => startLevel(level.id));
-    li.appendChild(btn);
-    els.levels.appendChild(li);
+  for (const section of TRIAL_SECTIONS) {
+    const head = document.createElement('li');
+    head.className = 'tr-levels__section';
+    head.textContent = section.title;
+    els.levels.appendChild(head);
+    for (const level of TRIAL_LEVELS.filter((l) => trialSection(l) === section.id)) {
+      const best = progress[level.id];
+      total += best?.stars ?? 0;
+      const li = document.createElement('li');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'tr-level';
+      btn.disabled = !unlocked(level);
+      btn.setAttribute('aria-current', String(level.id === trial.level.id));
+      const tags = section.id === 'challenge' && !btn.disabled ? mechanicTags(level) : [];
+      btn.innerHTML = `
+        <span class="tr-level__num">${level.num}</span>
+        <span>
+          <div class="tr-level__name">${level.name}</div>
+          <div class="tr-level__blurb">${btn.disabled ? 'Clear the previous level to unlock.' : level.blurb}</div>
+          ${tags.length ? `<div class="tr-level__tags">${tags.map((t) => `<span>${t}</span>`).join('')}</div>` : ''}
+          <div class="tr-level__stars">${starRow(best?.stars ?? 0)}${
+            best ? `<span class="tr-level__best">${best.time.toFixed(1)}s</span>` : ''
+          }</div>
+        </span>`;
+      btn.addEventListener('click', () => startLevel(level.id));
+      li.appendChild(btn);
+      els.levels.appendChild(li);
+    }
   }
   els.total.textContent = `${total} / ${TRIAL_LEVELS.length * 3} ★`;
 }
@@ -203,6 +217,11 @@ function drainEvents(now: number): void {
       fx.dust(ev.x + 0.5, ev.y + 0.5, 1.8, now);
     }
     if (ev.kind === 'crash') fx.kick(11, now);
+    if (ev.kind === 'traffic') fx.kick(8, now);
+    if (ev.kind === 'shatter' && ev.x != null && ev.y != null) {
+      fx.kick(9, now);
+      fx.dust(ev.x + 0.5, ev.y + 0.5, 1.4, now);
+    }
   }
 }
 
@@ -247,6 +266,14 @@ function stepWithFx(now: number): void {
   });
 }
 
+/** Result-card copy for a failed run, from the sim's last events. */
+function failReason(tr: Trial): { title: string; advice: string } {
+  const kinds = new Set(tr.state.events.slice(-3).map((e) => e.kind));
+  if (kinds.has('shatter')) return { title: 'Glass broke', advice: 'Corner gently with glass aboard.' };
+  if (tr.state.battery === 0) return { title: 'Battery flat', advice: 'Stop at a green charger sooner.' };
+  return { title: 'Three strikes', advice: 'Ease off in the turns.' };
+}
+
 function finish(): void {
   const st = trial.state;
   const won = st.status === 'won';
@@ -259,10 +286,11 @@ function finish(): void {
     }
   }
   els.resStars.innerHTML = starRow(won ? st.stars : 0);
-  els.resTitle.textContent = won ? `${trial.level.name} clear` : 'Three strikes';
+  const why = failReason(trial);
+  els.resTitle.textContent = won ? `${trial.level.name} clear` : why.title;
   els.resLine.textContent = won
     ? `${st.t.toFixed(1)}s · par ${st.par.toFixed(1)}s · ${st.strikes} strike${st.strikes === 1 ? '' : 's'}`
-    : `${st.delivered}/${st.total} delivered. Ease off in the turns.`;
+    : `${st.delivered}/${st.total} delivered. ${why.advice}`;
   const next = TRIAL_LEVELS.find((l) => l.num === trial.level.num + 1);
   els.next.disabled = !next || !unlocked(next);
   els.result.hidden = false;
@@ -274,15 +302,23 @@ function updateHud(): void {
   const v = trial.vehicle;
   els.timer.textContent = `${st.t.toFixed(1)}s`;
   els.strikes.innerHTML = `<b>${'✖'.repeat(st.strikes)}</b>${'✖'.repeat(Math.max(0, TRIAL_MAX_STRIKES - st.strikes))}`;
-  els.stack.textContent = `Stack ${v.cargo.length}/${trial.level.stackMax} · ${st.delivered}/${st.total} shipped`;
+  els.stack.textContent = stackSummary(trial);
+  const bat = batteryHud(trial);
+  els.battery.hidden = !bat;
+  if (bat) {
+    els.battery.textContent = bat.text;
+    els.battery.dataset.tone = bat.tone;
+  }
   const s = Math.max(-1, Math.min(1, st.sway));
   const pct = Math.abs(s) * 50;
   els.meterFill.style.width = `${pct}%`;
   els.meterFill.style.left = s >= 0 ? '50%' : `${50 - pct}%`;
   els.meter.dataset.level = Math.abs(s) > 0.75 ? 'danger' : Math.abs(s) > 0.45 ? 'warn' : 'ok';
   const g = trialGuide(trial);
-  let intent = '';
-  if (st.status === 'ready') intent = 'Drive to start the clock';
+  let intent = challengeIntent(trial, g) ?? '';
+  if (intent) {
+    // Challenge copy (charging, stow, shut door, glass) wins over the basics.
+  } else if (st.status === 'ready') intent = 'Drive to start the clock';
   else if (g?.inRange && Math.abs(v.speedNow) < 1) intent = g.kind === 'pick' ? 'E · Lift pallet' : `E · Drop at Bay ${g.order.bay}`;
   else if (Math.abs(s) > 0.75) intent = 'Load tipping! Straighten up';
   els.intent.textContent = intent;
@@ -322,21 +358,33 @@ function frame(now: number): void {
   if (trial.state.status === 'running') ghostT = Math.max(0, trial.state.t - 0.1 + 0.1 * k);
   else if (trial.state.status !== 'ready') ghostT += dt / 1000;
   const guide = trialGuide(trial);
+  const dark = trial.level.visibility;
+  const simT = trial.state.t + (trial.state.status === 'running' ? k * 0.1 : 0);
   const opts: RenderOptions = {
-    layers: { routes: false, traffic: false, labels: true, ghost: false },
+    layers: { routes: false, traffic: false, labels: !dark, ghost: false },
     highlightStrategy: null,
     selectedVid: null,
     myVid: trial.vehicle.id,
     coneMode: false,
     overlays: new Map(),
-    guide: guide && !(guide.kind === 'pick' && fx.hidden.has(guide.order.id)) ? guide : null,
+    guide:
+      guide && !(guide.kind === 'pick' && fx.hidden.has(guide.order.id)) && !(guide.kind === 'charge' && guide.inRange)
+        ? guide
+        : null,
     myPose: pose,
     cargoLean: whip.lean(trial.state.sway),
     hiddenOrders: fx.hidden,
-    floorFx: (pt) => ghosts.drawFloor(pt, ghostT),
+    // Ghost trails are floor paint (under racks and trucks). Under Lights Out fog they and the ghost
+    // trucks are drawn over the fog, slightly dimmer, so the teaching ghost still shows the line.
+    floorFx: dark ? undefined : (pt) => ghosts.drawFloor(pt, ghostT),
     worldFx: (pt, nowMs) => {
+      drawChallengeWorld(pt, trial, nowMs, fx.hidden, reducedMotion(), simT);
       fx.draw(pt, nowMs);
-      ghosts.draw(pt, ghostT);
+      if (dark) {
+        drawFog(pt, pose, dark);
+        ghosts.drawFloor(pt, ghostT, GHOST_FOG_DIM);
+      }
+      ghosts.draw(pt, ghostT, dark ? GHOST_FOG_DIM : 1);
     },
     minimalChrome: true,
     markerFilter: (m) => !fx.landingOn(m.x, m.y),

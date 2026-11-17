@@ -215,7 +215,7 @@ function rgba(hex: string, a: number): string {
 }
 
 /** Faint floor trail of a ghost's whole run, brighter for the next 3 s, with pick/drop stops. */
-export function drawGhostTrail(pt: Painter, g: ShownGhost, t: number): void {
+export function drawGhostTrail(pt: Painter, g: ShownGhost, t: number, dim = 1): void {
   const ctx = pt.ctx;
   const tk = g.track;
   const n = tk.x.length;
@@ -236,6 +236,7 @@ export function drawGhostTrail(pt: Painter, g: ShownGhost, t: number): void {
     ctx.stroke();
   };
   ctx.save();
+  ctx.globalAlpha *= dim;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.setLineDash([]);
@@ -251,14 +252,21 @@ export function drawGhostTrail(pt: Painter, g: ShownGhost, t: number): void {
 }
 
 /** One translucent ghost truck (body, mast, forks and its carried stack) plus its label. */
-export function drawGhostTruck(pt: Painter, g: ShownGhost, t: number, selected: boolean, reducedMotion: boolean): void {
+export function drawGhostTruck(
+  pt: Painter,
+  g: ShownGhost,
+  t: number,
+  selected: boolean,
+  reducedMotion: boolean,
+  dim = 1,
+): void {
   const p = sampleGhost(g.track, t);
   const ctx = pt.ctx;
   const color = SLOT_COLOR[g.slot];
   const ca = Math.cos(p.a);
   const sa = Math.sin(p.a);
   ctx.save();
-  ctx.globalAlpha = (selected ? 0.5 : 0.3) * (p.done ? 0.6 : 1);
+  ctx.globalAlpha = (selected ? 0.5 : 0.3) * (p.done ? 0.6 : 1) * dim;
   pt.footprintShadow(p.x, p.y, 0.95, 0.6, p.a, 0.12);
   pt.oBox(p.x - ca * 0.1, p.y - sa * 0.1, 0.62, 0.5, p.a, 0, 9, color, 'rgba(255,255,255,0.6)');
   pt.oBox(p.x + ca * 0.25, p.y + sa * 0.25, 0.07, 0.46, p.a, 0, 22, color);
@@ -271,7 +279,7 @@ export function drawGhostTruck(pt: Painter, g: ShownGhost, t: number, selected: 
   ctx.restore();
   const [sx, sy] = pt.P(p.x, p.y, 34 + Math.max(0, p.stack - 1) * 13);
   ctx.save();
-  ctx.globalAlpha = selected ? 0.95 : 0.7;
+  ctx.globalAlpha = (selected ? 0.95 : 0.7) * dim;
   pt.pill(`${g.name} · ${g.time.toFixed(1)}s`, sx, sy - 12, rgba(color, 0.9));
   ctx.restore();
 }
@@ -381,16 +389,17 @@ export class TrialGhosts {
     this.setMode(GHOST_MODES[(i + 1) % GHOST_MODES.length]);
   }
 
-  drawFloor(pt: Painter, t: number): void {
+  /** Selected ghost's floor trail; `dim` scales opacity (e.g. over Lights Out fog). */
+  drawFloor(pt: Painter, t: number, dim = 1): void {
     const sel = this.selected();
-    if (sel) drawGhostTrail(pt, sel, t);
+    if (sel) drawGhostTrail(pt, sel, t, dim);
   }
 
-  draw(pt: Painter, t: number): void {
+  draw(pt: Painter, t: number, dim = 1): void {
     if (this.mode === 'off') return;
     const sel = this.selected();
-    for (const g of this.shown) if (g !== sel) drawGhostTruck(pt, g, t, false, this.opts.reducedMotion());
-    if (sel) drawGhostTruck(pt, sel, t, true, this.opts.reducedMotion());
+    for (const g of this.shown) if (g !== sel) drawGhostTruck(pt, g, t, false, this.opts.reducedMotion(), dim);
+    if (sel) drawGhostTruck(pt, sel, t, true, this.opts.reducedMotion(), dim);
   }
 
   private selected(): ShownGhost | null {
