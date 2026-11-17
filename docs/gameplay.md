@@ -359,6 +359,16 @@ Typed orders go through Model Armor and the same limiter as the buttons. Natural
 | Stars | Par time is the sum of planned trips at cruise speed (`trialPar`). ★★★ means within 1.25× par, ★★ within 1.7× par, ★ any finish. Each strike lowers the cap by one star (1 strike caps at ★★, 2 strikes at ★). The clock starts on your first input. |
 | Unlocks | A level unlocks once the previous level has at least 1 star. Best stars and time are saved per browser. |
 
+### Feedback
+
+These effects are drawn by the client only and never change the rules. Under *prefers-reduced-motion*, the shake and tumble are skipped and the stack snaps straight to its lean.
+
+- **Bending stack:** each pallet boundary is a spring that follows the one below it (`StackWhip`), so a tall stack lags and whips into an S-curve instead of sliding as one block. Each pallet also tilts within itself.
+- **Leaning shadow:** the floor shadow under the load stretches and shifts toward the lean.
+- **Tipping warning:** the top pallet flashes toward red once the load passes about 55% of the tipping point, and flashes faster as it gets closer.
+- **Topple:** a dropped pallet arcs from its place in the stack to the floor tile where it landed, bounces once, and scatters cartons and dust. It only becomes liftable on the floor after the bounce.
+- **Impacts:** hard hits shake the screen in proportion to speed and pause the sim for 70 ms. Rack wobbles, rack falls and boost crashes shake harder, and a falling rack throws up dust.
+
 ### Levels
 
 | # | Level | Stack | Twist |

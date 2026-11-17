@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 /**
  * Floor Trials (prototype): Flarts-style level select + gameplay in one pane.
  *
@@ -6,6 +7,7 @@
  * kept in localStorage; nothing talks to the server.
  */
 import {
+  IMPACT_DROP,
   TRIAL_LEVELS,
   TRIAL_MAX_STRIKES,
   createTrial,
@@ -19,6 +21,9 @@ import {
 } from '@warehouse/sim';
 import { WarehouseRenderer, type RenderOptions } from '../renderer.js';
 import type { Pose } from '../render/motion.js';
+import { forkHeightM, isoZ } from '../render/liftGeometry.js';
+import { CARGO_TIER_Z, cargoOffset } from '../render/vehicles.js';
+import { StackWhip, TrialFx } from './fx.js';
 
 const STEP_MS = 100; // 1 tick = 0.1 game-min = 100 ms real time (matches TICK_MIN)
 const STORE_KEY = 'ff.trials.v1';
@@ -80,6 +85,13 @@ let acc = 0;
 let lastFrame = 0;
 let seenSeq = 0;
 const keys = new Set<string>();
+/** Brief sim pause after a hard impact (hit-stop); the level clock is sim time, so it's free. */
+const HITSTOP_MS = 70;
+let freezeUntil = 0;
+const motionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+const reducedMotion = (): boolean => Boolean(motionQuery?.matches);
+const whip = new StackWhip();
+const fx = new TrialFx(reducedMotion);
 
 const renderer = new WarehouseRenderer({
   canvas: els.canvas,
@@ -132,6 +144,9 @@ function startLevel(id: string): void {
   prevPose = poseOf(trial);
   acc = 0;
   seenSeq = 0;
+  freezeUntil = 0;
+  whip.reset();
+  fx.clear();
   els.toasts.innerHTML = '';
   els.result.hidden = true;
   els.levelName.textContent = `${trial.level.num}. ${trial.level.name}`;
@@ -159,12 +174,55 @@ function toast(ev: TrialEvent): void {
   window.setTimeout(() => el.remove(), 2700);
 }
 
-function drainEvents(): void {
+function drainEvents(now: number): void {
   for (const ev of trial.state.events) {
     if (ev.seq <= seenSeq) continue;
     seenSeq = ev.seq;
     if (ev.kind !== 'won' && ev.kind !== 'failed') toast(ev);
+    if (ev.kind === 'rack_warn') fx.kick(4, now);
+    if (ev.kind === 'rack_fall' && ev.x != null && ev.y != null) {
+      fx.kick(10, now);
+      fx.dust(ev.x + 0.5, ev.y + 0.5, 1.8, now);
+    }
+    if (ev.kind === 'crash') fx.kick(11, now);
   }
+}
+
+/**
+ * One sim step plus the client-side reactions it implies: a hard impact shakes the screen (and
+ * briefly hit-stops), and every pallet that left the forks without being delivered tumbles from
+ * its place in the stack to the floor tile the sim put it on.
+ */
+function stepWithFx(now: number): void {
+  const v = trial.vehicle;
+  const before = v.cargo.map((o) => o.id);
+  const prevSpeed = Math.abs(v.speedNow);
+  const pose = poseOf(trial);
+  const forkZ = isoZ(forkHeightM(Number.isFinite(v.fork) ? v.fork : 0)) + 2;
+  const side = Math.sign(trial.state.sway) || 1;
+  stepTrial(trial, input());
+  const drop = prevSpeed - Math.abs(v.speedNow);
+  if (drop > IMPACT_DROP) {
+    fx.kick(3 + prevSpeed * 2.2, now);
+    if (!reducedMotion()) freezeUntil = now + HITSTOP_MS;
+  }
+  const ca = Math.cos(pose.a);
+  const sa = Math.sin(pose.a);
+  const ox = cargoOffset(v.type);
+  before.forEach((id, i) => {
+    if (v.cargo.some((o) => o.id === id)) return;
+    const o = trial.world.orders.find((x) => x.id === id);
+    if (!o || o.state !== 'open') return;
+    const lat = whip.tiers[i] ?? 0;
+    fx.tumble({
+      orderId: id,
+      from: { x: pose.x + ca * ox - sa * lat, y: pose.y + sa * ox + ca * lat, z: forkZ + i * CARGO_TIER_Z },
+      to: { x: o.slot.ax + 0.5, y: o.slot.ay + 0.5 },
+      angle: pose.a,
+      side,
+      startMs: now,
+    });
+  });
 }
 
 function finish(): void {
@@ -212,19 +270,22 @@ function frame(now: number): void {
   lastFrame = now;
   const live = trial.state.status === 'ready' || trial.state.status === 'running';
   if (live) {
-    acc += dt;
+    if (now >= freezeUntil) acc += dt;
     while (acc >= STEP_MS) {
       prevPose = poseOf(trial);
-      stepTrial(trial, input());
+      stepWithFx(now);
       acc -= STEP_MS;
       if (trial.state.status === 'won' || trial.state.status === 'failed') {
         acc = 0;
         break;
       }
     }
-    drainEvents();
+    drainEvents(now);
     if (trial.state.status === 'won' || trial.state.status === 'failed') finish();
   }
+  whip.step(trial.state.sway, trial.vehicle.cargo.length, dt, reducedMotion());
+  const shake = fx.shakeOffset(now);
+  els.canvas.style.transform = shake.x || shake.y ? `translate(${shake.x.toFixed(1)}px, ${shake.y.toFixed(1)}px)` : '';
   const cur = poseOf(trial);
   const k = Math.min(1, acc / STEP_MS);
   let da = cur.a - prevPose.a;
@@ -244,7 +305,9 @@ function frame(now: number): void {
     overlays: new Map(),
     guide: trialGuide(trial),
     myPose: pose,
-    cargoSway: trial.state.sway,
+    cargoLean: whip.lean(trial.state.sway),
+    hiddenOrders: fx.hidden,
+    worldFx: (pt, nowMs) => fx.draw(pt, nowMs),
   };
   renderer.render(trial.world, opts, now);
   updateHud();
@@ -266,7 +329,7 @@ window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   if (e.code === 'KeyE') {
     trialInteract(trial);
-    drainEvents();
+    drainEvents(performance.now());
     if (trial.state.status === 'won') finish();
   } else if (e.code === 'KeyR') {
     startLevel(trial.level.id);
@@ -290,3 +353,8 @@ els.next.addEventListener('click', () => {
 const resume = TRIAL_LEVELS.find((l) => unlocked(l) && !progress[l.id]) ?? TRIAL_LEVELS[TRIAL_LEVELS.length - 1];
 startLevel(resume.id);
 requestAnimationFrame(frame);
+
+// Dev server only (stripped from production builds): lets the Playwright visual check stage a loaded stack.
+if (import.meta.env.DEV) {
+  (window as unknown as { __trials?: unknown }).__trials = { get trial() { return trial; }, interact: trialInteract };
+}

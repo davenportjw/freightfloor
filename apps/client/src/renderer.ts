@@ -81,6 +81,7 @@ import {
   computeChargeVisualCue,
   drawVehicle,
   isVehicleCharging,
+  type CargoLean,
   type ChargeCueFrame,
 } from './render/vehicles.js';
 import { dockTruckFrame, drawDockRig, SimClock, TRAILER_LEN, TRAILER_TOP } from './render/trucks.js';
@@ -231,8 +232,12 @@ export interface RenderOptions {
    * - `'headingUp'`: while driving, the forklift always drives straight up on screen and steering rotates the board.
    */
   driveCameraMode?: DriveCameraMode;
-  /** Optional signed load sway for `myVid` (Floor Trials); leans the carried stack. */
-  cargoSway?: number;
+  /** Optional per-tier stack lean for `myVid` (Floor Trials); bends the carried stack. */
+  cargoLean?: CargoLean;
+  /** Optional order ids not drawn on the floor (Floor Trials: pallets still mid-tumble). */
+  hiddenOrders?: ReadonlySet<number>;
+  /** Optional world-space effects pass, drawn after the depth-sorted scene and before labels. */
+  worldFx?: (pt: Painter, nowMs: number) => void;
 }
 
 export interface WarehouseRendererInit {
@@ -726,6 +731,7 @@ export class WarehouseRenderer {
     const items = this.sceneItems(world, opts);
     items.sort((a, b) => a.d - b.d);
     for (const it of items) it.fn();
+    opts.worldFx?.(this.painter, this.nowMs);
     this.drawConeOverlay(world, opts);
     this.drawLabels(world, opts);
     if (me && opts.layers.ghost && opts.ghost) this.drawGhost(opts.ghost);
@@ -988,6 +994,7 @@ export class WarehouseRenderer {
     // order pickup rings
     for (const o of world.orders) {
       if (o.state === 'picked' || o.state === 'done') continue;
+      if (opts.hiddenOrders?.has(o.id)) continue;
       const s = o.slot;
       if (!this.visible(s.ax + 0.5, s.ay + 0.5, TW)) continue;
       const claimer = o.claimant ? world.vehicles.find((v) => v.id === o.claimant) : undefined;
@@ -1145,6 +1152,7 @@ export class WarehouseRenderer {
     // order pallets (P0 star)
     for (const o of world.orders) {
       if (o.state === 'picked' || o.state === 'done') continue;
+      if (opts.hiddenOrders?.has(o.id)) continue;
       const s = o.slot;
       const elevated = Boolean(opts.rackLiftEnabled && isRackSlot(s));
       const level = ((s.level ?? 0) as 0 | 1 | 2);
@@ -1201,7 +1209,7 @@ export class WarehouseRenderer {
             nowMs: this.nowMs,
             reducedMotion: this.reducedMotion,
             siteId: world.siteId,
-            sway: v.id === opts.myVid ? opts.cargoSway : undefined,
+            lean: v.id === opts.myVid ? opts.cargoLean : undefined,
           }),
       });
     }
