@@ -88,8 +88,8 @@ npm run ast:export
    - Local host is Apple Silicon macOS without Docker. Container builds run on Cloud Build (`gcloud builds submit --config=cloudbuild.yaml --project=davenporter-freightfloor .`).
    - Always run `terraform -chdir=infra fmt` and `terraform -chdir=infra validate` when modifying `infra/*.tf`.
    - Use Google Cloud ADC (`gcloud auth application-default`) in project `davenporter-freightfloor`; never require or hardcode API keys.
-4. **UI Theme Exception (Repo Override)**:
-   - This repository does **not** use the global sepia / academic-light theme. Keep the existing client palette and styling in `apps/client/src/styles.css`; do not restyle toward sepia, even though the user-level UI rule says to. UI changes should be minimal and scoped to the feature being built.
+4. **UI Styling Guardrail**:
+   - Keep the existing client palette and styling in `apps/client/src/styles.css`; UI changes should be minimal, Workspace-tight, and scoped to the feature being built.
 5. **Git Hygiene & Doc-Code-Test Parity**:
    - Never commit `.ast-graph/` or `tools/smoke/out/`.
    - Keep `docs/architecture.md`, `docs/operations.md`, and `docs/protocol.md` in continuous parity with code and tests.
