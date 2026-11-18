@@ -242,6 +242,37 @@ describe('@warehouse/client (M4)', () => {
     expect(after.a).toBeCloseTo(before.a, 4);
   });
 
+  it('flush() closes the open predicted slice before E so the server judges reach at the seen pose', () => {
+    const w = createWorld({ seed: 13, siteId: 'den-1' });
+    const v = w.vehicles[0];
+    v.human = true;
+    v.state = 'driven';
+    v.px = 10;
+    v.py = 2.5;
+    v.tile = { x: 10, y: 2 };
+    v.angle = 0;
+    v.speedNow = 0;
+
+    const sent: Array<{ type: string; seq: number; dt?: number; up: boolean }> = [];
+    const ctrl = new InputController((m) => sent.push(m as (typeof sent)[number]), () => true);
+    ctrl.keyDown({ code: 'KeyW' }, 0);
+    ctrl.predict(w, v, 60);
+    const before = sent.length;
+
+    // 60 ms of W predicted locally but not yet streamed: flush sends exactly that slice.
+    expect(ctrl.flush(60)).toBe(true);
+    expect(sent.length).toBe(before + 1);
+    expect(sent.at(-1)).toMatchObject({ type: 'input', up: true, dt: 0.06 });
+
+    // Nothing left to sync: a second flush (or one with no motion) sends nothing.
+    expect(ctrl.flush(61)).toBe(false);
+    expect(sent.length).toBe(before + 1);
+
+    // Not driving: never sends.
+    const idle = new InputController((m) => sent.push(m as (typeof sent)[number]), () => false);
+    expect(idle.flush(0)).toBe(false);
+  });
+
   it('accepts server pose on myVid when Co-Pilot autopilot is active and updates directive', () => {
     const w = createWorld({ seed: 19, siteId: 'den-1' });
     const v1 = w.vehicles[0]!;

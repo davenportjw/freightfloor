@@ -395,6 +395,21 @@ export class InputController {
     return false;
   }
 
+  /**
+   * Close the open predicted slice now so the server is at the pose the player sees. Call it
+   * right before a pose-dependent message (E / `interact`): the server only advances a
+   * client-timed vehicle when an input arrives (or after `STREAM_STALE_DT` of silence), so
+   * without this an E pressed while rolling in, or just after stopping, is judged up to one
+   * 100 ms slice short of the ring ("Too far") and only the second press works.
+   * Returns true when an input was sent.
+   */
+  flush(nowMs: number): boolean {
+    if (!this.isDriving() || this.isAutopilot()) return false;
+    if (this.tail.dt <= 0) return false;
+    this.sendNow(nowMs);
+    return true;
+  }
+
   /** True while local prediction should own our vehicle's pose (including coasting to a stop). */
   predicting(nowMs: number, v?: Vehicle | null): boolean {
     if ((this.isAutopilot() || v?.autopilot) && !anyHeld(this.held)) return false;

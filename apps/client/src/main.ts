@@ -444,6 +444,8 @@ function boot(): void {
     },
     interact(forkHeight?: number) {
       if (!store.isDriving()) return;
+      // Sync the server to the predicted pose first, so it judges reach where the player sees the truck.
+      input.flush(performance.now());
       send(forkHeight !== undefined ? { type: 'interact', forkHeight } : { type: 'interact' }, true);
     },
     interactDown() {
