@@ -23,11 +23,11 @@ This guide applies across **Google Antigravity (`agy`)**, **OpenAI Codex CLI (`c
 
 ## 2. AST GraphDB Sidecar & Traceability Workflow (`@warehouse/ast-sidecar`)
 
-Always use the **AST GraphDB Sidecar** (detailed in [`.agents/skills/ast-graph-traceability/SKILL.md`](.agents/skills/ast-graph-traceability/SKILL.md)) for code navigation, impact analysis, and targeted test selection instead of blind multi-file greps:
+Always use the **AST GraphDB Sidecar** (`tools/ast-sidecar`, `npm run ast:*`) for code navigation, impact analysis, and targeted test selection instead of blind multi-file greps:
 
 ### Cross-Harness Integration
-- **Antigravity**: Runs the persistent sidecar daemon (`~/.gemini/config/sidecars/warehouse-ast-sidecar/sidecar.json` on `127.0.0.1:4319`), registers the `warehouse-ast-graph` MCP server (`~/.gemini/config/mcp_config.json` & `~/.gemini/antigravity/mcp_config.json`), and runs automatic `SessionStart` / `PostToolUse` hooks (`.agents/hooks.json`).
-- **Claude Code**: Spawns the stdio MCP server via `.mcp.json` (`warehouse-ast-graph`) and runs automatic `SessionStart` / `PostToolUse` hooks via `.claude/settings.json`.
+- **Antigravity**: Runs the persistent sidecar daemon (`~/.gemini/config/sidecars/warehouse-ast-sidecar/sidecar.json` on `127.0.0.1:4319`), registers the `warehouse-ast-graph` MCP server (`~/.gemini/config/mcp_config.json` & `~/.gemini/antigravity/mcp_config.json`).
+- **Claude Code**: Spawns the stdio MCP server via `.mcp.json` (`warehouse-ast-graph`).
 - **OpenAI Codex CLI & General CLI**: Uses the `ast_*` MCP tools or `npm run ast:query -- <cmd>` CLI, which performs an automatic `<2ms` lazy `mtime` incremental sync before every query.
 
 ### Strict Anti-Chunking, Batching & Contradiction Circuit-Breaker Mandate
@@ -37,43 +37,7 @@ Always use the **AST GraphDB Sidecar** (detailed in [`.agents/skills/ast-graph-t
 - **Historical Contradiction Circuit-Breaker**: If the AST graph shows that a user-reported bug is not present in `HEAD`, run at most **1** bounded `git log -G"<symbol>" -n 5 --oneline` check before checking live Cloud Run revisions or delegating session transcript forensics to the `research` subagent.
 
 ### Essential AST Graph Commands
-```bash
-# Synchronize AST GraphDB incrementally (or --full)
-npm run ast:sync
-
-# Look up one or more symbols' exact definitions, signatures, callers, callees, and tests
-npm run ast:query -- symbol <Symbol1> [Symbol2...]
-
-# Locate all WRITES_PROPERTY (mutations) and READS_PROPERTY (reads) for class/interface/Zod fields
-npm run ast:query -- refs <PropertyOrSymbol1> [PropertyOrSymbol2...]
-
-# List all symbols & exact line spans in one or more files (with optional substring filter)
-npm run ast:query -- outline <FilePath1> [FilePath2...] [--filter <Substring>] [--kind <Kind>] [--exported]
-
-# Fuzzy-search symbols by name, qualified name, or signature across the workspace
-npm run ast:query -- search <Query> [--kind <Kind>] [--limit <N>]
-
-# Compute 3-hop upstream blast radius & covering Vitest suites before editing
-npm run ast:query -- blast-radius <SymbolOrFilePath>
-
-# Identify exact Vitest test suites & test cases covering a symbol or file
-npm run ast:query -- tests-for <SymbolOrFilePath>
-
-# Trace cross-layer lineage for a Zod schema, Fastify route, or Terraform resource
-npm run ast:query -- lineage <SchemaOrRouteOrResource>
-
-# Find shortest dependency path between two symbols
-npm run ast:query -- path <FromSymbol> <ToSymbol>
-
-# Run structural health analysis (coupling/instability, untested hubs, cycles)
-npm run ast:analyze
-
-# Run empirical traceability & token-reduction benchmark suite
-npm run ast:benchmark
-
-# Export graph to openCypher (.ast-graph/export.cypher) and JSONL (.ast-graph/snapshot.jsonl)
-npm run ast:export
-```
+`npm run ast:sync [-- --full]`, `npm run ast:query -- <symbol|refs|outline|search|blast-radius|tests-for|lineage|path> <args...>`, `npm run ast:analyze`, `npm run ast:benchmark`, and `npm run ast:export`.
 
 ---
 
