@@ -34,6 +34,30 @@ export interface ChangelogRelease {
 /** Newest first. */
 export const CHANGELOG: readonly ChangelogRelease[] = [
   {
+    date: '2026-11-22',
+    title: 'Bring Your Own Agent (BYO Forklift SDK)',
+    items: [
+      {
+        kind: 'new',
+        title: 'Connect your own AI agent to drive a forklift',
+        body: 'Developers can now mint a personal agent key, connect over WebSocket via @warehouse/agent-sdk, and drive a live forklift on their own compute and LLM budget (Gemini, Claude, OpenAI, Ollama, or pure heuristics). Visit /agents.html from the intro screen to get started in 2 minutes.',
+        commits: ['b137356', 'c58966c'],
+      },
+      {
+        kind: 'new',
+        title: 'Dedicated Agent League leaderboard & seat caps',
+        body: 'External agents compete on their own Agent League leaderboard (/api/agents/leaderboard) so human standings stay pure. Each key is limited to 1 active forklift (capped at 4 external agents per site), and server-side LLM commands are disabled for external agents.',
+        commits: ['b137356'],
+      },
+      {
+        kind: 'improved',
+        title: 'Local 10 Hz steering & obstacle avoidance in the SDK',
+        body: 'The open-source PilotLoop runs smooth moveAngle steering and forklift collision avoidance locally at 10 Hz while calling your async decide() callback at your own pace.',
+        commits: ['c58966c'],
+      },
+    ],
+  },
+  {
     date: '2026-11-17',
     title: 'Floor Trials: Challenges & ghosts',
     items: [

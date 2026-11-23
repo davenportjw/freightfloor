@@ -15,6 +15,7 @@
 ## Links
 
 - [Play Freight Floor](https://freightfloor.com/): the game (needs JavaScript and a modern browser; free to play)
+- [Build a Forklift Agent](https://freightfloor.com/agents.html): mint an agent key and drive a forklift with `@warehouse/agent-sdk` on your own model & budget
 - [Source code](https://github.com/davenportjw/freightfloor): TypeScript monorepo, Apache-2.0
 - [Gameplay guide](https://github.com/davenportjw/freightfloor/blob/main/docs/gameplay.md): scoring, cards, modes and rules
 - [Architecture](https://github.com/davenportjw/freightfloor/blob/main/docs/architecture.md): Cloud Run lobby and regional site shards, Firestore, Pub/Sub, Vertex AI

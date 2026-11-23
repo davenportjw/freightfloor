@@ -35,10 +35,11 @@ export default defineConfig({
     sourcemap: true,
     target: 'es2022',
     rollupOptions: {
-      // Multi-page: the live game plus the Floor Trials prototype (/trials.html).
+      // Multi-page: the live game, Floor Trials (/trials.html), and BYO Agent guide (/agents.html).
       input: {
         main: new URL('./index.html', import.meta.url).pathname,
         trials: new URL('./trials.html', import.meta.url).pathname,
+        agents: new URL('./agents.html', import.meta.url).pathname,
       },
     },
   },

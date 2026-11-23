@@ -22,6 +22,8 @@
         "src/**",
         "public/**",
         "index.html",
+        "trials.html",
+        "agents.html",
         "vite.config.ts",
         "tsconfig.json"
       ],

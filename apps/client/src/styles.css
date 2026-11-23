@@ -673,6 +673,37 @@ canvas.cab-overlay { pointer-events: none; }
 }
 
 .intro-goal { margin: 0; text-align: center; font-size: 15px; color: var(--ink-2); }
+.intro-agent-banner {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--soft-2);
+  border: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.intro-agent-banner__copy {
+  font-size: 13px;
+  color: var(--ink-2);
+  line-height: 1.4;
+}
+.intro-agent-banner__copy strong { color: var(--ink); }
+.intro-agent-banner__cta {
+  text-decoration: none;
+  white-space: nowrap;
+  background: #fff;
+  border: 1px solid var(--line-2);
+  color: var(--blue-d);
+  font-weight: 700;
+}
+.intro-agent-banner__cta:hover,
+.intro-agent-banner__cta:focus-visible {
+  background: var(--blue-l);
+  border-color: var(--blue);
+}
 
 .intro-keys { border-top: 1px solid var(--line); padding-top: 10px; }
 .intro-keys summary { cursor: pointer; font-size: 13px; font-weight: 700; color: var(--muted); }

@@ -671,6 +671,24 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
         chargeChip,
       ]),
       el('p', { class: 'intro-goal' }, ['Out-ship the AI forklifts and finish the shift ', b('#1'), '.']),
+      el(
+        'aside',
+        { class: 'intro-agent-banner', attrs: { 'data-role': 'intro-agent-banner' } },
+        [
+          el('div', { class: 'intro-agent-banner__copy' }, [
+            el('strong', { text: '🤖 Your own agent can play too.' }),
+            ' Connect an AI agent or bot on your own model & budget via the SDK.',
+          ]),
+          el(
+            'a',
+            {
+              class: 'btn intro-agent-banner__cta',
+              attrs: { href: '/agents.html', 'data-role': 'intro-agents-link' },
+            },
+            ['Build an Agent →'],
+          ),
+        ],
+      ),
       dailyBox,
       // Lift Mode + Camera side by side; Lift Mode spans both columns while its explainer is open.
       el('div', { class: 'intro-options' }, [liftModeBox, cameraBox]),
