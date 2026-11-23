@@ -27,6 +27,8 @@ export interface VehicleObservation {
   inRange: boolean;
   shipped: number;
   points: number;
+  /** Order IDs currently offered in a fareOffer choice (only these may be passed to `chooseOrder`). */
+  fareOfferOrderIds?: number[];
   guide?: {
     kind?: string;
     x?: number;
@@ -42,6 +44,14 @@ export interface OrderObservation {
   dropY: number;
   value: number;
   p0: boolean;
+  zone?: string;
+  bay?: string;
+}
+
+export interface NearbyVehicleObservation {
+  id: string;
+  x: number;
+  y: number;
 }
 
 export interface FloorObservation {
@@ -49,6 +59,8 @@ export interface FloorObservation {
   tick: number;
   phase: Phase;
   self: VehicleObservation | null;
+  /** Other vehicles on the floor (for collision avoidance and traffic awareness). */
+  otherVehicles: NearbyVehicleObservation[];
   orders: OrderObservation[];
   dealtCards: string[];
   stats: {
@@ -112,34 +124,47 @@ const BAY_COORDS: Record<string, { x: number; y: number }> = {
   E20: { x: 58, y: 95 },
 };
 
-export function extractOrdersFromWire(rawOrders: unknown): OrderObservation[] {
+export function extractOrdersFromWire(
+  rawOrders: unknown,
+  baysById?: ReadonlyMap<string, { x: number; y: number }>,
+): OrderObservation[] {
   if (!Array.isArray(rawOrders)) return [];
   const out: OrderObservation[] = [];
   for (const item of rawOrders) {
     if (!item || typeof item !== 'object') continue;
     const o = item as Record<string, unknown>;
-    if (o.state === 'done' || o.state === 'cancelled') continue;
+    if (typeof o.state === 'string' && o.state !== 'open') continue;
     const id = (o.id ?? o.orderId) as string | number | undefined;
     if (id === undefined) continue;
+    const slot = o.slot as { ax?: number; ay?: number; rx?: number; ry?: number; zone?: string } | undefined;
     const pickup = o.pickup as { x?: number; y?: number } | undefined;
     const drop = o.drop as { x?: number; y?: number } | undefined;
     const pickupX =
-      typeof o.px === 'number'
-        ? o.px
-        : typeof o.pickupX === 'number'
-          ? o.pickupX
-          : typeof pickup?.x === 'number'
-            ? pickup.x
-            : 10;
+      typeof slot?.ax === 'number'
+        ? slot.ax
+        : typeof slot?.rx === 'number'
+          ? slot.rx
+          : typeof o.px === 'number'
+            ? o.px
+            : typeof o.pickupX === 'number'
+              ? o.pickupX
+              : typeof pickup?.x === 'number'
+                ? pickup.x
+                : 10;
     const pickupY =
-      typeof o.py === 'number'
-        ? o.py
-        : typeof o.pickupY === 'number'
-          ? o.pickupY
-          : typeof pickup?.y === 'number'
-            ? pickup.y
-            : 20;
-    const bayCoords = typeof o.bay === 'string' ? BAY_COORDS[o.bay] : undefined;
+      typeof slot?.ay === 'number'
+        ? slot.ay
+        : typeof slot?.ry === 'number'
+          ? slot.ry
+          : typeof o.py === 'number'
+            ? o.py
+            : typeof o.pickupY === 'number'
+              ? o.pickupY
+              : typeof pickup?.y === 'number'
+                ? pickup.y
+                : 20;
+    const bayId = typeof o.bay === 'string' ? o.bay : undefined;
+    const bayCoords = bayId ? baysById?.get(bayId) ?? BAY_COORDS[bayId] : undefined;
     const dropX =
       typeof o.dx === 'number'
         ? o.dx
@@ -158,7 +183,17 @@ export function extractOrdersFromWire(rawOrders: unknown): OrderObservation[] {
             : bayCoords?.y ?? 24;
     const value = typeof o.value === 'number' ? o.value : 50;
     const p0 = o.priority === 'P0' || o.p0 === true;
-    out.push({ id, pickupX, pickupY, dropX, dropY, value, p0 });
+    out.push({
+      id,
+      pickupX,
+      pickupY,
+      dropX,
+      dropY,
+      value,
+      p0,
+      ...(typeof slot?.zone === 'string' ? { zone: slot.zone } : {}),
+      ...(bayId ? { bay: bayId } : {}),
+    });
   }
   return out;
 }
@@ -224,7 +259,9 @@ export class FreightFloorAgentClient {
   private joinInfo: JoinResponse | null = null;
   private vehicleId: string | null = null;
   private self: VehicleObservation | null = null;
+  private otherVehicles = new Map<string, NearbyVehicleObservation>();
   private orders: OrderObservation[] = [];
+  private baysById = new Map<string, { x: number; y: number }>();
   private dealtCards: string[] = [];
   private phase: Phase = 'running';
   private tick = 0;
@@ -248,6 +285,7 @@ export class FreightFloorAgentClient {
       tick: this.tick,
       phase: this.phase,
       self: this.self ? { ...this.self, guide: this.self.guide ? { ...this.self.guide } : undefined } : null,
+      otherVehicles: Array.from(this.otherVehicles.values()).map((v) => ({ ...v })),
       orders: this.orders.map((o) => ({ ...o })),
       dealtCards: [...this.dealtCards],
       stats: {
@@ -385,19 +423,44 @@ export class FreightFloorAgentClient {
     }
   }
 
+  private ingestBays(rawBays: unknown): void {
+    if (!Array.isArray(rawBays)) return;
+    for (const item of rawBays) {
+      if (!item || typeof item !== 'object') continue;
+      const b = item as Record<string, unknown>;
+      const id = typeof b.id === 'string' ? b.id : typeof b.name === 'string' ? b.name : null;
+      const x = typeof b.ax === 'number' ? b.ax : typeof b.x === 'number' ? b.x : null;
+      const y = typeof b.ay === 'number' ? b.ay : typeof b.y === 'number' ? b.y : null;
+      if (id && x !== null && y !== null) {
+        this.baysById.set(id, { x, y });
+      }
+    }
+  }
+
   private ingestSnapshot(snapshot: unknown): void {
     if (!snapshot || typeof snapshot !== 'object') return;
     const snap = snapshot as Record<string, unknown>;
     if (typeof snap.phase === 'string') {
       this.phase = snap.phase as Phase;
     }
-    this.orders = extractOrdersFromWire(snap.orders);
+    this.ingestBays(snap.bays);
+    this.orders = extractOrdersFromWire(snap.orders, this.baysById);
     this.backlog = this.orders.length;
-    if (Array.isArray(snap.vehicles) && this.vehicleId) {
-      const found = snap.vehicles.find(
-        (v: unknown) => v && typeof v === 'object' && (v as { id?: string }).id === this.vehicleId,
-      ) as Record<string, unknown> | undefined;
-      if (found) this.updateSelfFromRecord(found);
+    if (Array.isArray(snap.vehicles)) {
+      this.otherVehicles.clear();
+      for (const raw of snap.vehicles) {
+        if (!raw || typeof raw !== 'object') continue;
+        const rec = raw as Record<string, unknown>;
+        const id = typeof rec.id === 'string' ? rec.id : null;
+        if (!id) continue;
+        if (id === this.vehicleId) {
+          this.updateSelfFromRecord(rec);
+        } else {
+          const x = typeof rec.px === 'number' ? rec.px : typeof rec.qx === 'number' ? dequantiseCoord(rec.qx) : null;
+          const y = typeof rec.py === 'number' ? rec.py : typeof rec.qy === 'number' ? dequantiseCoord(rec.qy) : null;
+          if (x !== null && y !== null) this.otherVehicles.set(id, { id, x, y });
+        }
+      }
     }
   }
 
@@ -407,14 +470,26 @@ export class FreightFloorAgentClient {
       if (typeof delta.stats.shipped === 'number') this.shipped = delta.stats.shipped;
       if (typeof delta.stats.backlog === 'number') this.backlog = delta.stats.backlog;
     }
-    if (delta.orders) {
-      this.orders = extractOrdersFromWire(delta.orders);
+    if (delta.bays) {
+      this.ingestBays(delta.bays);
     }
-    if (this.vehicleId) {
-      const found = delta.vehicles.find((v) => v.id === this.vehicleId) as
-        | Record<string, unknown>
-        | undefined;
-      if (found) this.updateSelfFromRecord(found);
+    if (delta.orders) {
+      this.orders = extractOrdersFromWire(delta.orders, this.baysById);
+    }
+    const seenOther = new Set<string>();
+    for (const raw of delta.vehicles) {
+      const rec = raw as Record<string, unknown>;
+      if (raw.id === this.vehicleId) {
+        this.updateSelfFromRecord(rec);
+      } else {
+        seenOther.add(raw.id);
+        const x = typeof rec.px === 'number' ? rec.px : typeof rec.qx === 'number' ? dequantiseCoord(rec.qx) : null;
+        const y = typeof rec.py === 'number' ? rec.py : typeof rec.qy === 'number' ? dequantiseCoord(rec.qy) : null;
+        if (x !== null && y !== null) this.otherVehicles.set(raw.id, { id: raw.id, x, y });
+      }
+    }
+    for (const id of this.otherVehicles.keys()) {
+      if (!seenOther.has(id)) this.otherVehicles.delete(id);
     }
     if (delta.hands) {
       const firstHand = Object.values(delta.hands)[0];
@@ -447,8 +522,9 @@ export class FreightFloorAgentClient {
         ? rec.cargoCount
         : Array.isArray(rec.cargo)
           ? rec.cargo.length
-          : 0;
-    const inRange = Boolean(rec.inRange);
+          : this.self?.cargoCount ?? 0;
+    const inRange =
+      typeof rec.inRange === 'boolean' ? rec.inRange : this.self?.inRange ?? false;
     const shipped = typeof rec.sShipped === 'number' ? rec.sShipped : this.self?.shipped ?? 0;
     const points = typeof rec.sPts === 'number' ? rec.sPts : this.self?.points ?? 0;
     const prevCargoCount = this.self?.cargoCount ?? 0;
@@ -458,6 +534,16 @@ export class FreightFloorAgentClient {
         : rec.guide === null || cargoCount !== prevCargoCount
           ? undefined
           : this.self?.guide;
+
+    const fareOffer = rec.fareOffer as { options?: Array<{ orderId?: number; id?: number }> } | null | undefined;
+    const fareOfferOrderIds =
+      fareOffer && Array.isArray(fareOffer.options)
+        ? fareOffer.options
+            .map((opt) => (typeof opt.orderId === 'number' ? opt.orderId : opt.id))
+            .filter((id): id is number => typeof id === 'number')
+        : fareOffer === null
+          ? undefined
+          : this.self?.fareOfferOrderIds;
 
     this.self = {
       id: this.vehicleId!,
@@ -470,6 +556,7 @@ export class FreightFloorAgentClient {
       inRange,
       shipped,
       points,
+      ...(fareOfferOrderIds && fareOfferOrderIds.length > 0 ? { fareOfferOrderIds } : {}),
       guide,
     };
   }

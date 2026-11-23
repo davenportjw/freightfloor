@@ -51,6 +51,7 @@ export class PilotLoop {
   private deciding = false;
   private currentDecision: AgentDecision | null = null;
   private stuckTicks = 0;
+  private lastInteractAtMs = 0;
 
   constructor(
     private readonly client: FreightFloorAgentClient,
@@ -75,8 +76,7 @@ export class PilotLoop {
         } else if (
           decision.action === 'deliverOrder' &&
           typeof decision.orderId === 'number' &&
-          Number.isInteger(decision.orderId) &&
-          decision.orderId >= 0
+          obs.self?.fareOfferOrderIds?.includes(decision.orderId)
         ) {
           this.client.chooseOrder(decision.orderId);
         }
@@ -152,15 +152,20 @@ export class PilotLoop {
       targetX,
       targetY,
       stuckTicks: this.stuckTicks,
+      obstacles: obs.otherVehicles,
     });
     this.stuckTicks = nextStuckTicks;
 
     this.client.sendInput({
       ...controls,
-      boost: boost && controls.up && self.battery > 25,
+      boost: boost && (controls.up || typeof controls.moveAngle === 'number') && self.battery > 25,
     });
 
-    if (shouldInteract && (self.inRange || distance <= 1.85)) {
+    // Only interact when actually at the intended target (never on a stale inRange right after pickup)
+    // and debounce so one arrival cannot double-toggle pickup + drop.
+    const nowMs = Date.now();
+    if (shouldInteract && distance <= 1.85 && nowMs - this.lastInteractAtMs >= 600) {
+      this.lastInteractAtMs = nowMs;
       this.client.interact();
     }
   }

@@ -8,6 +8,7 @@ export interface SteeringControls {
   down: boolean;
   left: boolean;
   right: boolean;
+  moveAngle?: number;
 }
 
 const HWY_Y_CENTERS = [
@@ -64,13 +65,15 @@ export function computeSteeringControls(params: {
   targetX: number;
   targetY: number;
   stuckTicks: number;
+  /** Optional positions of other forklifts to sidestep around. */
+  obstacles?: ReadonlyArray<{ x: number; y: number }>;
 }): { controls: SteeringControls; distance: number; nextStuckTicks: number } {
-  const { vx, vy, angle, speedNow, targetX, targetY, stuckTicks } = params;
+  const { vx, vy, angle, speedNow, targetX, targetY, stuckTicks, obstacles } = params;
   const tx = targetX + 0.5;
   const ty = targetY + 0.5;
   const distance = Math.hypot(tx - vx, ty - vy);
 
-  if (distance <= 1.45) {
+  if (distance <= 1.25) {
     return {
       controls: { up: false, down: false, left: false, right: false },
       distance,
@@ -80,16 +83,21 @@ export function computeSteeringControls(params: {
 
   const nextStuckTicks = Math.abs(speedNow) < 0.05 ? stuckTicks + 1 : 0;
 
-  if (nextStuckTicks >= 4 && nextStuckTicks <= 8) {
+  if (nextStuckTicks >= 4 && nextStuckTicks <= 10) {
+    // Steer back toward the nearest open highway center + aisle intersection to clear any rack edge
+    const safeX = nearestOpenAisleX(vx);
+    const safeY = nearestHighwayY(vy, vy);
+    const escapeAngle = Math.atan2(safeY - vy, safeX - vx);
     return {
       controls: {
-        up: false,
-        down: true,
-        left: nextStuckTicks <= 6,
-        right: nextStuckTicks > 6,
+        up: true,
+        down: false,
+        left: false,
+        right: false,
+        moveAngle: escapeAngle,
       },
       distance,
-      nextStuckTicks: nextStuckTicks >= 8 ? 0 : nextStuckTicks,
+      nextStuckTicks: nextStuckTicks >= 10 ? 0 : nextStuckTicks,
     };
   }
 
@@ -103,16 +111,51 @@ export function computeSteeringControls(params: {
     wy = ty;
   } else if (dxAbs > 0.45) {
     const hwyY = nearestHighwayY(vy, ty);
-    if (Math.abs(vy - hwyY) > 1.25) {
+    if (Math.abs(vy - hwyY) > 1.75) {
+      // Outside the 4-tile highway band: align vertically along nearest open aisle to reach it
       wx = nearestOpenAisleX(vx);
       wy = hwyY;
     } else {
+      // Inside the 4-tile highway band: cruise horizontally to the target aisle X (or East lane)
       wx = tx >= 56 && dyAbs > 0.65 ? 55.5 : tx;
       wy = hwyY;
     }
   }
 
-  const desiredAngle = Math.atan2(wy - vy, wx - vx);
+  let desiredAngle = Math.atan2(wy - vy, wx - vx);
+
+  // Smooth collision avoidance: if another forklift sits directly ahead within 2.8 tiles,
+  // steer around it perpendicular to our heading (preferring the clearer side).
+  if (obstacles && obstacles.length > 0) {
+    const ux = Math.cos(desiredAngle);
+    const uy = Math.sin(desiredAngle);
+    let closestAhead = Infinity;
+    let closestLat = 0;
+    for (const o of obstacles) {
+      const rx = o.x - vx;
+      const ry = o.y - vy;
+      const fwd = rx * ux + ry * uy;
+      const lat = -rx * uy + ry * ux;
+      if (fwd > 0.1 && fwd < 2.8 && Math.abs(lat) < 1.35) {
+        if (fwd < closestAhead) {
+          closestAhead = fwd;
+          closestLat = lat;
+        }
+      }
+    }
+    if (closestAhead < Infinity) {
+      // Prefer dodging toward the highway center when moving horizontally so we don't drift into a rack wall
+      const nearestHwy = nearestHighwayY(vy, vy);
+      let dodgeSign = closestLat >= 0 ? -1 : 1;
+      if (Math.abs(uy) < 0.4 && Math.abs(vy - nearestHwy) > 0.7) {
+        const wantNorth = vy > nearestHwy;
+        dodgeSign = ux >= 0 ? (wantNorth ? -1 : 1) : (wantNorth ? 1 : -1);
+      }
+      const dodgeAngle = closestAhead < 1.5 ? Math.PI * 0.45 : Math.PI * 0.28;
+      desiredAngle = normalizeAngle(desiredAngle + dodgeSign * dodgeAngle);
+    }
+  }
+
   const diff = normalizeAngle(desiredAngle - angle);
 
   const left = diff < -0.11;
@@ -121,7 +164,7 @@ export function computeSteeringControls(params: {
   const down = Math.abs(diff) >= 1.85 && speedNow > 0.5;
 
   return {
-    controls: { up, down, left, right },
+    controls: { up, down, left, right, moveAngle: desiredAngle },
     distance,
     nextStuckTicks,
   };

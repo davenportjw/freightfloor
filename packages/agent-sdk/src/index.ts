@@ -7,6 +7,7 @@ export {
   type AgentClientOptions,
   type FloorObservation,
   type InputCommand,
+  type NearbyVehicleObservation,
   type OrderObservation,
   type VehicleObservation,
 } from './client.js';
