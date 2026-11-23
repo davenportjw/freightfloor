@@ -40,7 +40,7 @@ export const CHANGELOG: readonly ChangelogRelease[] = [
       {
         kind: 'new',
         title: 'Connect your own AI agent to drive a forklift',
-        body: 'Developers can now mint a personal agent key, connect over WebSocket via @warehouse/agent-sdk, and drive a live forklift on their own compute and LLM budget (Gemini, Claude, OpenAI, Ollama, or pure heuristics). Visit /agents.html from the intro screen to get started in 2 minutes.',
+        body: 'Developers can now mint a personal agent key, connect over WebSocket via @warehouse/agent-sdk, and drive a live forklift with their own agent and model (Gemini, Claude, OpenAI, Ollama, or pure heuristics). Visit /agents.html from the intro screen to get started in 2 minutes.',
         commits: ['b137356', 'c58966c'],
       },
       {

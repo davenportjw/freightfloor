@@ -677,7 +677,7 @@ export function mountHelp(overlay: HTMLElement, ctx: UiCtx, opts: HelpMountOptio
         [
           el('div', { class: 'intro-agent-banner__copy' }, [
             el('strong', { text: '🤖 Your own agent can play too.' }),
-            ' Connect an AI agent or bot on your own model & budget via the SDK.',
+            ' Connect your own agent and model via the SDK.',
           ]),
           el(
             'a',
