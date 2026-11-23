@@ -44,6 +44,8 @@ export interface SiteHeartbeatDoc {
   difficulty: number;
   tier?: number;
   driverClientIds?: string[];
+  /** Connected BYO external agent clientIds currently holding driver seats on this shard. */
+  externalAgentClientIds?: string[];
   brainHealth: BrainHealth;
   updatedAt: number;
 }
@@ -66,6 +68,10 @@ export interface PlayerProfileDoc {
   clientId: string;
   name: string;
   isBot: boolean;
+  /** True for BYO external agents joined via `/api/agents/join` (populates Agent League). */
+  externalAgent?: boolean;
+  /** Self-declared model/runtime label for external agents. */
+  agentModel?: string;
   totalDeliveries: number;
   totalScore: number;
   bestBlitzPts?: number;
@@ -550,6 +556,7 @@ export class CloudPersistenceStore implements PersistenceStore {
           tier: doc.tier ?? 0,
           state: doc.phase === 'break' ? 'break' : 'live',
           driverClientIds: doc.driverClientIds ?? [],
+          externalAgentClientIds: doc.externalAgentClientIds ?? [],
         },
         { merge: true },
       );
@@ -615,6 +622,11 @@ export class CloudPersistenceStore implements PersistenceStore {
     await this.db.collection(this.colName('players')).doc(stats.clientId).set(stats, {
       merge: true,
     });
+    if (stats.externalAgent) {
+      await this.db.collection(this.colName('agent_players')).doc(stats.clientId).set(stats, {
+        merge: true,
+      });
+    }
   }
 
   async getPlayerStats(clientId: string): Promise<PlayerProfileDoc | null> {

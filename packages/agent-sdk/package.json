@@ -1,0 +1,58 @@
+{
+  "name": "@warehouse/agent-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "wireit",
+    "test": "wireit"
+  },
+  "wireit": {
+    "build": {
+      "command": "tsc",
+      "dependencies": [
+        "../protocol:build"
+      ],
+      "files": [
+        "src/**",
+        "tsconfig.json",
+        "../../tsconfig.base.json"
+      ],
+      "output": [
+        "dist/**"
+      ],
+      "clean": "if-file-deleted"
+    },
+    "test": {
+      "command": "vitest run",
+      "dependencies": [
+        "build",
+        "../../apps/lobby:build",
+        "../../apps/site:build"
+      ],
+      "files": [
+        "test/**",
+        "src/**",
+        "tsconfig.json"
+      ],
+      "output": []
+    }
+  },
+  "dependencies": {
+    "@warehouse/protocol": "*",
+    "ws": "^8.18.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.14",
+    "@warehouse/lobby": "*",
+    "@warehouse/site": "*"
+  }
+}

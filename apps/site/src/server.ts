@@ -674,6 +674,10 @@ export interface ConnectedClient {
   name: string;
   ip: string;
   isBot: boolean;
+  /** True for BYO external agents joined via `/api/agents/join` (server-side LLMs disabled). */
+  externalAgent: boolean;
+  /** Optional self-declared model/runtime label for external agents. */
+  agentModel?: string;
   vid: string | null;
   role: 'driver' | 'spectator';
   ticketRole: 'driver' | 'spectator';
@@ -906,6 +910,7 @@ export async function createSiteServer(
     v: Vehicle,
     extraPts: number = 0,
     nowMs: number = Date.now(),
+    externalMeta?: { externalAgent?: boolean; agentModel?: string },
   ): Promise<void> {
     const runKey = `${cid}:${v.runStartedAt ?? 0}`;
     if (persistedFinishedRuns.has(runKey) && extraPts === 0) {
@@ -914,6 +919,7 @@ export async function createSiteServer(
     if (v.runFinished) {
       persistedFinishedRuns.add(runKey);
     }
+    const isExternalAgent = Boolean(externalMeta?.externalAgent);
     // Snapshot the Daily entry before any await (the vehicle may be released meanwhile) and write
     // it independently of the profile upsert so one failing never drops the other.
     const daily = extraPts === 0 ? dailyScoreDoc(v, cid, toPublicId(cid), playerName, isBotFlag, siteId, nowMs) : null;
@@ -930,13 +936,20 @@ export async function createSiteServer(
       (v.runMode ?? 'blitz') === 'blitz'
         ? Math.max(prevBestBlitz, runPts)
         : prevBestBlitz;
-    // Best pallets per real minute over this player's runs (AI/bots never stored).
-    const runPpm = v.human && !isBotFlag && (v.runDeliveries ?? 0) > 0 ? computeDriverPpm(world, v) : 0;
+    // Best pallets per real minute over this player's runs (stored for humans and external BYO agents).
+    const runPpm =
+      v.human && (!isBotFlag || isExternalAgent) && (v.runDeliveries ?? 0) > 0
+        ? computeDriverPpm(world, v)
+        : 0;
     const nextPpm = Math.max(existing?.ppm ?? 0, Number.isFinite(runPpm) ? runPpm : 0);
+    const resolvedExternalAgent = isExternalAgent || Boolean(existing?.externalAgent);
+    const resolvedAgentModel = externalMeta?.agentModel ?? existing?.agentModel;
     await persistence.upsertPlayerStats({
       clientId: cid,
       name: playerName,
       isBot: isBotFlag,
+      ...(resolvedExternalAgent ? { externalAgent: true } : {}),
+      ...(resolvedAgentModel ? { agentModel: resolvedAgentModel } : {}),
       totalDeliveries: (existing?.totalDeliveries ?? 0) + v.deliveries,
       totalScore: (existing?.totalScore ?? 0) + score,
       ...(nextBestBlitz > 0 ? { bestBlitzPts: nextBestBlitz } : {}),
@@ -1038,7 +1051,7 @@ export async function createSiteServer(
     eligible: (v) => {
       let connected = false;
       for (const c of clients) {
-        if (!c.authenticated || c.vid !== v.id || c.isBot) continue;
+        if (!c.authenticated || c.vid !== v.id || c.isBot || c.externalAgent) continue;
         if (c.dispatchersCallOptOut) return false;
         connected = true;
       }
@@ -1239,7 +1252,13 @@ export async function createSiteServer(
         };
       }
 
-      const needGuide = v.human && (!v.isBot || clients.size <= 8);
+      const isExternalAgentVehicle = Boolean(
+        v.ownerClientId &&
+          Array.from(clients).some(
+            (c) => c.authenticated && c.externalAgent && c.clientId === v.ownerClientId,
+          ),
+      );
+      const needGuide = v.human && (!v.isBot || isExternalAgentVehicle || clients.size <= 8);
       const g = needGuide ? guide(world, v) : null;
       const inRange = g
         ? Boolean(g.inRange)
@@ -1418,7 +1437,7 @@ export async function createSiteServer(
 
   function buildWelcome(conn: ConnectedClient, nowMs: number = Date.now()): WelcomeMessage {
     resetIncrementalTrackers(conn);
-    const leanBot = conn.isBot;
+    const leanBot = conn.isBot && !conn.externalAgent;
     const floorOrders = floorOrdersFor(conn, nowMs);
     markFloorOrdersSent(conn, floorOrders, JSON.stringify(floorOrders), nowMs);
     return {
@@ -1480,7 +1499,7 @@ export async function createSiteServer(
       const own = c.clientId ? world.cards[c.clientId] : undefined;
       const handsJson = own ? `{${JSON.stringify(toPublicId(c.clientId))}:${JSON.stringify(own)}}` : '{}';
 
-      if (useLeanBotDelta && c.isBot) {
+      if (useLeanBotDelta && c.isBot && !c.externalAgent) {
         if (botHead === null) {
           const compactVehicles = msg.vehicles.map((v) => ({
             id: v.id,
@@ -1616,6 +1635,13 @@ export async function createSiteServer(
           .map((c) => c.clientId),
       ),
     );
+    const externalAgentClientIds = Array.from(
+      new Set(
+        Array.from(clients)
+          .filter((c) => c.authenticated && c.externalAgent && c.role === 'driver' && c.vid)
+          .map((c) => c.clientId),
+      ),
+    );
     const region =
       siteId === 'den-1'
         ? 'us-central1'
@@ -1641,6 +1667,7 @@ export async function createSiteServer(
       difficulty: difficultyNumber(world.difficulty),
       tier: world.tier,
       driverClientIds,
+      externalAgentClientIds,
       brainHealth: brainScheduler.getBrainHealth(nowMs),
       updatedAt: nowMs,
     });
@@ -1663,7 +1690,12 @@ export async function createSiteServer(
     const keepAlwaysWarm =
       process.env.IDLE_POLICY === 'warm' || process.env.IDLE_POLICY === 'run';
     if (connectedCount > 0) {
-      lastHumanActiveAtMs = nowMs;
+      const hasHumanOrSpectator = Array.from(clients).some(
+        (c) => c.authenticated && !c.externalAgent,
+      );
+      if (hasHumanOrSpectator) {
+        lastHumanActiveAtMs = nowMs;
+      }
       windingDownStartedAtMs = null;
       if (world.phase === 'break' || world.phase === 'winding_down') {
         setPhase(world, 'running');
@@ -1872,7 +1904,15 @@ export async function createSiteServer(
         if (siblingActive) continue;
         if (v) {
           if (v.sPts > 0 || v.deliveries > 0 || (v.runDeliveries ?? 0) > 0) {
-            void persistVehicleStats(c.clientId, c.name, c.isBot, v, 0, nowMs);
+            void persistVehicleStats(
+              c.clientId,
+              c.name,
+              c.isBot,
+              v,
+              0,
+              nowMs,
+              c.externalAgent ? { externalAgent: true, agentModel: c.agentModel } : undefined,
+            );
           }
           evictDriverToSpectator(c.clientId, v, 'idle_timeout', nowMs);
         }
@@ -2086,9 +2126,30 @@ export async function createSiteServer(
       }
     }
 
-    // Schedule Gemini brain decisions if running (pause Gemini calls when warm-idle with 0 sockets for >= idleBreakThresholdMs)
+    // Schedule Gemini brain decisions if running. Pause server-side Gemini calls when:
+    // (a) warm-idle with 0 sockets for >= idleBreakThresholdMs, OR
+    // (b) only external BYO agents are connected (0 humans/spectators) so external agents never burn our LLM bill.
+    const hasNonExternalClient = Array.from(clients).some(
+      (c) => c.authenticated && !c.externalAgent,
+    );
+    const onlyExternalAgentsConnected = connectedCount > 0 && !hasNonExternalClient;
     const idlePauseGemini =
-      connectedCount === 0 && nowMs - lastHumanActiveAtMs >= idleBreakThresholdMs;
+      onlyExternalAgentsConnected ||
+      (connectedCount === 0 && nowMs - lastHumanActiveAtMs >= idleBreakThresholdMs);
+    // Defense-in-depth: never dispatch server-side Gemini brain decisions for external BYO agents' vehicles.
+    if (world.pendingDecisions.length > 0) {
+      const externalAgentVids = new Set(
+        Array.from(clients)
+          .filter((c) => c.authenticated && c.externalAgent && c.vid)
+          .map((c) => c.vid!),
+      );
+      if (externalAgentVids.size > 0) {
+        world.pendingDecisions = world.pendingDecisions.filter(
+          (req) => !externalAgentVids.has(String(req.agentId)),
+        );
+      }
+    }
+
     if (
       world.phase === 'running' &&
       world.pendingDecisions.length > 0 &&
@@ -2315,12 +2376,16 @@ export async function createSiteServer(
     conn.clientId = payload.clientId;
     conn.name = nameCheck.name;
     conn.isBot = payload.isBot;
+    conn.externalAgent = Boolean(payload.externalAgent);
+    conn.agentModel = payload.agentModel;
     conn.ticketRole = payload.role === 'spectator' ? 'spectator' : 'driver';
     conn.ticketJti = payload.jti ?? null;
     conn.evictedReason = null;
     conn.lastInputAtMs = nowMs;
     conn.lastHumanActivityAt = nowMs;
-    lastHumanActiveAtMs = nowMs;
+    if (!conn.externalAgent) {
+      lastHumanActiveAtMs = nowMs;
+    }
 
     if (world.phase === 'break' || world.phase === 'winding_down') {
       setPhase(world, 'running');
@@ -2356,7 +2421,15 @@ export async function createSiteServer(
             const prevName = existingSession.name;
             const prevIsBot = conn.isBot;
             const cid = conn.clientId;
-            void persistVehicleStats(cid, prevName, prevIsBot, ev, 0, nowMs);
+            void persistVehicleStats(
+              cid,
+              prevName,
+              prevIsBot,
+              ev,
+              0,
+              nowMs,
+              conn.externalAgent ? { externalAgent: true, agentModel: conn.agentModel } : undefined,
+            );
           }
           if (ticketRole === 'spectator') {
             removePlayerVehicle(world, conn.clientId);
@@ -2621,7 +2694,9 @@ export async function createSiteServer(
       return;
     }
 
-    lastHumanActiveAtMs = nowMs;
+    if (!conn.externalAgent) {
+      lastHumanActiveAtMs = nowMs;
+    }
 
     switch (msg.type) {
       case 'input': {
@@ -2861,6 +2936,15 @@ export async function createSiteServer(
       }
 
       case 'acceptRelocation': {
+        if (conn.externalAgent) {
+          sendTo(conn.socket, {
+            type: 'error',
+            code: 'external_agent_forbidden',
+            message:
+              'External agents cannot relocate shards directly; request a new seat via POST /api/agents/join.',
+          });
+          return;
+        }
         const toSite = msg.toSite ?? msg.targetSite;
         if (!toSite || toSite === siteId) {
           sendTo(conn.socket, {
@@ -2897,6 +2981,7 @@ export async function createSiteServer(
             v,
             RELOCATION_BONUS_PTS,
             nowMs,
+            conn.externalAgent ? { externalAgent: true, agentModel: conn.agentModel } : undefined,
           );
         }
 
@@ -2908,6 +2993,8 @@ export async function createSiteServer(
             siteId: toSite,
             exp: relocationExp,
             isBot: conn.isBot,
+            ...(conn.externalAgent ? { externalAgent: true } : {}),
+            ...(conn.agentModel ? { agentModel: conn.agentModel } : {}),
             runMode: 'freerange',
             carryPts,
             carryDeliveries,
@@ -2958,6 +3045,15 @@ export async function createSiteServer(
       }
 
       case 'nlCommand': {
+        if (conn.externalAgent) {
+          sendTo(conn.socket, {
+            type: 'error',
+            code: 'external_agent_llm_disabled',
+            message:
+              'External agents must run their own model; server-side LLM commands are disabled.',
+          });
+          return;
+        }
         if (conn.role !== 'driver') {
           // Dispatcher orders spend shared Gemini budget and mutate the floor;
           // spectators must not be able to issue them.
@@ -2990,6 +3086,15 @@ export async function createSiteServer(
       }
 
       case 'agentCommand': {
+        if (conn.externalAgent) {
+          sendTo(conn.socket, {
+            type: 'error',
+            code: 'external_agent_llm_disabled',
+            message:
+              'External agents must drive directly using the SDK; server-side Co-Pilot and autopilot commands are disabled.',
+          });
+          return;
+        }
         conn.lastInputAtMs = nowMs;
         conn.lastHumanActivityAt = nowMs;
         let v: Vehicle | undefined;
@@ -3063,6 +3168,15 @@ export async function createSiteServer(
 
         // Natural-language Co-Pilot instruction routed through 7-layer Prompt Armor + Gemini 3.5 Flash-Lite
         if (msg.text && msg.text.trim().length > 0) {
+          if (conn.externalAgent) {
+            sendTo(conn.socket, {
+              type: 'error',
+              code: 'external_agent_llm_disabled',
+              message:
+                'External agents must run their own model; server-side LLM commands are disabled.',
+            });
+            return;
+          }
           const res = await nlPipeline.executeAgentCommand({
             world,
             vehicle: v,
@@ -3275,6 +3389,15 @@ export async function createSiteServer(
       }
 
       case 'transferSite': {
+        if (conn.externalAgent) {
+          sendTo(conn.socket, {
+            type: 'error',
+            code: 'external_agent_forbidden',
+            message:
+              'External agents cannot transfer shards directly; request a new seat via POST /api/agents/join.',
+          });
+          return;
+        }
         removePlayerVehicle(world, conn.clientId);
         for (const c of clients) {
           if (c.authenticated && c.clientId === conn.clientId) {
@@ -3339,6 +3462,7 @@ export async function createSiteServer(
       name: '',
       ip: clientIp,
       isBot: false,
+      externalAgent: false,
       vid: null,
       role: 'spectator',
       ticketRole: 'spectator',
@@ -3425,6 +3549,7 @@ export async function createSiteServer(
               v,
               0,
               Date.now(),
+              conn.externalAgent ? { externalAgent: true, agentModel: conn.agentModel } : undefined,
             );
           }
           removePlayerVehicle(world, conn.clientId);

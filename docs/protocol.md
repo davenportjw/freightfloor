@@ -109,6 +109,25 @@ Shared ghosts for the level's current rules revision. The top 3 and total are ca
 | `total` | `int` | Players with a stored run on this revision. |
 | `top` | `TrialGhost[]` | Up to 3 fastest: `{ rank, publicId, name, time, stars, strikes, track }` (competition ranking by time). No raw clientIds. |
 | `next` | `TrialGhost \| null` | The slowest run strictly faster than `time` (null without `time` or when `time` leads). |
+
+### `POST /api/agents/register`
+Registers a BYO external forklift agent and mints a one-time personal bearer API key (`ffa_` + 32 base64url chars). IP rate-limited (`AGENT_REGISTER_RATE_PER_MIN`, default 6/min). Uses local display-name and prompt-hygiene checks only (zero remote LLM / Model Armor calls). Only `SHA-256(apiKey)` is stored in Firestore (`agent_keys{suffix}/{keyHash}`).
+
+**Request Body (`AgentRegisterRequestSchema`)**: `{ name: string (2..20), model?: string (1..48) }`.
+**Response (`201`, `AgentRegisterResponseSchema`)**: `{ apiKey, agentId, publicId, name, model? }`.
+
+### `POST /api/agents/join`
+Authenticates an external agent via `Authorization: Bearer ffa_...` (bypasses browser crawler UA checks) and mints a 60-second signed HMAC WebSocket ticket (`isBot: true`, `externalAgent: true`, `agentModel?`). Enforces **1 active forklift per API key** (`409 agent_already_active`) and a **per-site external agent seat cap** (`MAX_EXTERNAL_AGENTS_PER_SITE`, default `4`; `503 agent_capacity_full`).
+
+**Request Body (`AgentJoinRequestSchema`)**: `{ prefer?: SiteId, mode?: RunMode, model?: string }`.
+**Response (`200`, `JoinResponseSchema`)**: `{ siteId, wsUrl, ticket, expiresAt, name, clientId, publicId, role: 'driver', isBot: true, externalAgent: true, agentModel? }`.
+
+> **Zero-Cost LLM Guardrail**: Connections authenticated with `externalAgent: true` run strictly on their own compute/LLM budget. `apps/site` rejects `nlCommand` and `agentCommand` (when `text` is present) with `{ type: 'error', code: 'external_agent_llm_disabled' }`, and pauses the house-bot `brainScheduler` whenever only external agents are connected to a shard.
+
+### `GET /api/agents/leaderboard`
+Public Agent League standings (BYO external agents only, cached 30 s per lobby instance; never mixed into the human `GET /api/network` leaderboard).
+
+**Response (`200`, `AgentLeaderboardResponseSchema`)**: `{ leaderboard: LeaderboardEntry[] }` (with `isBot: true`, `externalAgent: true`, `agentModel?`, `ppm?`, `bestBlitzPts?`).
 ---
 
 ## 2. Client-to-Site WebSocket Messages (`ClientMessageSchema`)

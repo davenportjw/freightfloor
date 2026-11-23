@@ -74,7 +74,14 @@ describe('@warehouse/lobby: agent discovery', () => {
     expect(spec.statusCode).toBe(200);
     const doc = JSON.parse(spec.body);
     expect(doc.openapi).toBe('3.1.0');
-    expect(Object.keys(doc.paths)).toEqual(['/api/network', '/api/daily', '/healthz/']);
+    expect(Object.keys(doc.paths)).toEqual([
+      '/api/network',
+      '/api/daily',
+      '/api/agents/register',
+      '/api/agents/join',
+      '/api/agents/leaderboard',
+      '/healthz/',
+    ]);
   });
 
   it('publishes an agent skills index whose digest matches the served SKILL.md', async () => {

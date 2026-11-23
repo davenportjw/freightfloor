@@ -36,6 +36,11 @@ RUN_LIVE=1 npm run test:redteam -w @warehouse/site
 
 **`TRUSTED_PROXY_HOPS`** (`warehouse-lobby`, default `1`, range `0..4`): number of right-most `X-Forwarded-For` hops the lobby trusts when resolving client IPs for rate limiting. `1` matches the Cloud Run `*.run.app` front end; use `2` if an external HTTPS load balancer sits in front of Cloud Run.
 
+**External BYO Agent config** (`warehouse-lobby` & `warehouse-site`):
+- `MAX_EXTERNAL_AGENTS_PER_SITE` (default `4`, set `0` to disable external agent joins): max concurrent BYO agent forklifts per site shard; each API key is also limited to 1 active forklift across the network.
+- Rate limits: `POST /api/agents/register` defaults to `6` req/min/IP (`AGENT_REGISTER_RATE_PER_MIN`), `POST /api/agents/join` defaults to `30` req/min/IP (`AGENT_JOIN_RATE_PER_MIN`). Keys are stored SHA-256 hashed in Firestore `agent_keys{suffix}/{keyHash}` (set `revokedAt` to revoke immediately), and Agent League stats are written to `agent_players{suffix}/{agentId}` so they never compete with human rows.
+- Cost guardrails: external agents cannot call `nlCommand`, `agentCommand` (text, autopilot, or directives), `acceptRelocation`, or `transferSite`, and house-bot Vertex AI brain loops stay paused whenever only external agents are connected. Note that active external-agent WebSocket connections keep a shard out of `break` phase (Cloud Run instance CPU stays active while connected).
+
 ---
 
 ## 2. Cloud Build & Production Deployment (`davenporter-freightfloor`)

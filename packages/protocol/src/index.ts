@@ -285,6 +285,15 @@ export type JoinRequest = z.infer<typeof JoinRequestSchema>;
 export const RESUME_TOKEN_PATTERN = /^wr1_[A-Za-z0-9_-]{32}$/;
 export const ResumeTokenSchema = z.string().regex(RESUME_TOKEN_PATTERN);
 
+/** Lobby-issued external agent bearer key (`POST /api/agents/register`, sent via `Authorization: Bearer`). */
+export const AGENT_KEY_PREFIX = 'ffa_';
+export const AGENT_KEY_PATTERN = /^ffa_[A-Za-z0-9_-]{32}$/;
+export const AgentKeySchema = z.string().regex(AGENT_KEY_PATTERN);
+
+/** Safe self-declared model/runtime label for external agents (e.g. `gemini-3.5-flash`, `rust-astar`). */
+export const AGENT_MODEL_PATTERN = /^[A-Za-z0-9._:/ -]{1,48}$/;
+export const AgentModelSchema = z.string().trim().regex(AGENT_MODEL_PATTERN);
+
 /**
  * Opaque public player id (`p1_` + 22 base64url chars), derived by the lobby/site from the raw
  * clientId. Every player id the site or the leaderboard sends is a publicId; the raw clientId is a
@@ -292,6 +301,30 @@ export const ResumeTokenSchema = z.string().regex(RESUME_TOKEN_PATTERN);
  */
 export const PUBLIC_ID_PATTERN = /^p1_[A-Za-z0-9_-]{22}$/;
 export const PublicIdSchema = z.string().regex(PUBLIC_ID_PATTERN);
+
+export const AgentRegisterRequestSchema = z.object({
+  name: z.string().min(2).max(20),
+  model: AgentModelSchema.optional(),
+});
+export type AgentRegisterRequest = z.infer<typeof AgentRegisterRequestSchema>;
+
+export const AgentRegisterResponseSchema = z.object({
+  apiKey: AgentKeySchema,
+  agentId: z.string().min(4).max(64),
+  publicId: PublicIdSchema,
+  name: z.string().min(2).max(20),
+  model: AgentModelSchema.optional(),
+});
+export type AgentRegisterResponse = z.infer<typeof AgentRegisterResponseSchema>;
+
+export const AgentJoinRequestSchema = z.object({
+  prefer: SiteIdSchema.optional(),
+  preferredSite: SiteIdSchema.optional(),
+  mode: RunModeSchema.optional(),
+  runMode: RunModeSchema.optional(),
+  model: AgentModelSchema.optional(),
+});
+export type AgentJoinRequest = z.infer<typeof AgentJoinRequestSchema>;
 
 export const JoinResponseSchema = z.object({
   siteId: SiteIdSchema,
@@ -302,6 +335,10 @@ export const JoinResponseSchema = z.object({
   clientId: z.string().min(1).max(128).optional(),
   role: z.enum(['driver', 'spectator']).optional(),
   isBot: z.boolean().optional(),
+  /** True when this seat belongs to a BYO external agent (`POST /api/agents/join`). */
+  externalAgent: z.boolean().optional(),
+  /** Optional self-declared model/runtime label for external agents. */
+  agentModel: AgentModelSchema.optional(),
   queue: QueueStatusSchema.optional(),
   /** Human joins only: the player's resume code (store it; show it as the "resume code"). */
   resumeToken: ResumeTokenSchema.optional(),
@@ -346,10 +383,19 @@ export const LeaderboardEntrySchema = z.object({
   /** Optional pallets-per-minute; rendered only when a server supplies it (not populated yet). */
   ppm: z.number().nonnegative().optional(),
   isBot: z.boolean().optional(),
+  /** True when this entry belongs to a BYO external agent (Agent League leaderboard). */
+  externalAgent: z.boolean().optional(),
+  /** Optional self-declared model/runtime label for external agents. */
+  agentModel: AgentModelSchema.optional(),
 });
 export const PlayerLeaderboardEntrySchema = LeaderboardEntrySchema;
 export type LeaderboardEntry = z.infer<typeof LeaderboardEntrySchema>;
 export type PlayerLeaderboardEntry = LeaderboardEntry;
+
+export const AgentLeaderboardResponseSchema = z.object({
+  leaderboard: z.array(LeaderboardEntrySchema),
+});
+export type AgentLeaderboardResponse = z.infer<typeof AgentLeaderboardResponseSchema>;
 
 export const NetworkResponseSchema = z.object({
   sites: z.array(SiteStatusSchema),
@@ -366,6 +412,10 @@ export const TicketPayloadSchema = z.object({
   name: z.string().min(1),
   siteId: SiteIdSchema,
   isBot: z.boolean(),
+  /** True for external BYO agents joined via `POST /api/agents/join` (server-side LLMs disabled). */
+  externalAgent: z.boolean().optional(),
+  /** Optional self-declared model/runtime label for external agents. */
+  agentModel: AgentModelSchema.optional(),
   exp: z.number().int().nonnegative(),
   runMode: RunModeSchema.optional(),
   carryPts: z.number().int().min(0).optional(),

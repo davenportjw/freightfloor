@@ -61,7 +61,14 @@ import {
   type TrialGhostStore,
 } from './trials.js';
 
+import {
+  DEFAULT_MAX_EXTERNAL_AGENTS_PER_SITE,
+  registerAgentRoutes,
+  type StoredAgentKeyDoc,
+} from './agents.js';
+
 export * from './trials.js';
+export * from './agents.js';
 
 export const LOBBY_VERSION = 1;
 export const HEARTBEAT_STALE_MS = 15_000;
@@ -170,6 +177,8 @@ export interface StoredSiteDoc {
    * assignments). Used so shared seat holds are not double-counted once a driver is visible.
    */
   driverClientIds?: string[];
+  /** Connected BYO external agent clientIds reported by the site heartbeat. */
+  externalAgentClientIds?: string[];
   /**
    * clientIds the site heartbeat itself reports as connected drivers (excludes this instance's
    * pending assignments). A `claimed` seat hold for a clientId listed here is released at once:
@@ -192,6 +201,10 @@ export interface StoredPlayerDoc {
   ppm?: number;
   deliveries: number;
   isBot?: boolean;
+  /** True for BYO external agents joined via `/api/agents/join`. */
+  externalAgent?: boolean;
+  /** Optional self-declared model/runtime label for external agents. */
+  agentModel?: string;
   updatedAt?: number;
   /** SHA-256 (hex) of the player's secret resume code; the raw code is never stored. */
   resumeTokenHash?: string;
@@ -286,6 +299,12 @@ export interface LobbyStore {
   trialGhosts?: TrialGhostStore;
   /** Stored human callsign for a raw clientId (`players/{clientId}.name`), or null. */
   getPlayerName?(clientId: string): Promise<string | null>;
+  /** Persist a newly minted external agent key record (keyed by SHA-256 `keyHash`). */
+  createAgentKey?(doc: StoredAgentKeyDoc): Promise<void>;
+  /** Look up an external agent key record by SHA-256 `keyHash`, or null if unknown. */
+  lookupAgentKey?(keyHash: string): Promise<StoredAgentKeyDoc | null>;
+  /** Top external BYO agents for the Agent League leaderboard. */
+  getTopAgents?(limit: number): Promise<StoredPlayerDoc[]>;
 }
 
 /** Public fields of a `daily{suffix}/{dayKey}/daily_scores/{clientId}` doc (written by the site). */
@@ -647,6 +666,12 @@ export class FirestoreLobbyStore implements LobbyStore {
       const wokenExp = this.wokenUntil.get(id) ?? 0;
       const isRecentlyWoken = wokenExp > nowMs;
 
+      const externalAgentClientIds = Array.isArray(data.externalAgentClientIds)
+        ? data.externalAgentClientIds.filter(
+            (cid: unknown): cid is string => typeof cid === 'string' && cid.length > 0,
+          )
+        : [];
+
       byId.set(id, {
         id,
         state: isRecentlyWoken
@@ -655,6 +680,7 @@ export class FirestoreLobbyStore implements LobbyStore {
         phase: isRecentlyWoken ? 'running' : data.phase,
         drivers,
         driverClientIds: countedDriverIds,
+        externalAgentClientIds,
         connectedDriverClientIds: driverClientIds,
         spectators: typeof data.spectators === 'number' ? data.spectators : 0,
         tier: typeof data.tier === 'number' ? data.tier : 0,
@@ -776,6 +802,78 @@ export class FirestoreLobbyStore implements LobbyStore {
     return players
       .filter((p) => !p.isBot && !isReservedBotPrefix(p.name))
       .sort((a, b) => (b.points ?? 0) - (a.points ?? 0))
+      .slice(0, limit);
+  }
+
+  async createAgentKey(doc: StoredAgentKeyDoc): Promise<void> {
+    await this.db.collection(this.colName('agent_keys')).doc(doc.keyHash).set(doc);
+  }
+
+  async lookupAgentKey(keyHash: string): Promise<StoredAgentKeyDoc | null> {
+    const snap = await this.db.collection(this.colName('agent_keys')).doc(keyHash).get();
+    if (!snap.exists) return null;
+    const data = snap.data() as Partial<StoredAgentKeyDoc> | undefined;
+    if (!data || typeof data.agentId !== 'string' || typeof data.name !== 'string') return null;
+    return {
+      keyHash: typeof data.keyHash === 'string' ? data.keyHash : keyHash,
+      agentId: data.agentId,
+      publicId: typeof data.publicId === 'string' ? data.publicId : '',
+      name: data.name,
+      ...(typeof data.model === 'string' ? { model: data.model } : {}),
+      createdAt: typeof data.createdAt === 'number' ? data.createdAt : 0,
+      ...(typeof data.revokedAt === 'number' ? { revokedAt: data.revokedAt } : {}),
+    };
+  }
+
+  async getTopAgents(limit: number): Promise<StoredPlayerDoc[]> {
+    // Dedicated `agent_players{suffix}` collection ranked server-side on `totalScore`
+    // (single-field index, never starved by human rows, identical sort key to MemoryLobbyStore).
+    const snap = await this.db
+      .collection(this.colName('agent_players'))
+      .orderBy('totalScore', 'desc')
+      .limit(Math.max(1, limit))
+      .get();
+    const agents: StoredPlayerDoc[] = [];
+    snap.forEach((doc) => {
+      const data = doc.data();
+      const clientId = String(data.clientId || doc.id);
+      const name = String(data.name || 'Agent');
+      const points =
+        typeof data.points === 'number'
+          ? data.points
+          : typeof data.lifetimePoints === 'number'
+            ? data.lifetimePoints
+            : typeof data.totalScore === 'number'
+              ? data.totalScore
+              : 0;
+      const lifetimePoints =
+        typeof data.lifetimePoints === 'number' ? data.lifetimePoints : points;
+      const bestBlitzPts =
+        typeof data.bestBlitzPts === 'number' ? data.bestBlitzPts : undefined;
+      const ppm = normalizePpm(data.ppm);
+      const deliveries =
+        typeof data.deliveries === 'number'
+          ? data.deliveries
+          : typeof data.totalDeliveries === 'number'
+            ? data.totalDeliveries
+            : 0;
+      const siteRaw = String(data.siteId || data.lastSiteId || '');
+      agents.push({
+        clientId,
+        name,
+        siteId: isValidSiteId(siteRaw) ? siteRaw : undefined,
+        points,
+        lifetimePoints,
+        ...(bestBlitzPts !== undefined ? { bestBlitzPts } : {}),
+        ...(ppm !== undefined ? { ppm } : {}),
+        deliveries,
+        isBot: true,
+        externalAgent: true,
+        ...(typeof data.agentModel === 'string' ? { agentModel: data.agentModel } : {}),
+      });
+    });
+    return agents
+      .sort((a, b) => (b.points ?? b.lifetimePoints ?? 0) - (a.points ?? a.lifetimePoints ?? 0))
       .slice(0, limit);
   }
 
@@ -1199,6 +1297,38 @@ export class InMemoryLobbyStore implements LobbyStore {
         ...p,
         points: p.points ?? p.lifetimePoints ?? 0,
         lifetimePoints: p.lifetimePoints ?? p.points ?? 0,
+      }));
+  }
+
+  private readonly agentKeys = new Map<string, StoredAgentKeyDoc>();
+
+  async createAgentKey(doc: StoredAgentKeyDoc): Promise<void> {
+    this.agentKeys.set(doc.keyHash, { ...doc });
+  }
+
+  async lookupAgentKey(keyHash: string): Promise<StoredAgentKeyDoc | null> {
+    const found = this.agentKeys.get(keyHash);
+    return found ? { ...found } : null;
+  }
+
+  revokeAgentKey(keyHash: string, nowMs: number = Date.now()): void {
+    const found = this.agentKeys.get(keyHash);
+    if (found) {
+      this.agentKeys.set(keyHash, { ...found, revokedAt: nowMs });
+    }
+  }
+
+  async getTopAgents(limit: number): Promise<StoredPlayerDoc[]> {
+    return Array.from(this.players.values())
+      .filter((p) => Boolean(p.externalAgent))
+      .sort((a, b) => (b.points ?? b.lifetimePoints ?? 0) - (a.points ?? a.lifetimePoints ?? 0))
+      .slice(0, limit)
+      .map((p) => ({
+        ...p,
+        points: p.points ?? p.lifetimePoints ?? 0,
+        lifetimePoints: p.lifetimePoints ?? p.points ?? 0,
+        isBot: true,
+        externalAgent: true,
       }));
   }
 
@@ -1720,6 +1850,12 @@ export interface LobbyServerOptions {
   trustedProxyHops?: number;
   /** GA4 measurement ID served to the client via `/api/config` (default `GA_MEASUREMENT_ID`; null = off). */
   gaMeasurementId?: string | null;
+  /** Max concurrent external BYO agent drivers per site (default `MAX_EXTERNAL_AGENTS_PER_SITE` or 4). */
+  maxExternalAgentsPerSite?: number;
+  /** Per-IP rate limit for `POST /api/agents/register` (req/min). */
+  agentRegisterRatePerMin?: number;
+  /** Per-IP rate limit for `POST /api/agents/join` (req/min). */
+  agentJoinRatePerMin?: number;
 }
 
 export type LobbyOptions = LobbyServerOptions;
@@ -3007,6 +3143,27 @@ export async function buildLobbyServer(opts: LobbyServerOptions = {}): Promise<F
     },
     isCrawler: isCrawlerUserAgent,
     allowSubmit: (ip, nowMs) => trialLimiter.allow(ip, nowMs),
+  });
+
+  // ---- External BYO forklift agent registration, join, and Agent League leaderboard ----
+  const envMaxExtAgents = Number(process.env.MAX_EXTERNAL_AGENTS_PER_SITE);
+  const maxExternalAgentsPerSite =
+    opts.maxExternalAgentsPerSite ??
+    (Number.isFinite(envMaxExtAgents) && envMaxExtAgents >= 0
+      ? Math.floor(envMaxExtAgents)
+      : DEFAULT_MAX_EXTERNAL_AGENTS_PER_SITE);
+  registerAgentRoutes(app, {
+    store,
+    ticketSecret: secret,
+    nowFn,
+    toPublicId: (clientId) => publicIdFor(clientId, secret),
+    publicLobbyWsUrl,
+    withJoinLock,
+    recordInternalSiteUrls,
+    maxExternalAgentsPerSite,
+    maxWarehouses,
+    registerRatePerMin: opts.agentRegisterRatePerMin,
+    joinRatePerMin: opts.agentJoinRatePerMin,
   });
 
   app.get('/api/network', async (req, reply) => {

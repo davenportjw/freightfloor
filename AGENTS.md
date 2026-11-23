@@ -11,6 +11,7 @@ This guide applies across **Google Antigravity (`agy`)**, **OpenAI Codex CLI (`c
 - **`packages/protocol` (`@warehouse/protocol`)**: Shared Zod runtime schemas (`ClientMessageSchema`, `ServerMessageSchema`), wire quantization, regional `SITE_THEMES`, and TypeScript contracts.
 - **`packages/sim` (`@warehouse/sim`)**: Deterministic 10 Hz warehouse physics, A* pathfinding, occupancy reservations, contract generation, and AI driver archetypes (`Sprinter`, `Steady`, `Batcher`, `Opportunist`, `Strategist`).
 - **`packages/armor` (`@warehouse/armor`)**: Multi-layer prompt injection defense, regex/heuristic sanitization (`sanitizeDirective`), and Google Cloud Model Armor screening.
+- **`packages/agent-sdk` (`@warehouse/agent-sdk`)**: External BYO forklift agent SDK (`FreightFloorAgentClient`, local 10 Hz `PilotLoop`, highway/aisle steering, and heuristic/BYO-LLM examples).
 - **`apps/lobby` (`@warehouse/lobby`)**: Public Fastify gateway (`POST /api/join`, `GET /api/network`, `/api/queue*`, static client assets, and authenticated `/ws?site=<siteId>` WebSocket reverse proxy).
 - **`apps/site` (`@warehouse/site`)**: Authoritative regional shard server (`site-den-1`, `site-slc-2`, `site-phx-3`, `site-abq-4`), Firestore persistence, Pub/Sub cross-site pallet transfers, and Vertex AI (`gemini-3.5-flash-lite`) brain loops.
 - **`apps/client` (`@warehouse/client`)**: Vite + hybrid 2:1 isometric Canvas2D renderer (`Painter`) and HUD v3 (`Drive` and `Floor` modes).

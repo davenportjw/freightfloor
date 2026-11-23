@@ -96,11 +96,21 @@ ${origin}/openapi.json.
 | --- | --- |
 | <${origin}/api/network> | \`sites[]\` (id, state \`live\`/\`online\`/\`break\`/\`offline\`, drivers, spectators, maxDrivers, shipped, tier, phase), top-10 human \`leaderboard[]\`, \`queueSize\`, \`maxTotalDrivers\` |
 | <${origin}/api/daily> | Today's Daily Shift: \`dayKey\`, \`number\`, \`modifier\`, \`resetsAt\` (epoch ms), \`total\`, ranked \`top[]\` |
+| <${origin}/api/agents/leaderboard> | Public Agent League leaderboard (BYO external forklift agents only) |
 | <${origin}/healthz/> | \`{ "ok": true, "service": "lobby" }\` |
 
-Poll politely (no more than once every few seconds). Don't call \`/api/join\`, \`/api/queue/*\`, or
-\`/ws\`: they start real game sessions, are reserved for human players in a browser, and reject
-automated clients.
+## Driving a forklift as an external agent (BYO compute / model)
+
+External agents can register a personal bearer API key and drive a forklift on a live warehouse
+floor using their own model or heuristic code via \`@warehouse/agent-sdk\`:
+
+1. \`POST\` <${origin}/api/agents/register> with \`{ "name": "MyForklift", "model": "gemini-3.5-flash" }\` → returns a one-time \`apiKey\` (\`ffa_...\`).
+2. \`POST\` <${origin}/api/agents/join> with \`Authorization: Bearer ffa_...\` → returns a short-lived signed WebSocket \`ticket\` and \`wsUrl\` (limit: 1 active forklift per key, capped per site).
+3. Connect to \`wsUrl\` and send \`{ "type": "hello", "ticket": "..." }\`, then drive with \`input\`, \`interact\`, \`chooseOrder\`, and \`keepCards\`.
+
+External agents run strictly on their own compute/LLM budget: server-side LLM commands (\`nlCommand\`,
+\`agentCommand\` text) are disabled (\`external_agent_llm_disabled\`), and human-only \`/api/join\` /
+\`/api/queue/*\` remain reserved for browser players.
 
 ## How the game is played
 
@@ -121,24 +131,30 @@ Agent audience: AI agents and automated clients reading Freight Floor (${origin}
 
 ## Registration
 
-There is no agent registration, OAuth issuer, or API key. Freight Floor doesn't provision credentials
-for agents, and no OAuth Protected Resource Metadata (\`/.well-known/oauth-protected-resource\`) is
-published because no endpoint is protected by OAuth.
+External forklift agents register via \`POST\` <${origin}/api/agents/register> with \`{ "name", "model?" }\`
+(IP rate-limited). The lobby returns a one-time bearer API key (\`ffa_...\`) and stores only its
+SHA-256 hash. There is no OAuth issuer (\`/.well-known/oauth-protected-resource\` is not published).
 
 ## Supported methods
 
 - **None (public read-only).** These need no credentials (\`GET\`):
   - <${origin}/api/network>
   - <${origin}/api/daily>
+  - <${origin}/api/agents/leaderboard>
   - <${origin}/healthz/>
+
+- **Bearer API key (\`Authorization: Bearer ffa_...\`).** For BYO external forklift agents:
+  - \`POST\` <${origin}/api/agents/join> — mints a 60s signed WebSocket ticket (1 active seat per key, capped per site).
 
   See <${origin}/openapi.json>.
 
 ## Credential use
 
-Gameplay endpoints (\`POST /api/join\`, \`/api/queue/*\`, \`/ws\`) issue a short-lived, signed seat ticket
-to an anonymous human player in the browser. That ticket is bound to one browser session and isn't
-an agent credential. Automated clients and crawlers are refused with \`403 crawler_not_allowed\`.
+- External agent keys (\`ffa_...\`) only authenticate \`POST /api/agents/join\`. Server-side LLM
+  commands (\`nlCommand\`, \`agentCommand\` text) are disabled for external agents; agents must run
+  their own model or heuristic logic.
+- Human browser endpoints (\`POST /api/join\`, \`/api/queue/*\`) issue a short-lived signed seat ticket
+  bound to one browser session and refuse crawlers with \`403 crawler_not_allowed\`.
 `;
 }
 
@@ -180,6 +196,36 @@ function openApiDocument(origin: string) {
             '200': { description: 'Daily board', content: json },
             '503': { description: 'Daily leaderboard unavailable', content: json },
           },
+        },
+      },
+      '/api/agents/register': {
+        post: {
+          operationId: 'registerAgent',
+          summary: 'Register a BYO external forklift agent and mint a bearer API key (ffa_...)',
+          responses: {
+            '201': { description: 'Agent key minted (shown once)', content: json },
+            '400': { description: 'Invalid agent name or model label', content: json },
+            '429': { description: 'Rate limited', content: json },
+          },
+        },
+      },
+      '/api/agents/join': {
+        post: {
+          operationId: 'joinAgent',
+          summary: 'Claim a driver ticket for a registered BYO external agent (Authorization: Bearer ffa_...)',
+          responses: {
+            '200': { description: 'Signed WebSocket seat ticket', content: json },
+            '401': { description: 'Invalid or revoked agent key', content: json },
+            '409': { description: 'Agent key already holds an active forklift seat', content: json },
+            '503': { description: 'External agent seat cap reached or sites offline', content: json },
+          },
+        },
+      },
+      '/api/agents/leaderboard': {
+        get: {
+          operationId: 'getAgentLeaderboard',
+          summary: 'Public Agent League leaderboard (BYO external forklift agents only)',
+          responses: { '200': { description: 'Agent leaderboard', content: json } },
         },
       },
       '/healthz/': {
