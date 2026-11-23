@@ -7,6 +7,7 @@ COPY package.json package-lock.json* tsconfig.base.json ./
 COPY packages/protocol/package.json packages/protocol/tsconfig.json ./packages/protocol/
 COPY packages/armor/package.json packages/armor/tsconfig.json ./packages/armor/
 COPY packages/sim/package.json packages/sim/tsconfig.json ./packages/sim/
+COPY packages/agent-sdk/package.json ./packages/agent-sdk/
 COPY tools/loadtest/package.json ./tools/loadtest/
 COPY tools/smoke/package.json ./tools/smoke/
 COPY apps/client/package.json apps/client/tsconfig.json ./apps/client/
